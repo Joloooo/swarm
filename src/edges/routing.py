@@ -41,12 +41,15 @@ def route_after_recon(state: SwarmGraphState) -> list[Send]:
     if not configs:
         return [Send("report", state)]
 
+    mode = state.get("mode", "analyze")
+
     return [
-        Send("swarm_agent", {
+        Send("pentest_workflow", {
             **state,
             "agent_id": config.agent_id,
             "config_name": config.config_name,
             "methodology": config.methodology,
+            "mode": mode,
         })
         for config in configs
     ]

@@ -50,14 +50,33 @@ class AgentConfig:
     llm_config: LLMConfig | None = None
 
 
+@dataclass
+class WorkflowConfig:
+    """Multi-step workflow definition. Wraps one or two AgentConfigs.
+
+    A workflow has two phases:
+    - analyze: always runs — identifies vulnerabilities
+    - exploit: only runs if mode="full" AND phase 1 found something
+
+    Single-phase configs are auto-wrapped with exploit=None by the registry.
+    """
+
+    config_name: str
+    analyze: AgentConfig
+    exploit: AgentConfig | None = None
+
+
 def _build_system_message(
     config: AgentConfig,
     target_url: str,
     runtime_config: dict | None = None,
+    phase1_findings: list[Finding] | None = None,
 ) -> str:
     """Assemble the full system prompt from config + knowledge layers.
 
     Respects ablation toggles from runtime_config.
+    When phase1_findings is provided, injects analysis results into
+    the prompt so the exploit phase knows what to target.
     """
     from src.config import is_enabled
 
@@ -78,6 +97,21 @@ def _build_system_message(
         from src.knowledge.prompts.base_rules import get_base_prompt
         stealth_level = rc.get("stealth", {}).get("initial_level", 0) if rc else 0
         parts.append(get_base_prompt(stealth_level))
+
+    # Phase 1 findings injection (for exploit phase)
+    if phase1_findings:
+        findings_text = "\n".join(
+            f"- [{f.severity.value.upper()}] {f.title}"
+            + (f" at {f.url}" if f.url else "")
+            + (f": {f.evidence[:200]}" if f.evidence else "")
+            for f in phase1_findings
+        )
+        parts.append(
+            "--- Analysis Phase Results ---\n"
+            "The analysis phase found the following vulnerabilities. "
+            "Focus your exploitation on these confirmed targets:\n"
+            f"{findings_text}\n"
+        )
 
     # Config-provided system prompt (attack instructions)
     if config.system_prompt:
@@ -177,7 +211,10 @@ def make_agent_node(
         target_url = state.get("target_url", "")
 
         # Build system message with all knowledge layers
-        system_msg = _build_system_message(config, target_url, runtime_config)
+        phase1_findings = state.get("phase1_findings")
+        system_msg = _build_system_message(
+            config, target_url, runtime_config, phase1_findings,
+        )
 
         # Create the react agent with iteration limit
         agent = create_react_agent(

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from benchmarks.metrics import BenchmarkMetrics
 from benchmarks.runner import load_targets, save_results
-from swarmattacker.graph import build_graph
+from src.graph import build_graph
 from benchmarks.metrics import compute_metrics
 
 logger = logging.getLogger(__name__)

@@ -15,9 +15,9 @@ import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from swarmattacker.agents.base import AgentConfig
-from swarmattacker.llm.provider import LLMConfig, get_llm
-from swarmattacker.tools.terminal import run_command
+from src.agents.base import AgentConfig
+from src.llm.provider import LLMConfig, get_llm
+from src.tools.terminal import run_command
 
 logger = logging.getLogger(__name__)
 

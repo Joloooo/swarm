@@ -17,8 +17,8 @@ from pathlib import Path
 
 import yaml
 
-from swarmattacker.config import load_config
-from swarmattacker.graph import build_graph
+from src.config import load_config
+from src.graph import build_graph
 from benchmarks.metrics import compute_metrics, BenchmarkMetrics
 
 logger = logging.getLogger(__name__)

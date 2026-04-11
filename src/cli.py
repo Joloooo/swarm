@@ -55,7 +55,7 @@ def main() -> None:
 
 
 async def run(target_url: str, target_scope: str) -> None:
-    from swarmattacker.graph import graph
+    from src.graph import graph
 
     result = await graph.ainvoke({
         "target_url": target_url,

@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from swarmattacker.state import Finding, Severity
+from src.state import Finding, Severity
 
 
 @dataclass

@@ -1,8 +1,8 @@
 """Cross-Site Scripting (XSS) specialist agent config."""
 
-from swarmattacker.agents.base import AgentConfig
-from swarmattacker.agents.configs.registry import register_config
-from swarmattacker.tools.terminal import run_command
+from src.agents.base import AgentConfig
+from src.agents.configs.registry import register_config
+from src.tools.terminal import run_command
 
 xss_config = AgentConfig(
     agent_id="vulntype-xss",

@@ -16,8 +16,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from swarmattacker.agents.base import AgentConfig
-from swarmattacker.agents.configs.registry import get_all_configs, get_config
+from src.agents.base import AgentConfig
+from src.agents.configs.registry import get_all_configs, get_config
 
 
 @dataclass

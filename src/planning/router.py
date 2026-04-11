@@ -27,6 +27,7 @@ class RoutingDecision:
     agent_configs: list[AgentConfig] = field(default_factory=list)
     reasoning: list[str] = field(default_factory=list)
     tier2_needed: bool = False  # True if routing confidence is low
+    mode: str = "analyze"  # "analyze" or "full" — passed through to pentest_workflow
 
 
 # Routing rules: (regex_pattern, config_name, reason)

@@ -44,6 +44,7 @@ class AgentResult:
     findings: list[Finding] = field(default_factory=list)
     error: str | None = None
     completed: bool = False
+    phase: str = "analyze"  # "analyze" or "exploit" — which workflow phase produced this
 
 
 def _merge_findings(left: list[Finding], right: list[Finding]) -> list[Finding]:
@@ -106,6 +107,9 @@ class SwarmGraphState(TypedDict, total=False):
     # Stealth
     waf_detected: bool
     stealth_level: int
+
+    # Workflow mode
+    mode: str  # "analyze" or "full" — controls whether exploit phase runs
 
     # Planning
     active_agents: Annotated[list[str], operator.add]

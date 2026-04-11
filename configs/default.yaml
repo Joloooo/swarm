@@ -1,0 +1,55 @@
+# SwarmAttacker — Default runtime configuration
+# Used by the ablation system. Override per-experiment in configs/experiments/
+
+# LLM settings
+llm:
+  provider: "anthropic"
+  model: "claude-sonnet-4-20250514"
+  temperature: 0.0
+  max_tokens: 4096
+
+# Knowledge system toggles (for ablation)
+knowledge:
+  base_rules: true     # Layer 1: prompt-embedded rules
+  skill_loading: true  # Layer 2: full technique docs per agent
+  rag: true            # Layer 3: dynamic vector store lookup
+
+# Agent system
+agents:
+  methodologies:
+    owasp: true
+    vulntype: true
+    custom: true
+  max_parallel: 10     # Max agents running simultaneously
+
+# Planning
+planning:
+  tier1_router: true   # Deterministic playbook router
+  tier2_planner: true  # Dynamic LLM planner (fallback)
+
+# Stealth
+stealth:
+  enabled: true
+  initial_level: 0     # 0=none, 1=cautious, 2=evasive
+
+# Loop detection
+loop_detection:
+  hard_cap: 50         # Absolute max tool calls per agent
+  repeated_threshold: 3 # Stop after N identical calls
+  budget_pressure: true # Reduce budget progressively
+
+# Context management
+context:
+  tool_result_budget: true  # Save large outputs to disk
+  output_truncation: true   # Keep first N + last N lines
+  auto_compaction: true     # Summarize when approaching limit
+  max_output_lines: 200     # Truncation threshold
+
+# Evaluation
+eval:
+  metrics:
+    - success_rate
+    - autonomy
+    - efficiency
+    - error_rate
+    - finding_quality

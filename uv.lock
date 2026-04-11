@@ -810,6 +810,7 @@ dependencies = [
     { name = "langgraph" },
     { name = "libtmux" },
     { name = "pydantic" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -820,6 +821,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=0.4" },
     { name = "libtmux", specifier = ">=0.40" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]

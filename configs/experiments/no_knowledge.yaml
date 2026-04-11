@@ -1,0 +1,7 @@
+# Ablation experiment: disable all knowledge layers
+# Tests LLM's baseline pentesting ability with zero enhancement
+
+knowledge:
+  base_rules: false
+  skill_loading: false
+  rag: false

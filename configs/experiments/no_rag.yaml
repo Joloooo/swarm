@@ -1,0 +1,5 @@
+# Ablation experiment: disable RAG (knowledge layer 3)
+# Tests whether dynamic knowledge retrieval improves finding quality
+
+knowledge:
+  rag: false

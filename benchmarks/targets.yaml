@@ -1,0 +1,77 @@
+# Benchmark targets for SwarmAttacker evaluation
+# Each target defines a vulnerable web application to test against
+
+targets:
+  # -- Docker-based (preferred for reproducibility) --
+  dvwa:
+    name: "Damn Vulnerable Web Application"
+    type: docker
+    image: "vulnerables/web-dvwa"
+    port: 80
+    url: "http://localhost:8080"
+    expected_vulns:
+      - sqli
+      - xss
+      - lfi
+      - command-injection
+      - csrf
+      - file-upload
+    difficulty: easy
+    notes: "Set security level to 'low' for initial testing"
+
+  juice_shop:
+    name: "OWASP Juice Shop"
+    type: docker
+    image: "bkimminich/juice-shop"
+    port: 3000
+    url: "http://localhost:3000"
+    expected_vulns:
+      - sqli
+      - xss
+      - idor
+      - auth-bypass
+      - ssrf
+      - xxe
+    difficulty: medium
+    notes: "Modern Node.js app with REST API + Angular frontend"
+
+  webgoat:
+    name: "OWASP WebGoat"
+    type: docker
+    image: "webgoat/webgoat"
+    port: 8080
+    url: "http://localhost:8080/WebGoat"
+    expected_vulns:
+      - sqli
+      - xss
+      - xxe
+      - idor
+      - auth-bypass
+    difficulty: medium
+
+  hackazon:
+    name: "Hackazon"
+    type: docker
+    image: "ianwijaya/hackazon"
+    port: 80
+    url: "http://localhost:8081"
+    expected_vulns:
+      - sqli
+      - xss
+      - csrf
+      - command-injection
+    difficulty: easy
+
+  # -- VulnHub VMs (require manual setup) --
+  metasploitable2:
+    name: "Metasploitable 2"
+    type: vm
+    url: "http://192.168.56.101"
+    expected_vulns:
+      - sqli
+      - lfi
+      - command-injection
+      - auth-bypass
+      - misconfiguration
+    difficulty: easy
+    notes: "Classic vulnerable VM. Set up in VirtualBox with host-only networking."

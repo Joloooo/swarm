@@ -1,0 +1,5 @@
+# Ablation experiment: disable stealth monitoring
+# Tests whether WAF/IDS evasion improves success rate on defended targets
+
+stealth:
+  enabled: false

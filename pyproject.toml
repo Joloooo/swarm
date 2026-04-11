@@ -1,0 +1,29 @@
+[project]
+name = "swarmattacker"
+version = "0.1.0"
+description = "Multi-methodology swarm penetration testing agent"
+readme = "README.md"
+authors = [
+    { name = "Zviad Jolokhava", email = "z.jolokhava@chainmatics.net" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "langgraph>=0.4",
+    "langchain-core>=0.3",
+    "langchain-openai>=0.3",
+    "langchain-anthropic>=0.3",
+    "pydantic>=2.0",
+    "libtmux>=0.40",
+]
+
+[project.scripts]
+swarmattacker = "swarmattacker.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["swarmattacker"]
+
+[tool.uv.sources]

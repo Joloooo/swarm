@@ -1,0 +1,8 @@
+{
+  "$schema": "https://langchain-ai.github.io/langgraph/schemas/langgraph.json",
+  "graphs": {
+    "swarm": "./swarmattacker/graph.py:graph"
+  },
+  "env": ".env",
+  "dependencies": ["."]
+}

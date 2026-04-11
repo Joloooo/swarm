@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from swarmattacker.state import AgentResult, Finding, Severity
+from src.state import AgentResult, Finding, Severity
 
 
 SEVERITY_WEIGHTS = {

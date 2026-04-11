@@ -1,8 +1,8 @@
 """Business logic testing agent config — OWASP Business Logic."""
 
-from swarmattacker.agents.base import AgentConfig
-from swarmattacker.agents.configs.registry import register_config
-from swarmattacker.tools.terminal import run_command
+from src.agents.base import AgentConfig
+from src.agents.configs.registry import register_config
+from src.tools.terminal import run_command
 
 business_logic_config = AgentConfig(
     agent_id="owasp-business-logic",

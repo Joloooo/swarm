@@ -18,14 +18,14 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
-from swarmattacker.agents.base import AgentConfig, make_agent_node
-from swarmattacker.agents.configs.registry import get_all_configs, get_config
-from swarmattacker.config import is_enabled, load_config
-from swarmattacker.llm.provider import LLMConfig, get_llm
-from swarmattacker.planning.router import route
-from swarmattacker.state import SwarmGraphState
-from swarmattacker.stealth.monitor import StealthMonitor
-from swarmattacker.tools.terminal import run_command
+from src.agents.base import AgentConfig, make_agent_node
+from src.agents.configs.registry import get_all_configs, get_config
+from src.config import is_enabled, load_config
+from src.llm.provider import LLMConfig, get_llm
+from src.planning.router import route
+from src.state import SwarmGraphState
+from src.stealth.monitor import StealthMonitor
+from src.tools.terminal import run_command
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +167,7 @@ async def check_tier2(state: SwarmGraphState) -> dict:
             break
 
     try:
-        from swarmattacker.planning.planner import dynamic_plan
+        from src.planning.planner import dynamic_plan
 
         dynamic_configs = await dynamic_plan(
             recon_output=recon_output,

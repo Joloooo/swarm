@@ -1,8 +1,8 @@
 """SQL Injection specialist agent config — Shannon-style vulnerability focus."""
 
-from swarmattacker.agents.base import AgentConfig
-from swarmattacker.agents.configs.registry import register_config
-from swarmattacker.tools.terminal import run_command
+from src.agents.base import AgentConfig
+from src.agents.configs.registry import register_config
+from src.tools.terminal import run_command
 
 sqli_config = AgentConfig(
     agent_id="vulntype-sqli",

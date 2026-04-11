@@ -18,13 +18,13 @@ dependencies = [
 ]
 
 [project.scripts]
-swarmattacker = "swarmattacker.cli:main"
+swarmattacker = "src.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/swarmattacker"]
+packages = ["src"]
 
 [tool.uv.sources]

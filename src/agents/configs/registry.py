@@ -6,7 +6,7 @@ and custom/ subdirectories. This registry discovers and indexes them.
 
 from __future__ import annotations
 
-from swarmattacker.agents.base import AgentConfig
+from src.agents.base import AgentConfig
 
 # -- Config store (populated by register_config calls in config modules) --
 _CONFIGS: dict[str, AgentConfig] = {}
@@ -46,4 +46,4 @@ def _ensure_loaded() -> None:
     _loaded = True
 
     # Import config modules — each one calls register_config() at module level
-    from swarmattacker.agents.configs import owasp, vulntype, custom  # noqa: F401
+    from src.agents.configs import owasp, vulntype, custom  # noqa: F401

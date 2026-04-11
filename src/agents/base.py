@@ -19,8 +19,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.tools import BaseTool
 from langgraph.prebuilt import create_react_agent
 
-from swarmattacker.llm.provider import LLMConfig, get_llm
-from swarmattacker.state import AgentResult, AgentState, Finding, Severity
+from src.llm.provider import LLMConfig, get_llm
+from src.state import AgentResult, AgentState, Finding, Severity
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ def _build_system_message(
 
     Respects ablation toggles from runtime_config.
     """
-    from swarmattacker.config import is_enabled
+    from src.config import is_enabled
 
     rc = runtime_config or {}
     parts = []
@@ -75,7 +75,7 @@ def _build_system_message(
 
     # Knowledge layer 1: base rules (toggleable)
     if is_enabled(rc, "knowledge", "base_rules") if rc else True:
-        from swarmattacker.knowledge.prompts.base_rules import get_base_prompt
+        from src.knowledge.prompts.base_rules import get_base_prompt
         stealth_level = rc.get("stealth", {}).get("initial_level", 0) if rc else 0
         parts.append(get_base_prompt(stealth_level))
 
@@ -85,7 +85,7 @@ def _build_system_message(
 
     # Knowledge layer 2: skill loading (toggleable)
     if is_enabled(rc, "knowledge", "skill_loading") if rc else True:
-        from swarmattacker.knowledge.skills.loader import load_skills
+        from src.knowledge.skills.loader import load_skills
         # Load by skill_names first, then fall back to direct paths
         if config.skill_names:
             skill_content = load_skills(config.skill_names)

@@ -18,13 +18,19 @@ def route_after_recon(state: SwarmGraphState) -> list[Send]:
     Uses LangGraph's Send() to fan out to parallel agent nodes.
     The router analyzes recon output and selects relevant agents.
     """
-    # Extract recon output from the last AI message
+    # Extract recon output from the last *agent* AI message. Skip boundary
+    # messages emitted by graph.py:traced() (tagged with additional_kwargs
+    # {"node": ...}) and refusal/error tags — we only want real agent output.
     messages = state.get("messages", [])
     recon_output = ""
     for msg in reversed(messages):
-        if isinstance(msg, AIMessage) and msg.content:
-            recon_output = msg.content if isinstance(msg.content, str) else str(msg.content)
-            break
+        if not isinstance(msg, AIMessage) or not msg.content:
+            continue
+        kw = getattr(msg, "additional_kwargs", {}) or {}
+        if kw.get("node") or kw.get("refusal") or kw.get("error"):
+            continue
+        recon_output = msg.content if isinstance(msg.content, str) else str(msg.content)
+        break
 
     # Run Tier 1 router
     decision = route(recon_output)

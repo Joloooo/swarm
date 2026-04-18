@@ -26,7 +26,9 @@ from src.state import SwarmGraphState
 logger = logging.getLogger(__name__)
 
 
-_NextNode = Literal["recon", "playbook_dispatch", "dynamic_dispatch", "report"]
+_NextNode = Literal[
+    "recon", "playbook_dispatch", "dynamic_dispatch", "web_search", "report"
+]
 
 
 def route_after_planner(state: SwarmGraphState) -> _NextNode:
@@ -39,6 +41,8 @@ def route_after_planner(state: SwarmGraphState) -> _NextNode:
         return "playbook_dispatch"
     if action == "dynamic":
         return "dynamic_dispatch"
+    if action == "web_search":
+        return "web_search"
     if action == "report":
         return "report"
 

@@ -130,6 +130,9 @@ class SwarmGraphState(TypedDict, total=False):
     # Convenience flag the planner can check to avoid asking for recon
     # again when it has already run at least once.
     recon_done: bool
+    # Query string the planner asked the web_search node to run. Set
+    # only when next_action == "web_search"; read by web_search_node.
+    search_query: str
 
 
 class AgentState(TypedDict, total=False):

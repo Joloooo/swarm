@@ -1,17 +1,32 @@
-"""Initialize node — sets up the run with target info and defaults."""
+"""Initialize node — seeds defaults before the supervisor takes over.
 
-from langchain_core.messages import HumanMessage
+Runs once at graph start. The target URL is NOT set here — the
+supervisor planner populates ``target_url`` / ``target_scope`` on its
+first turn, after reading the user's message and calling
+``normalize_url``. This node only establishes the stealth baseline and
+the supervisor iteration counter.
+"""
+
+from langchain_core.messages import AIMessage
 
 from src.state import SwarmGraphState
 
 
 async def initialize_node(state: SwarmGraphState) -> dict:
-    """Set up the run: validate target, set defaults."""
+    """Seed stealth defaults and the planner iteration counter."""
     return {
         "waf_detected": False,
         "stealth_level": 0,
         "tier2_activated": False,
+        "planner_iters": 0,
+        "recon_done": False,
+        "pending_dispatch": [],
         "messages": [
-            HumanMessage(content=f"Starting penetration test against: {state['target_url']}")
+            AIMessage(
+                content=(
+                    "Starting SwarmAttacker planning session. Supervisor "
+                    "will read the user's request and decide the next step."
+                )
+            )
         ],
     }

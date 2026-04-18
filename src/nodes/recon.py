@@ -8,10 +8,17 @@ from src.state import SwarmGraphState
 
 
 async def recon_node(state: SwarmGraphState) -> dict:
-    """Run the reconnaissance agent."""
+    """Run the reconnaissance agent and mark recon as done for the planner."""
     recon_config = get_config("recon")
     if recon_config is None:
-        return {"messages": [AIMessage(content="ERROR: No recon config found.")]}
+        return {
+            "recon_done": True,
+            "messages": [AIMessage(content="ERROR: No recon config found.")],
+        }
 
     node_fn = make_agent_node(recon_config)
-    return await node_fn(state)
+    result = await node_fn(state)
+    # Flag recon_done so the supervisor can avoid asking for recon
+    # again on its next turn unless it explicitly wants a second pass.
+    result.setdefault("recon_done", True)
+    return result

@@ -93,7 +93,8 @@ from typing import TypedDict
 class SwarmGraphState(TypedDict, total=False):
     """The actual LangGraph state — TypedDict for graph compatibility."""
 
-    # Target
+    # Target (populated by the supervisor planner on its first turn,
+    # not by the CLI). Before the first planner turn these may be empty.
     target_url: str
     target_scope: str
 
@@ -113,7 +114,22 @@ class SwarmGraphState(TypedDict, total=False):
 
     # Planning
     active_agents: Annotated[list[str], operator.add]
-    tier2_activated: bool
+    tier2_activated: bool  # legacy flag kept for report_node compatibility
+
+    # -- Supervisor planner state (src/nodes/planner.py) --
+    # The action the planner chose on its most recent turn. Read by
+    # route_after_planner to pick the next node.
+    next_action: str  # "recon" | "playbook" | "dynamic" | "report"
+    # How many times the supervisor has been invoked this run. Capped
+    # to prevent runaway supervision loops.
+    planner_iters: int
+    # Configs the dispatch nodes (playbook_dispatch, dynamic_dispatch)
+    # stage for the shared fan-out edge. Overwritten each dispatch,
+    # not reduced.
+    pending_dispatch: list[dict]
+    # Convenience flag the planner can check to avoid asking for recon
+    # again when it has already run at least once.
+    recon_done: bool
 
 
 class AgentState(TypedDict, total=False):

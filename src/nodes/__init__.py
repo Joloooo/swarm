@@ -1,15 +1,19 @@
 """Graph node functions — each node is its own module."""
 
+from src.nodes.dynamic_dispatch import dynamic_dispatch_node
 from src.nodes.initialize import initialize_node
-from src.nodes.recon import recon_node
 from src.nodes.pentest_workflow import pentest_workflow_node
-from src.nodes.check_tier2 import check_tier2_node
+from src.nodes.planner import planner_node
+from src.nodes.playbook_dispatch import playbook_dispatch_node
+from src.nodes.recon import recon_node
 from src.nodes.report import report_node
 
 __all__ = [
+    "dynamic_dispatch_node",
     "initialize_node",
-    "recon_node",
     "pentest_workflow_node",
-    "check_tier2_node",
+    "planner_node",
+    "playbook_dispatch_node",
+    "recon_node",
     "report_node",
 ]

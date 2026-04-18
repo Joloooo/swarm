@@ -1,5 +1,5 @@
 """Graph edge functions — routing logic between nodes."""
 
-from src.edges.routing import route_after_recon, route_tier2
+from src.edges.routing import fanout_pending_dispatch, route_after_planner
 
-__all__ = ["route_after_recon", "route_tier2"]
+__all__ = ["fanout_pending_dispatch", "route_after_planner"]

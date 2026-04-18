@@ -36,7 +36,10 @@ SQL injection vulnerabilities in the target web application.
 - Test EVERY parameter you can find, not just obvious ones.
 - Try both GET and POST parameters.
 - Check HTTP headers (User-Agent, Referer, Cookie) for injection.
-- Document the injection type, payload, and extracted data for each finding.
+- For each candidate, **actually run the payload**, observe the HTTP
+  response, and record the parameter as injectable when the response
+  shows differential behavior (error, time delay, boolean shift, or
+  reflected data). Don't theorize — execute.
 """,
     tools=[run_command],
     max_tool_calls=50,

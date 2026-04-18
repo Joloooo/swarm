@@ -31,7 +31,11 @@ to find weaknesses in how the target handles encryption, TLS, and sensitive data
 
 ## Rules
 - Focus on what's observable from the outside (black-box).
-- Report weak TLS configs even if they seem minor — they chain with other issues.
+- Report weak TLS configs even if they seem minor — they chain with other
+  issues.
+- **Run the actual scanner** (nmap script, sslscan, testssl.sh, or
+  ``curl -v``) and record the observed cipher/protocol list as evidence.
+  Don't infer from headers alone.
 """,
     tools=[run_command],
     max_tool_calls=25,

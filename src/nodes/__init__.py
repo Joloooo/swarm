@@ -7,6 +7,7 @@ from src.nodes.planner import planner_node
 from src.nodes.playbook_dispatch import playbook_dispatch_node
 from src.nodes.recon import recon_node
 from src.nodes.report import report_node
+from src.nodes.web_search import web_search_node
 
 __all__ = [
     "dynamic_dispatch_node",
@@ -16,4 +17,5 @@ __all__ = [
     "playbook_dispatch_node",
     "recon_node",
     "report_node",
+    "web_search_node",
 ]

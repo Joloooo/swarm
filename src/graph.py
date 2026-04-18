@@ -1,18 +1,37 @@
 """LangGraph StateGraph definition — the SwarmAttacker orchestrator.
 
-Flow:
-    START → initialize → recon → [router fans out] → pentest_workflow(s)
-        → check_tier2 → report → END
+Supervisor-shaped graph: one planner node is the only decision-maker,
+every worker node edges back to it. The planner emits a JSON directive
+picking the next action — recon, playbook, dynamic, or report — and
+the graph transitions accordingly.
 
-Every node is registered through `traced()`, which wraps it to:
-    1. Time the node and append a boundary `[name] Xms — summary` AIMessage
-       so the LangGraph Studio chat shows continuous progress instead of a
-       blank screen during long-running parallel work.
-    2. Catch crashes and surface them as a visible error message instead of
-       failing the whole graph silently.
+Every node goes through :func:`traced`, which wraps it to:
 
-Adding a new node? Register it through `traced(name, fn)` and it inherits
-both behaviors — no per-node boilerplate.
+1. Time the node and append a boundary ``✅ [name] Xms — summary``
+   AIMessage so LangGraph Studio chat shows continuous progress
+   instead of a blank screen during long-running parallel work.
+2. Catch crashes and surface them as a visible ``❌`` error message
+   instead of failing the whole graph silently.
+
+Boundary messages are tagged with ``additional_kwargs={"node": name}``
+so downstream consumers that scan message history (e.g. the dispatch
+nodes picking recon output) can filter them out and look at real agent
+output only.
+
+Adding a new node? Register it through ``traced(name, fn)`` and it
+inherits both behaviors — no per-node boilerplate.
+
+Flow::
+
+    START → initialize → planner ←────────────────────────────┐
+                           │                                  │
+          ┌────────────────┼────────────────┬─────────────┐   │
+          ↓                ↓                ↓             ↓   │
+        recon    playbook_dispatch   dynamic_dispatch  report │
+          │                │                │            │    │
+          │                └── pentest_workflow (parallel) ┘  │
+          └──────────── all worker returns ────────────────────┘
+                                                     report → END
 """
 
 from __future__ import annotations
@@ -25,22 +44,19 @@ from inspect import iscoroutinefunction
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
 
-from src.edges import route_after_recon, route_tier2
+from src.edges.routing import fanout_pending_dispatch, route_after_planner
 from src.nodes import (
+    dynamic_dispatch_node,
     initialize_node,
-    recon_node,
     pentest_workflow_node,
-    check_tier2_node,
+    planner_node,
+    playbook_dispatch_node,
+    recon_node,
     report_node,
 )
 from src.state import SwarmGraphState
 
 logger = logging.getLogger(__name__)
-
-
-def _route_after_initialize(state: SwarmGraphState) -> str:
-    """Skip straight to the report if no target URL was provided."""
-    return "recon" if state.get("target_url") else "report"
 
 
 def _summarize_node_result(name: str, result: dict) -> str:
@@ -58,16 +74,21 @@ def _summarize_node_result(name: str, result: dict) -> str:
         parts.append(f"active: {','.join(result['active_agents'])}")
     if result.get("waf_detected"):
         parts.append(f"WAF (level {result.get('stealth_level', 0)})")
+    if result.get("next_action"):
+        parts.append(f"→ {result['next_action']}")
+    if result.get("pending_dispatch"):
+        parts.append(f"staged {len(result['pending_dispatch'])} workflow(s)")
     return ", ".join(parts) or "ok"
 
 
 def traced(name: str, fn):
     """Wrap a node so it emits a boundary AIMessage to state.messages.
 
-    The wrapper is transparent — it returns the same shape the node returned
-    plus a single trailing AIMessage tagged ``additional_kwargs={"node": name}``
-    so downstream consumers (e.g. ``route_after_recon``) can filter it out
-    when looking for actual agent output.
+    The wrapper is transparent — it returns the same shape the node
+    returned plus a single trailing AIMessage tagged
+    ``additional_kwargs={"node": name}`` so downstream consumers that
+    read message history can filter it out when looking for actual
+    agent output.
     """
 
     @functools.wraps(fn)
@@ -112,20 +133,44 @@ def build_graph():
 
     # Every node goes through traced() so chat shows boundary messages.
     # Future nodes registered the same way inherit the behavior automatically.
-    graph.add_node("initialize",       traced("initialize",       initialize_node))
-    graph.add_node("recon",            traced("recon",            recon_node))
-    graph.add_node("pentest_workflow", traced("pentest_workflow", pentest_workflow_node))
-    graph.add_node("check_tier2",      traced("check_tier2",      check_tier2_node))
-    graph.add_node("report",           traced("report",           report_node))
+    graph.add_node("initialize",        traced("initialize",        initialize_node))
+    graph.add_node("planner",           traced("planner",           planner_node))
+    graph.add_node("recon",             traced("recon",             recon_node))
+    graph.add_node("playbook_dispatch", traced("playbook_dispatch", playbook_dispatch_node))
+    graph.add_node("dynamic_dispatch",  traced("dynamic_dispatch",  dynamic_dispatch_node))
+    graph.add_node("pentest_workflow",  traced("pentest_workflow",  pentest_workflow_node))
+    graph.add_node("report",            traced("report",            report_node))
 
     # Edges
     graph.add_edge(START, "initialize")
+    graph.add_edge("initialize", "planner")
+
+    # Supervisor branches to one of four nodes based on its JSON decision.
+    # No separate skip-to-report routing from initialize — the supervisor
+    # itself decides "report" on turn 1 if the user gave no usable target.
     graph.add_conditional_edges(
-        "initialize", _route_after_initialize, ["recon", "report"]
+        "planner",
+        route_after_planner,
+        ["recon", "playbook_dispatch", "dynamic_dispatch", "report"],
     )
-    graph.add_conditional_edges("recon", route_after_recon, ["pentest_workflow", "report"])
-    graph.add_edge("pentest_workflow", "check_tier2")
-    graph.add_conditional_edges("check_tier2", route_tier2, ["report"])
+
+    # Workers always return to the supervisor so it can reassess.
+    graph.add_edge("recon", "planner")
+    graph.add_edge("pentest_workflow", "planner")
+
+    # Dispatch nodes stage a list of configs, then fan out via the shared
+    # edge. Empty dispatches route back to the planner so it can replan.
+    graph.add_conditional_edges(
+        "playbook_dispatch",
+        fanout_pending_dispatch,
+        ["pentest_workflow", "planner"],
+    )
+    graph.add_conditional_edges(
+        "dynamic_dispatch",
+        fanout_pending_dispatch,
+        ["pentest_workflow", "planner"],
+    )
+
     graph.add_edge("report", END)
 
     return graph.compile()

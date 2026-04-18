@@ -7,6 +7,13 @@
   reachability.
 """
 
+from src.tools.crawler import (
+    CrawlBatchResult,
+    CrawlResult,
+    CrawlerOptions,
+    crawl,
+    crawl_many,
+)
 from src.tools.terminal import read_file, run_command
 from src.tools.url import normalize_url, validate_website
 
@@ -15,4 +22,9 @@ __all__ = [
     "run_command",
     "normalize_url",
     "validate_website",
+    "crawl",
+    "crawl_many",
+    "CrawlResult",
+    "CrawlBatchResult",
+    "CrawlerOptions",
 ]

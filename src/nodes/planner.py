@@ -2,12 +2,13 @@
 
 The planner is the **only** decision-maker in the graph. Every other
 node (recon, playbook_dispatch, dynamic_dispatch, pentest_workflow,
-report) edges back here, and the planner decides the next hop by
-emitting a JSON directive:
+web_search, report) edges back here, and the planner decides the next
+hop by emitting a JSON directive:
 
-    {"action": "recon" | "playbook" | "dynamic" | "report",
+    {"action": "recon" | "playbook" | "dynamic" | "web_search" | "report",
      "target_url": "...",
      "target_scope": "...",
+     "search_query": "...",   # only when action == "web_search"
      "note": "one-sentence reasoning"}
 
 The planner has two tools it can call mid-turn:
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 # keeps asking for more work without making progress.
 MAX_PLANNER_ITERS = 12
 
-VALID_ACTIONS = {"recon", "playbook", "dynamic", "report"}
+VALID_ACTIONS = {"recon", "playbook", "dynamic", "web_search", "report"}
 
 SUPERVISOR_SYSTEM_PROMPT = """\
 You are the supervisor of a penetration-testing swarm. You are the
@@ -71,6 +72,27 @@ declaring your decision. The allowed values for "action" are:
                when recon output is thin, hostile, or describes an
                unusual tech stack that the regex library won't match
                well.
+- "web_search" — run an external web search (Tavily) and crawl the
+               top hits (HTTP with Playwright fallback) for grounded
+               background knowledge. This action does NOT probe the
+               target. Use it when you need public information that
+               isn't on the target itself — for example:
+               * recon named a framework/CMS/plugin you don't
+                 recognise and you need to know its common attack
+                 surface before picking playbook vs dynamic;
+               * a workflow failed with an error string you want to
+                 understand (a library quirk, a CVE, a WAF signature);
+               * the user asked a knowledge question ("what is X?"
+                 "how does Y work?") that isn't answered by the
+                 target's own pages;
+               * you want to confirm whether a fingerprinted version
+                 is vulnerable to a specific CVE before firing an
+                 exploit.
+               Avoid web_search when: the missing information can be
+               obtained by scanning the target (use recon instead);
+               the target itself is what needs to be crawled (recon
+               already crawls); or the question is purely about what
+               to do next (just decide).
 - "report"   — finalize the run. Aggregates every finding into a
                report and ends the graph. Choose this when you have
                enough evidence, when further tries are unlikely to
@@ -100,7 +122,15 @@ After each worker, look at what came back:
 - New findings?   Consider continuing with a different tactic or
                   going to report.
 - Recon empty?    Don't blindly fall back to "playbook" — its
-                  regexes will mostly miss. Prefer "dynamic".
+                  regexes will mostly miss. Prefer "dynamic", or
+                  use "web_search" first if the little recon did
+                  surface points at an unfamiliar stack.
+- Unknown stack?  If recon named something you can't immediately
+                  reason about (niche CMS, obscure framework,
+                  unfamiliar CVE identifier), pick "web_search"
+                  once, then go back to playbook/dynamic armed
+                  with the background knowledge. Do not loop
+                  web_search — one round is usually enough.
 - Stealth level   If waf_detected is true and stealth_level is 2,
   rising?         be more conservative — consider report rather
                   than firing another loud scan.
@@ -120,11 +150,15 @@ End EVERY turn with a fenced JSON block of this exact shape:
 }
 ```
 
-- "action" must be one of: recon, playbook, dynamic, report.
+- "action" must be one of: recon, playbook, dynamic, web_search, report.
 - "target_url" must be set once you've normalized it; carry it
   forward on every subsequent turn.
 - "target_scope" defaults to the hostname unless the user gave a
   broader scope (e.g. "*.example.com").
+- "search_query" is REQUIRED when "action" is "web_search" and must
+  be a short, specific natural-language query (e.g. "CVE-2024-1234
+  Apache Struts RCE exploit conditions", not "Apache"). Omit it for
+  all other actions.
 - "note" is a single sentence for the audit log — not marketing copy.
 
 If you cannot parse the user's intent, choose "report" with a note
@@ -291,6 +325,12 @@ def make_planner_node(llm_config: LLMConfig | None = None):
             update["target_url"] = target_url
         if target_scope:
             update["target_scope"] = target_scope
+        # Pass search_query through to state when the planner asked for
+        # a web search. web_search_node reads this field first.
+        if action == "web_search":
+            search_query = (decision.get("search_query") or "").strip()
+            if search_query:
+                update["search_query"] = search_query
         return update
 
     planner_node.__name__ = "planner_node"

@@ -2,8 +2,8 @@
 
 Supervisor-shaped graph: one planner node is the only decision-maker,
 every worker node edges back to it. The planner emits a JSON directive
-picking the next action — recon, playbook, dynamic, or report — and
-the graph transitions accordingly.
+picking the next action — recon, playbook, dynamic, web_search, or
+report — and the graph transitions accordingly.
 
 Every node goes through :func:`traced`, which wraps it to:
 
@@ -23,15 +23,15 @@ inherits both behaviors — no per-node boilerplate.
 
 Flow::
 
-    START → initialize → planner ←────────────────────────────┐
-                           │                                  │
-          ┌────────────────┼────────────────┬─────────────┐   │
-          ↓                ↓                ↓             ↓   │
-        recon    playbook_dispatch   dynamic_dispatch  report │
-          │                │                │            │    │
-          │                └── pentest_workflow (parallel) ┘  │
-          └──────────── all worker returns ────────────────────┘
-                                                     report → END
+    START → initialize → planner ←─────────────────────────────────────┐
+                           │                                           │
+          ┌────────────────┼────────────────┬─────────────┬─────────┐  │
+          ↓                ↓                ↓             ↓         ↓  │
+        recon    playbook_dispatch   dynamic_dispatch  web_search report
+          │                │                │            │         │   │
+          │                └── pentest_workflow (parallel) ┘        │   │
+          └──────────── all worker returns ───────────────────────────┘
+                                                            report → END
 """
 
 from __future__ import annotations
@@ -53,6 +53,7 @@ from src.nodes import (
     playbook_dispatch_node,
     recon_node,
     report_node,
+    web_search_node,
 )
 from src.state import SwarmGraphState
 
@@ -139,6 +140,7 @@ def build_graph():
     graph.add_node("playbook_dispatch", traced("playbook_dispatch", playbook_dispatch_node))
     graph.add_node("dynamic_dispatch",  traced("dynamic_dispatch",  dynamic_dispatch_node))
     graph.add_node("pentest_workflow",  traced("pentest_workflow",  pentest_workflow_node))
+    graph.add_node("web_search",        traced("web_search",        web_search_node))
     graph.add_node("report",            traced("report",            report_node))
 
     # Edges
@@ -151,12 +153,19 @@ def build_graph():
     graph.add_conditional_edges(
         "planner",
         route_after_planner,
-        ["recon", "playbook_dispatch", "dynamic_dispatch", "report"],
+        [
+            "recon",
+            "playbook_dispatch",
+            "dynamic_dispatch",
+            "web_search",
+            "report",
+        ],
     )
 
     # Workers always return to the supervisor so it can reassess.
     graph.add_edge("recon", "planner")
     graph.add_edge("pentest_workflow", "planner")
+    graph.add_edge("web_search", "planner")
 
     # Dispatch nodes stage a list of configs, then fan out via the shared
     # edge. Empty dispatches route back to the planner so it can replan.

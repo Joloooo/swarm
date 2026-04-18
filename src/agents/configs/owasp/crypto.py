@@ -2,6 +2,7 @@
 
 from src.agents.base import AgentConfig
 from src.agents.configs.registry import register_config
+from src.tools.nmap import nmap_specific_ports, nmap_ssl_enum
 from src.tools.terminal import run_command
 
 crypto_config = AgentConfig(
@@ -25,15 +26,17 @@ to find weaknesses in how the target handles encryption, TLS, and sensitive data
    HTML comments, JavaScript files, or local storage references.
 
 ## Tools to use
-- `nmap --script ssl-enum-ciphers -p 443 <target>` for TLS analysis
-- `sslscan <target>` or `testssl.sh <target>` for comprehensive TLS testing
+- `nmap_ssl_enum(target, ports="443")` for cipher suites, cert, heartbleed — your primary TLS tool
+- `nmap_specific_ports(target, ports="443,8443,...")` to check which TLS ports exist first
+- `sslscan <target>` or `testssl.sh <target>` via `run_command` for deeper TLS testing
 - `curl -v` to check HSTS, Secure cookie flags, mixed content
 
 ## Rules
 - Focus on what's observable from the outside (black-box).
 - Report weak TLS configs even if they seem minor — they chain with other issues.
 """,
-    tools=[run_command],
+    tools=[run_command, nmap_specific_ports, nmap_ssl_enum],
+    skill_names=["nmap"],
     max_tool_calls=25,
     max_iterations=15,
 )

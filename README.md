@@ -8,90 +8,63 @@ The core idea: instead of running one methodology at a time, SwarmAttacker deplo
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (package manager)
-- tmux (for agent session isolation)
-- An LLM API key (Anthropic, OpenAI, or OpenRouter)
+- tmux (for agent session isolation) — install with `brew install tmux`
+- Pentesting tools your agents will call: `nmap`, `gobuster`, `sqlmap`, `curl` — install with `brew install nmap gobuster sqlmap`
+- An LLM backend, **one of**:
+  - **ChatGPT Plus/Pro subscription** (recommended, free with subscription — see [LLM Provider: Codex](#llm-provider-codex-chatgpt-subscription) below)
+  - Anthropic API key
+  - OpenAI API key
+  - OpenRouter API key
 
 ## Setup
 
 ```bash
-# Install dependencies
-uv sync
-
-# Configure API keys
-cp .env.example .env
-# Edit .env and add your keys
+uv sync                  # install Python deps + create .venv
+./scripts/setup.sh       # install pentesting tools (tmux, nmap, gobuster, sqlmap)
+cp .env.example .env     # create .env (can stay empty if using Codex auth)
+codex                    # one-time ChatGPT login (saves tokens to ~/.codex/auth.json)
 ```
 
-### Environment variables
+## Quick start (local, vulnerable target)
 
-| Variable | Required | Description |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | If using Anthropic | Claude API key |
-| `OPENAI_API_KEY` | If using OpenAI | OpenAI API key |
-| `OPENROUTER_API_KEY` | If using OpenRouter | OpenRouter API key |
-| `LANGSMITH_API_KEY` | Optional | Enables LangSmith tracing in LangGraph Studio |
+When debugging the agent, point it at a known-vulnerable container running
+locally — not a real public site. Frontier models (especially the Codex
+backend) often refuse to attack real-looking domains regardless of what
+the prompt says, which makes it hard to tell whether the agent is broken
+or the model is just refusing.
+
+```bash
+# Start OWASP Juice Shop on port 3000 (or use the helper):
+bash benchmarks/run_juice_shop.sh
+
+# Then in LangGraph Studio chat:
+#   target_url = http://localhost:3000
+# Expected: chat shows initialize → recon → [sqli] tool calls →
+#   [sqli] finding(s) → … → final report. No blank period > ~10s.
+# Expected: at least one SQLi finding on /rest/user/login
+#   (classic ' OR 1=1-- on the email field).
+```
+
+If you see `⚠️ [agent-id] model refused the task` in chat, the LLM
+endpoint is the problem. Check the `LLM provider initialized: …` line
+that `provider.py` logs at startup — if `provider=codex` you're hitting
+ChatGPT's policy layer at `chatgpt.com/backend-api/codex/responses`,
+which is stricter than direct Anthropic. The authorization preamble in
+`src/knowledge/prompts/base_rules.py` reduces but doesn't eliminate
+these refusals; switching that agent's `LLMConfig` to Anthropic is the
+last-resort workaround.
 
 ## Running
 
-### CLI
-
 ```bash
-# Basic scan (analyze only)
-uv run swarmattacker http://target.local
-
-# With scope restriction
-uv run swarmattacker http://target.local --scope "*.target.local"
-
-# Full mode (analyze + exploit)
-# (requires workflow configs with exploit phase defined)
-uv run swarmattacker http://target.local --mode full
-
-# Verbose logging
-uv run swarmattacker http://target.local -v
-
-# With ablation experiment overlay
-uv run swarmattacker http://target.local --experiment no_rag
+source .venv/bin/activate
+langgraph dev --allow-blocking
 ```
 
-### LangGraph Studio (visual debugger)
-
-LangGraph Studio provides a visual graph UI where you can see nodes light up as agents execute, inspect per-agent state, and step through runs.
-
-```bash
-# Start the dev server (opens Studio in browser)
-langgraph dev
-```
-
-This reads `langgraph.json` which points to `src/graph.py:graph`. Studio will show the full graph: `initialize → recon → pentest_workflow(s) → check_tier2 → report`.
-
-### LangGraph Platform API (programmatic)
-
-For running benchmarks and evaluation experiments without a UI:
-
-```bash
-# Start the API server
-langgraph up
-
-# Then invoke via Python or curl
-curl -X POST http://localhost:8123/runs \
-  -H "Content-Type: application/json" \
-  -d '{"input": {"target_url": "http://target.local"}}'
-```
-
-### Benchmarks
-
-```bash
-# Run against a single target
-uv run python -m benchmarks.runner --target dvwa
-
-# Run ablation study (all experiment configs)
-uv run python -m benchmarks.ablation --target dvwa
-
-# Multi-model comparison
-uv run python -m benchmarks.multimodel --target dvwa
-```
-
-Benchmark targets are defined in `benchmarks/targets.yaml`. Results are saved to `benchmarks/results/` as JSON and LaTeX tables.
+Studio opens automatically in your browser. `--allow-blocking` is needed
+because the tmux-based terminal tool uses subprocess calls that
+LangGraph's blockbuster detector flags (they're already wrapped in
+`asyncio.to_thread` and don't actually block the event loop).
 
 ## Architecture
 
@@ -117,7 +90,8 @@ START → initialize → recon → [Tier 1 router fans out] → pentest_workflow
 - `stealth/` — WAF/IDS detection (Cloudflare, ModSecurity, AWS WAF) with stealth level propagation
 - `loop/` — 4-strategy loop detection (hard cap, exact repeat, same-tool repeat, budget pressure)
 - `experience/` — guide storage for learning from past runs (Jaccard similarity matching)
-- `llm/` — provider-agnostic interface (Anthropic, OpenAI, OpenRouter)
+- `llm/` — provider-agnostic interface (Anthropic, OpenAI, OpenRouter, Codex)
+  - `llm/codex.py` — self-contained LangChain chat model for the ChatGPT subscription / Codex backend. Handles OAuth token loading + refresh, Responses API SSE streaming, tool calls, all without any third-party library
 
 ## Project structure
 

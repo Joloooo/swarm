@@ -3,8 +3,8 @@
 
 # LLM settings
 llm:
-  provider: "anthropic"
-  model: "claude-sonnet-4-20250514"
+  provider: "codex"
+  model: "gpt-5.4-mini"
   temperature: 0.0
   max_tokens: 4096
 

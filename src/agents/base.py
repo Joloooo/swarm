@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langgraph.prebuilt import create_react_agent
 
@@ -23,6 +23,30 @@ from src.llm.provider import LLMConfig, get_llm
 from src.state import AgentResult, AgentState, Finding, Severity
 
 logger = logging.getLogger(__name__)
+
+
+# Phrases that indicate the model refused the task (so we don't silently
+# return 0 findings — we surface the refusal in chat instead).
+REFUSAL_PATTERNS = (
+    "i can't help",
+    "i cannot help",
+    "i'm sorry, but i can't",
+    "i'm sorry, but i cannot",
+    "i cannot assist",
+    "i'm unable to",
+    "i am unable to",
+    "i'm not able to",
+    "i am not able to",
+    "i don't feel comfortable",
+    "as an ai, i",
+)
+
+
+def _looks_like_refusal(text: str) -> bool:
+    if not text:
+        return False
+    lower = text.lower()
+    return any(p in lower for p in REFUSAL_PATTERNS)
 
 
 @dataclass
@@ -143,15 +167,31 @@ def _build_system_message(
 
 
 # -- Finding extraction from agent output --
+#
+# Two parsers run on every assistant message:
+# 1. The structured **FINDING:** / ## Finding format defined in base_rules.py
+# 2. JSON blocks of the form {"findings": [...]} as a forgiving fallback
+#
+# The structured pattern only requires Title and Severity now (Category, URL,
+# Evidence are optional). Bounded `[\s\S]{0,N}?` gaps prevent runaway matches
+# across unrelated headings.
 
 FINDING_PATTERN = re.compile(
-    r"\*\*FINDING:\*\*.*?"
-    r"Title:\s*(.+?)$.*?"
-    r"Severity:\s*(\w+).*?"
-    r"Category:\s*(\w[\w-]*).*?"
-    r"(?:URL:\s*(.+?)$)?"
-    r"(?:.*?Evidence:\s*(.+?)$)?",
-    re.MULTILINE | re.DOTALL,
+    r"(?:\*\*FINDING:?\*\*|##\s+FINDING|##\s+Finding)"
+    r"[\s\S]{0,40}?"
+    r"Title:\s*(.+?)$"
+    r"[\s\S]{0,200}?"
+    r"Severity:\s*(\w+)"
+    r"(?:[\s\S]{0,200}?Category:\s*([\w-]+))?"
+    r"(?:[\s\S]{0,400}?URL:\s*(.+?)$)?"
+    r"(?:[\s\S]{0,400}?Evidence:\s*(.+?)$)?",
+    re.MULTILINE,
+)
+
+# Match a JSON object (non-greedy) that contains a "findings" key. Used as a
+# fallback when the model emits {"findings": [...]} instead of the markdown.
+JSON_FINDINGS_PATTERN = re.compile(
+    r'\{[^{}]*?"findings"\s*:\s*\[[\s\S]*?\]\s*\}',
 )
 
 SEVERITY_MAP = {
@@ -163,29 +203,69 @@ SEVERITY_MAP = {
 }
 
 
+def _findings_from_markdown(content: str, agent_id: str) -> list[Finding]:
+    """Parse the structured **FINDING:** / ## Finding format."""
+    out = []
+    for match in FINDING_PATTERN.finditer(content):
+        title = match.group(1).strip()
+        severity_str = (match.group(2) or "info").strip().lower()
+        category = (match.group(3) or "unknown").strip().lower()
+        url = (match.group(4) or "").strip()
+        evidence = (match.group(5) or "").strip()
+        out.append(Finding(
+            title=title,
+            severity=SEVERITY_MAP.get(severity_str, Severity.INFO),
+            category=category,
+            description=title,
+            evidence=evidence[:500],
+            agent_id=agent_id,
+            url=url,
+        ))
+    return out
+
+
+def _findings_from_json(content: str, agent_id: str) -> list[Finding]:
+    """Fallback parser for JSON {"findings": [...]} blocks."""
+    out = []
+    for match in JSON_FINDINGS_PATTERN.finditer(content):
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            continue
+        for item in data.get("findings", []) or []:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "Untitled finding").strip()
+            severity_str = str(item.get("severity") or "info").strip().lower()
+            category = str(item.get("category") or "unknown").strip().lower()
+            url = str(item.get("url") or "").strip()
+            evidence = str(item.get("evidence") or item.get("payload") or "")[:500]
+            out.append(Finding(
+                title=title,
+                severity=SEVERITY_MAP.get(severity_str, Severity.INFO),
+                category=category,
+                description=str(item.get("description") or title),
+                evidence=evidence,
+                agent_id=agent_id,
+                url=url,
+            ))
+    return out
+
+
 def _extract_findings(messages: list, agent_id: str) -> list[Finding]:
-    """Parse structured findings from agent messages."""
+    """Parse structured findings from agent messages.
+
+    Tries the markdown FINDING format first; falls back to JSON
+    {"findings": [...]} blocks. Both parsers run on every AIMessage and
+    results are concatenated.
+    """
     findings = []
     for msg in messages:
         if not isinstance(msg, AIMessage):
             continue
         content = msg.content if isinstance(msg.content, str) else str(msg.content)
-        for match in FINDING_PATTERN.finditer(content):
-            title = match.group(1).strip()
-            severity_str = match.group(2).strip().lower()
-            category = match.group(3).strip().lower()
-            url = (match.group(4) or "").strip()
-            evidence = (match.group(5) or "").strip()
-
-            findings.append(Finding(
-                title=title,
-                severity=SEVERITY_MAP.get(severity_str, Severity.INFO),
-                category=category,
-                description=title,
-                evidence=evidence[:500],  # Cap evidence length
-                agent_id=agent_id,
-                url=url,
-            ))
+        findings.extend(_findings_from_markdown(content, agent_id))
+        findings.extend(_findings_from_json(content, agent_id))
     return findings
 
 
@@ -207,7 +287,7 @@ def make_agent_node(
         llm = get_llm(config.llm_config)
 
     async def agent_node(state: dict) -> dict:
-        """Execute this agent and return findings to the parent state."""
+        """Execute this agent and return findings + chat trace to the parent."""
         target_url = state.get("target_url", "")
 
         # Build system message with all knowledge layers
@@ -223,6 +303,8 @@ def make_agent_node(
             prompt=system_msg,
         )
 
+        trace: list = []
+        findings: list[Finding] = []
         try:
             result = await agent.ainvoke(
                 {"messages": []},
@@ -232,15 +314,64 @@ def make_agent_node(
             messages = result.get("messages", [])
             findings = _extract_findings(messages, config.agent_id)
 
+            # Mirror the inner ReAct trace up to the parent so Studio chat
+            # shows every tool call (`run_command("curl ...")`) and the
+            # corresponding ToolMessage response inline. Without this the
+            # entire conversation is hidden inside the create_react_agent
+            # sub-graph and the parent chat looks frozen.
+            trace = [m for m in messages if isinstance(m, (AIMessage, ToolMessage))]
+            for m in trace:
+                # Tag each message with the agent_id so Studio (and
+                # downstream consumers) can group / filter by agent.
+                try:
+                    m.additional_kwargs.setdefault("agent_id", config.agent_id)
+                except Exception:
+                    pass
+
+            # Refusal detection — if 0 findings AND the last assistant
+            # message reads like a safety refusal, surface it explicitly
+            # instead of letting it get swallowed as "0 findings".
+            last_text = ""
+            for m in reversed(messages):
+                if isinstance(m, AIMessage):
+                    last_text = (
+                        m.content if isinstance(m.content, str) else str(m.content)
+                    )
+                    break
+
+            refused = (not findings) and _looks_like_refusal(last_text)
+            if not findings:
+                logger.warning(
+                    f"[{config.agent_id}] produced 0 findings — "
+                    f"last output: {last_text[:500]!r}"
+                )
+            if refused:
+                logger.warning(f"[{config.agent_id}] looks like a model refusal")
+                trace.append(AIMessage(
+                    content=(
+                        f"⚠️ [{config.agent_id}] model refused the task. "
+                        f"Last output: {last_text[:300]}"
+                    ),
+                    additional_kwargs={
+                        "agent_id": config.agent_id,
+                        "refusal": True,
+                    },
+                ))
+
             agent_result = AgentResult(
                 agent_id=config.agent_id,
                 methodology=config.methodology,
                 config_name=config.config_name,
                 findings=findings,
-                completed=True,
+                completed=not refused,
+                error="model refused" if refused else None,
             )
         except Exception as e:
             logger.error(f"Agent {config.agent_id} failed: {e}")
+            trace = [AIMessage(
+                content=f"❌ [{config.agent_id}] crashed: {e}",
+                additional_kwargs={"agent_id": config.agent_id, "error": True},
+            )]
             agent_result = AgentResult(
                 agent_id=config.agent_id,
                 methodology=config.methodology,
@@ -251,6 +382,7 @@ def make_agent_node(
             findings = []
 
         return {
+            "messages": trace,
             "agent_results": [agent_result],
             "findings": findings,
             "active_agents": [config.agent_id],

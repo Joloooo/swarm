@@ -34,8 +34,12 @@ and demonstrating XSS vulnerabilities in the target.
 
 ## Rules
 - Test EVERY parameter, not just obvious ones. Headers and cookies too.
-- A confirmed XSS must show the payload executing (reflected in HTML unescaped).
-- Report the exact payload, injection point, and context (attribute, tag, script).
+- A confirmed XSS must show the payload **actually executing** (reflected
+  in HTML without escaping). **Inject and inspect** — don't speculate
+  about whether a parameter is reflected; send the payload and grep the
+  response for it.
+- Report the exact payload, injection point, and context (attribute, tag,
+  script).
 """,
     tools=[run_command],
     max_tool_calls=50,

@@ -34,6 +34,9 @@ vulnerabilities caused by insufficient input sanitization and validation.
 ## Rules
 - Be systematic: enumerate all inputs first, then test each one.
 - Try multiple encoding strategies: URL encoding, double encoding, unicode.
+- **Send each payload with curl and read the actual response** before
+  moving on — a finding requires observed differential behavior, not a
+  guess based on parameter names.
 - For each finding, document the exact payload and response.
 """,
     tools=[run_command],

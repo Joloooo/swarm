@@ -40,7 +40,6 @@ async def initialize_node(state: SwarmGraphState) -> dict:
     return {
         "waf_detected": False,
         "stealth_level": 0,
-        "tier2_activated": False,
         "planner_iters": 0,
         "recon_done": False,
         "pending_dispatch": [],

@@ -2,8 +2,8 @@
 
 Supervisor-shaped graph: one planner node is the only decision-maker,
 every worker node edges back to it. The planner emits a JSON directive
-picking the next action — recon, playbook, dynamic, web_search, or
-report — and the graph transitions accordingly.
+picking the next action — recon, attack (with the list of configs to
+fan out), web_search, or report — and the graph transitions accordingly.
 
 Every node goes through :func:`traced`, which wraps it to:
 
@@ -14,24 +14,25 @@ Every node goes through :func:`traced`, which wraps it to:
    instead of failing the whole graph silently.
 
 Boundary messages are tagged with ``additional_kwargs={"node": name}``
-so downstream consumers that scan message history (e.g. the dispatch
-nodes picking recon output) can filter them out and look at real agent
-output only.
+so downstream consumers that scan message history can filter them out
+and look at real agent output only.
 
 Adding a new node? Register it through ``traced(name, fn)`` and it
 inherits both behaviors — no per-node boilerplate.
 
 Flow::
 
-    START → initialize → planner ←─────────────────────────────────────┐
-                           │                                           │
-          ┌────────────────┼────────────────┬─────────────┬─────────┐  │
-          ↓                ↓                ↓             ↓         ↓  │
-        recon    playbook_dispatch   dynamic_dispatch  web_search report
-          │                │                │            │         │   │
-          │                └── pentest_workflow (parallel) ┘        │   │
-          └──────────── all worker returns ───────────────────────────┘
-                                                            report → END
+    START → initialize → planner ← ──────────────────────────┐
+                          │                                   │
+            ┌─────────────┼────────────────┬───────────┐      │
+            ↓             ↓                ↓           ↓      │
+          recon    pentest_workflow    web_search    report   │
+            │      (×N parallel, via                  │       │
+            │       Send() fan-out)                   │       │
+            └─────── all workers return ──────────────┘       │
+                          │                                   │
+                          └───────────────────────────────────┘
+                                          report → END
 """
 
 from __future__ import annotations
@@ -44,13 +45,11 @@ from inspect import iscoroutinefunction
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
 
-from src.edges.routing import fanout_pending_dispatch, route_after_planner
+from src.edges.routing import route_after_planner
 from src.nodes import (
-    dynamic_dispatch_node,
     initialize_node,
     pentest_workflow_node,
     planner_node,
-    playbook_dispatch_node,
     recon_node,
     report_node,
     web_search_node,
@@ -134,29 +133,26 @@ def build_graph():
 
     # Every node goes through traced() so chat shows boundary messages.
     # Future nodes registered the same way inherit the behavior automatically.
-    graph.add_node("initialize",        traced("initialize",        initialize_node))
-    graph.add_node("planner",           traced("planner",           planner_node))
-    graph.add_node("recon",             traced("recon",             recon_node))
-    graph.add_node("playbook_dispatch", traced("playbook_dispatch", playbook_dispatch_node))
-    graph.add_node("dynamic_dispatch",  traced("dynamic_dispatch",  dynamic_dispatch_node))
-    graph.add_node("pentest_workflow",  traced("pentest_workflow",  pentest_workflow_node))
-    graph.add_node("web_search",        traced("web_search",        web_search_node))
-    graph.add_node("report",            traced("report",            report_node))
+    graph.add_node("initialize",       traced("initialize",       initialize_node))
+    graph.add_node("planner",          traced("planner",          planner_node))
+    graph.add_node("recon",            traced("recon",            recon_node))
+    graph.add_node("pentest_workflow", traced("pentest_workflow", pentest_workflow_node))
+    graph.add_node("web_search",       traced("web_search",       web_search_node))
+    graph.add_node("report",           traced("report",           report_node))
 
     # Edges
     graph.add_edge(START, "initialize")
     graph.add_edge("initialize", "planner")
 
-    # Supervisor branches to one of four nodes based on its JSON decision.
-    # No separate skip-to-report routing from initialize — the supervisor
-    # itself decides "report" on turn 1 if the user gave no usable target.
+    # Supervisor is the only decision-maker. `route_after_planner` returns
+    # either a node name (recon / web_search / report) OR a list of Send()
+    # calls that fan out to parallel pentest_workflow runs for "attack".
     graph.add_conditional_edges(
         "planner",
         route_after_planner,
         [
             "recon",
-            "playbook_dispatch",
-            "dynamic_dispatch",
+            "pentest_workflow",
             "web_search",
             "report",
         ],
@@ -166,19 +162,6 @@ def build_graph():
     graph.add_edge("recon", "planner")
     graph.add_edge("pentest_workflow", "planner")
     graph.add_edge("web_search", "planner")
-
-    # Dispatch nodes stage a list of configs, then fan out via the shared
-    # edge. Empty dispatches route back to the planner so it can replan.
-    graph.add_conditional_edges(
-        "playbook_dispatch",
-        fanout_pending_dispatch,
-        ["pentest_workflow", "planner"],
-    )
-    graph.add_conditional_edges(
-        "dynamic_dispatch",
-        fanout_pending_dispatch,
-        ["pentest_workflow", "planner"],
-    )
 
     graph.add_edge("report", END)
 

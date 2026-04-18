@@ -12,6 +12,7 @@ dependencies = [
     "langchain-core>=0.3",
     "langchain-openai>=0.3",
     "langchain-anthropic>=0.3",
+    "langchain-tavily>=0.1",
     "pydantic>=2.0",
     "libtmux>=0.40",
     "pyyaml>=6.0",

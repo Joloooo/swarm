@@ -1,11 +1,22 @@
-"""Tier 2 — Dynamic LLM planner.
+"""Dynamic agent generator — an LLM that emits custom AgentConfigs.
 
-Activates when Tier 1 (router) fails or finds unexpected paths.
-Uses an LLM to analyze recon results and decide what to test next.
+Called only when the supervisor planner (``src/nodes/planner.py``)
+chooses the ``dynamic`` action. The supervisor uses this when the
+static playbook library (``playbook_library.py``) would be a poor
+match — e.g. recon revealed an unusual tech stack, recon came back
+empty so the regexes would misfire, or the planner wants to chain
+multiple prior findings into a targeted follow-up.
 
-The planner reads the recon output and any existing findings, then
-generates custom AgentConfig instances with dynamically-crafted
-system prompts tailored to the specific target.
+:func:`dynamic_plan` reads the recon output and existing findings,
+asks an LLM for a JSON array of attack strategies, and returns a list
+of :class:`AgentConfig` instances with dynamically-crafted system
+prompts. The ``dynamic_dispatch`` node then fans these out to
+``pentest_workflow`` in parallel, the same way the playbook path does.
+
+Previously this file lived at ``src/planning/planner.py`` and ran only
+as a "Tier 2 fallback" when the old regex router found fewer than
+three matches. It is no longer a fallback; the supervisor invokes it
+deliberately.
 """
 
 from __future__ import annotations
@@ -21,7 +32,7 @@ from src.tools.terminal import run_command
 
 logger = logging.getLogger(__name__)
 
-PLANNER_SYSTEM_PROMPT = """\
+DYNAMIC_AGENT_GENERATOR_PROMPT = """\
 You are a penetration testing planning specialist. Your job is to analyze
 reconnaissance results and decide what attack strategies to pursue.
 
@@ -54,12 +65,17 @@ async def dynamic_plan(
     failed_agents: list[str] | None = None,
     llm_config: LLMConfig | None = None,
 ) -> list[AgentConfig]:
-    """Use an LLM to generate a dynamic attack plan.
+    """Use an LLM to generate a list of custom attack agents.
 
-    Called when:
-    - Tier 1 router selected fewer than the minimum threshold
-    - All Tier 1 agents failed or found nothing
-    - Novel attack surface discovered that no config covers
+    Called by ``dynamic_dispatch`` when the supervisor planner chose
+    the ``dynamic`` action. Typical triggers:
+
+    - Recon is empty or hostile, so the playbook library's regexes
+      would misfire.
+    - Unusual tech stack (uncommon CMS, bespoke framework, specific
+      language runtime) needs a targeted prompt.
+    - Multiple prior findings can be chained into a follow-up attack
+      that no static playbook covers.
 
     Returns new AgentConfig instances with dynamically-generated
     system prompts tailored to the specific target.
@@ -84,7 +100,7 @@ async def dynamic_plan(
     )
 
     response = await llm.ainvoke([
-        SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+        SystemMessage(content=DYNAMIC_AGENT_GENERATOR_PROMPT),
         HumanMessage(content=user_msg),
     ])
 
@@ -106,7 +122,7 @@ async def dynamic_plan(
     try:
         strategies = json.loads(json_str)
     except json.JSONDecodeError:
-        logger.warning(f"Tier 2 planner returned unparseable response: {content[:200]}")
+        logger.warning(f"dynamic_plan returned unparseable response: {content[:200]}")
         return []
 
     if not isinstance(strategies, list):
@@ -134,5 +150,5 @@ async def dynamic_plan(
             max_iterations=25,
         ))
 
-    logger.info(f"Tier 2 planner generated {len(configs)} dynamic agents")
+    logger.info(f"dynamic_plan generated {len(configs)} custom agents")
     return configs

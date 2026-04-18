@@ -1,14 +1,24 @@
-"""Tier 1 — Deterministic playbook router.
+"""Deterministic playbook library — a Shannon-style static attack bundle.
 
-The router is the first tier of the two-tier planning model:
-- Tier 1 (this): Dispatches known attack playbooks deterministically
-  based on recon results. Fast, predictable, no LLM call needed.
-- Tier 2 (planner.py): Dynamic LLM planner that activates when Tier 1
-  fails or finds unexpected paths.
+This module is a **library**, not a decision layer. The supervisor
+planner (``src/nodes/planner.py``) is the only thing that decides when
+pentest work happens. When the planner chooses the ``playbook`` action,
+the ``playbook_dispatch`` node calls :func:`route` here to expand recon
+output into a concrete list of known attack configs, which are then
+fanned out to ``pentest_workflow`` in parallel.
 
-The router reads recon output and decides which swarm agents to activate.
-For example, if recon finds a login page, it activates auth-testing.
-If it finds PHP, it activates PHP-specific vulnerability agents.
+``route()`` matches ~25 regexes against the recon text to pick from 12
+pre-defined playbooks (sqli, xss, auth-testing, idor, ssti, ssrf, lfi,
+input-validation, session-mgmt, error-handling, crypto, business-logic,
+plus the chain-ssrf-to-rce composite). Three of those (sqli, xss,
+input-validation) are always included — they are the cheapest,
+broadest-coverage checks and worth running even when the regex didn't
+light up. This mirrors Shannon's static "try everything of this class"
+behavior.
+
+Previously this file lived at ``src/planning/router.py`` and was wired
+as the first tier of a two-tier planner. It is no longer a router; the
+supervisor has taken over that role.
 """
 
 from __future__ import annotations
@@ -22,11 +32,16 @@ from src.agents.configs.registry import get_all_configs, get_config
 
 @dataclass
 class RoutingDecision:
-    """Which agents to activate and why."""
+    """Which agents to activate and why.
+
+    The supervisor planner is responsible for deciding whether this
+    decision is "enough" — if it isn't, the planner picks ``dynamic``
+    on the next turn. This dataclass therefore no longer carries any
+    confidence/tier signal; it's a pure data container.
+    """
 
     agent_configs: list[AgentConfig] = field(default_factory=list)
     reasoning: list[str] = field(default_factory=list)
-    tier2_needed: bool = False  # True if routing confidence is low
     mode: str = "analyze"  # "analyze" or "full" — passed through to pentest_workflow
 
 
@@ -118,19 +133,22 @@ ROUTING_RULES: list[tuple[str, str, str]] = [
 # Core vulnerability classes that should always be tested.
 ALWAYS_ACTIVE = ["sqli", "xss", "input-validation"]
 
-# Minimum number of agents that should be selected.
-# If fewer than this, mark tier2_needed so the dynamic planner can help.
+# Minimum recommended number of agents per dispatch — kept as an
+# informational constant so callers (tests, the planner's system prompt,
+# etc.) can reason about playbook coverage without hard-coding a number.
 MIN_AGENTS_THRESHOLD = 3
 
 
 def route(recon_output: str) -> RoutingDecision:
-    """Decide which agents to activate based on recon output.
+    """Expand recon output into a concrete list of playbook agents.
 
     Returns a RoutingDecision with the selected agents and reasoning.
-    If fewer than MIN_AGENTS_THRESHOLD are selected by rules, sets
-    tier2_needed=True so the orchestrator can invoke the dynamic planner.
+    ``recon_output`` may be empty — in that case only the ALWAYS_ACTIVE
+    set fires. The supervisor planner is responsible for deciding
+    whether the returned set is worth dispatching; this function is a
+    pure expansion and never raises.
     """
-    recon_lower = recon_output.lower()
+    recon_lower = (recon_output or "").lower()
     selected: dict[str, str] = {}  # config_name -> reason
 
     # Apply routing rules
@@ -154,11 +172,7 @@ def route(recon_output: str) -> RoutingDecision:
             configs.append(config)
             reasoning.append(f"[{config_name}] {reason}")
 
-    # Determine if Tier 2 should be activated
-    tier2_needed = len(configs) < MIN_AGENTS_THRESHOLD
-
     return RoutingDecision(
         agent_configs=configs,
         reasoning=reasoning,
-        tier2_needed=tier2_needed,
     )

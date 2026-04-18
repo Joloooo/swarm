@@ -1,69 +1,84 @@
-"""Routing edges — conditional logic that decides which node runs next."""
+"""Routing edges — translate supervisor decisions into graph transitions.
+
+Two edge functions live here:
+
+- :func:`route_after_planner` reads ``state["next_action"]`` (set by
+  the supervisor planner) and returns the next node name.
+- :func:`fanout_pending_dispatch` is shared by ``playbook_dispatch``
+  and ``dynamic_dispatch``. Both dispatch nodes populate
+  ``state["pending_dispatch"]`` with the same shape; this edge turns
+  that list into parallel :class:`Send` calls against
+  ``pentest_workflow``. If the list is empty, the edge routes back to
+  the supervisor so it can replan (typical when recon was empty and
+  the playbook library picked nothing beyond the always-on set — or
+  when the dynamic generator returned no strategies).
+"""
+
+from __future__ import annotations
 
 import logging
 from typing import Literal
 
-from langchain_core.messages import AIMessage
 from langgraph.types import Send
 
-from src.planning.router import route
 from src.state import SwarmGraphState
 
 logger = logging.getLogger(__name__)
 
 
-def route_after_recon(state: SwarmGraphState) -> list[Send]:
-    """After recon, use Tier 1 router to decide which agents to dispatch.
+_NextNode = Literal["recon", "playbook_dispatch", "dynamic_dispatch", "report"]
 
-    Uses LangGraph's Send() to fan out to parallel agent nodes.
-    The router analyzes recon output and selects relevant agents.
+
+def route_after_planner(state: SwarmGraphState) -> _NextNode:
+    """Read the supervisor's decision and pick the next node."""
+    action = state.get("next_action", "report")
+
+    if action == "recon":
+        return "recon"
+    if action == "playbook":
+        return "playbook_dispatch"
+    if action == "dynamic":
+        return "dynamic_dispatch"
+    if action == "report":
+        return "report"
+
+    # Unknown / missing — fail safe by reporting.
+    logger.warning(
+        "route_after_planner: unknown next_action=%r, routing to report.",
+        action,
+    )
+    return "report"
+
+
+def fanout_pending_dispatch(state: SwarmGraphState) -> list:
+    """Fan out staged dispatch items to parallel pentest_workflow runs.
+
+    Reads ``state["pending_dispatch"]`` — a list of dicts shaped like
+    ``{"agent_id", "config_name", "methodology", "mode"}`` — and emits
+    one :class:`Send` per item. Empty list routes back to the planner.
     """
-    # Extract recon output from the last *agent* AI message. Skip boundary
-    # messages emitted by graph.py:traced() (tagged with additional_kwargs
-    # {"node": ...}) and refusal/error tags — we only want real agent output.
-    messages = state.get("messages", [])
-    recon_output = ""
-    for msg in reversed(messages):
-        if not isinstance(msg, AIMessage) or not msg.content:
-            continue
-        kw = getattr(msg, "additional_kwargs", {}) or {}
-        if kw.get("node") or kw.get("refusal") or kw.get("error"):
-            continue
-        recon_output = msg.content if isinstance(msg.content, str) else str(msg.content)
-        break
+    pending = state.get("pending_dispatch", []) or []
 
-    # Run Tier 1 router
-    decision = route(recon_output)
+    if not pending:
+        logger.info(
+            "fanout_pending_dispatch: nothing to dispatch, returning to planner."
+        )
+        return ["planner"]
 
     logger.info(
-        f"Tier 1 router selected {len(decision.agent_configs)} agents: "
-        f"{[c.agent_id for c in decision.agent_configs]}"
+        "fanout_pending_dispatch: dispatching %d parallel workflow(s).",
+        len(pending),
     )
-    for reason in decision.reasoning:
-        logger.info(f"  {reason}")
-
-    configs = decision.agent_configs
-
-    if not configs:
-        return [Send("report", state)]
-
-    mode = state.get("mode", "analyze")
-
     return [
-        Send("pentest_workflow", {
-            **state,
-            "agent_id": config.agent_id,
-            "config_name": config.config_name,
-            "methodology": config.methodology,
-            "mode": mode,
-        })
-        for config in configs
+        Send(
+            "pentest_workflow",
+            {
+                **state,
+                "agent_id": item["agent_id"],
+                "config_name": item["config_name"],
+                "methodology": item["methodology"],
+                "mode": item.get("mode", "analyze"),
+            },
+        )
+        for item in pending
     ]
-
-
-def route_tier2(state: SwarmGraphState) -> Literal["report"]:
-    """After Tier 2 check, always proceed to report.
-
-    Future enhancement: dispatch Tier 2 dynamic agents before report.
-    """
-    return "report"

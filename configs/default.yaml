@@ -22,11 +22,6 @@ agents:
     custom: true
   max_parallel: 10     # Max agents running simultaneously
 
-# Planning
-planning:
-  tier1_router: true   # Deterministic playbook router
-  tier2_planner: true  # Dynamic LLM planner (fallback)
-
 # Stealth
 stealth:
   enabled: true

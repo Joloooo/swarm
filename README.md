@@ -69,23 +69,43 @@ LangGraph's blockbuster detector flags (they're already wrapped in
 ## Architecture
 
 ```
-START → initialize → recon → [Tier 1 router fans out] → pentest_workflow(s) → check_tier2 → report → END
+START → initialize → planner ←──────────────────────────┐
+                      │                                  │
+         ┌────────────┼────────────┬─────────────┐       │
+         ↓            ↓            ↓             ↓       │
+       recon   pentest_workflow  web_search    report    │
+                 (×N parallel,                   │       │
+                 Send() fan-out)                 │       │
+                      │                          │       │
+                      └── all workers return ────┘       │
+                                 │                       │
+                                 └───────────────────────┘
+                                        report → END
 ```
 
+Supervisor-shaped graph: the `planner` node is the single decision-maker.
+Every worker edges back to it, and on each turn the planner emits a JSON
+directive picking the next action — `recon`, `attack` (with the exact
+list of attack configs to fan out), `web_search`, or `report`.
+
 **Nodes** (`src/nodes/`):
-- `initialize` — sets up target info and defaults
-- `recon` — runs the reconnaissance agent (port scan, directory discovery, fingerprinting)
-- `pentest_workflow` — executes a two-phase attack workflow (analyze → optionally exploit)
-- `check_tier2` — activates the dynamic LLM planner if Tier 1 found too few results
+- `initialize` — seeds stealth defaults and cleans leftover tmux state
+- `planner` — supervisor LLM; decides the next action and, for `attack`,
+  the list of configs (named or custom) to run in parallel
+- `recon` — reconnaissance agent (port scan, directory discovery,
+  fingerprinting)
+- `pentest_workflow` — executes a two-phase attack workflow
+  (analyze → optionally exploit) for a single config_name
+- `web_search` — looks up external facts on the planner's request
 - `report` — aggregates all findings into a final report
 
 **Edges** (`src/edges/`):
-- `route_after_recon` — Tier 1 router analyzes recon output and dispatches relevant workflows in parallel via `Send()`
-- `route_tier2` — routes to report after Tier 2 check
+- `route_after_planner` — reads the planner's decision. Returns a node
+  name (recon / web_search / report) or a list of `Send()` calls (for
+  `attack`) that fan out to parallel `pentest_workflow` runs
 
 **Key subsystems:**
-- `agents/` — config-driven agent pattern. One function, different configs. 14 agents across 3 methodologies (OWASP, vuln-type, custom chains)
-- `planning/` — two-tier planning. Tier 1: deterministic regex-based router. Tier 2: LLM-generated dynamic agents
+- `agents/` — config-driven agent pattern. One function, different configs. 13 configs across 3 methodologies (OWASP, vuln-type, custom chains)
 - `knowledge/` — triple-hybrid knowledge delivery. Layer 1: prompt rules. Layer 2: skill docs. Layer 3: RAG vector store
 - `stealth/` — WAF/IDS detection (Cloudflare, ModSecurity, AWS WAF) with stealth level propagation
 - `loop/` — 4-strategy loop detection (hard cap, exact repeat, same-tool repeat, budget pressure)
@@ -117,8 +137,7 @@ SwarmAttacker/
 │   ├── edges/                  # Routing logic
 │   ├── agents/                 # Config-driven agent system
 │   │   ├── base.py             # AgentConfig, WorkflowConfig, make_agent_node
-│   │   └── configs/            # 14 agent configs (owasp/, vulntype/, custom/)
-│   ├── planning/               # Tier 1 router + Tier 2 dynamic planner
+│   │   └── configs/            # 13 agent configs (owasp/, vulntype/, custom/)
 │   ├── knowledge/              # 3-layer knowledge system
 │   ├── tools/                  # tmux-based command execution
 │   ├── stealth/                # WAF/IDS detection
@@ -134,7 +153,6 @@ Runtime behavior is controlled by `configs/default.yaml`. Each setting can be ov
 
 Key toggles:
 - `knowledge.base_rules` / `skill_loading` / `rag` — enable/disable each knowledge layer
-- `planning.tier1_router` / `tier2_planner` — enable/disable planning tiers
 - `stealth.enabled` — enable/disable WAF/IDS evasion
 - `agents.methodologies.owasp` / `vulntype` / `custom` — enable/disable agent groups
 

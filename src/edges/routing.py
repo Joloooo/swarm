@@ -1,23 +1,19 @@
-"""Routing edges — translate supervisor decisions into graph transitions.
+"""Routing edge — translates supervisor decisions into graph transitions.
 
-Two edge functions live here:
+One edge function lives here. :func:`route_after_planner` reads the
+supervisor's state update and returns either a node name (for
+``recon`` / ``web_search`` / ``report``) or a list of :class:`Send`
+calls (for ``attack``, which fans out to parallel ``pentest_workflow``
+runs — one per entry in ``state["pending_dispatch"]``).
 
-- :func:`route_after_planner` reads ``state["next_action"]`` (set by
-  the supervisor planner) and returns the next node name.
-- :func:`fanout_pending_dispatch` is shared by ``playbook_dispatch``
-  and ``dynamic_dispatch``. Both dispatch nodes populate
-  ``state["pending_dispatch"]`` with the same shape; this edge turns
-  that list into parallel :class:`Send` calls against
-  ``pentest_workflow``. If the list is empty, the edge routes back to
-  the supervisor so it can replan (typical when recon was empty and
-  the playbook library picked nothing beyond the always-on set — or
-  when the dynamic generator returned no strategies).
+The planner itself is responsible for populating ``pending_dispatch``
+when it picks ``action="attack"``; this edge only reads it.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Union
 
 from langgraph.types import Send
 
@@ -26,63 +22,48 @@ from src.state import SwarmGraphState
 logger = logging.getLogger(__name__)
 
 
-_NextNode = Literal[
-    "recon", "playbook_dispatch", "dynamic_dispatch", "web_search", "report"
-]
+def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
+    """Pick the next graph transition based on the supervisor's decision.
 
+    For ``attack``: return a list of Send()s, one per staged dispatch
+    item. If the planner wrote an empty list (defensive — it should
+    have flipped to report itself), fall back to the report node.
 
-def route_after_planner(state: SwarmGraphState) -> _NextNode:
-    """Read the supervisor's decision and pick the next node."""
+    For every other action: return the node name as a string.
+    """
     action = state.get("next_action", "report")
 
-    if action == "recon":
-        return "recon"
-    if action == "playbook":
-        return "playbook_dispatch"
-    if action == "dynamic":
-        return "dynamic_dispatch"
-    if action == "web_search":
-        return "web_search"
-    if action == "report":
-        return "report"
+    if action == "attack":
+        pending = state.get("pending_dispatch") or []
+        if not pending:
+            logger.warning(
+                "route_after_planner: action=attack but pending_dispatch "
+                "is empty; routing to report."
+            )
+            return "report"
+        logger.info(
+            "route_after_planner: fanning out %d parallel pentest_workflow(s).",
+            len(pending),
+        )
+        return [
+            Send(
+                "pentest_workflow",
+                {
+                    **state,
+                    "agent_id": item["agent_id"],
+                    "config_name": item["config_name"],
+                    "methodology": item["methodology"],
+                    "mode": item.get("mode", "analyze"),
+                },
+            )
+            for item in pending
+        ]
 
-    # Unknown / missing — fail safe by reporting.
+    if action in {"recon", "web_search", "report"}:
+        return action
+
     logger.warning(
         "route_after_planner: unknown next_action=%r, routing to report.",
         action,
     )
     return "report"
-
-
-def fanout_pending_dispatch(state: SwarmGraphState) -> list:
-    """Fan out staged dispatch items to parallel pentest_workflow runs.
-
-    Reads ``state["pending_dispatch"]`` — a list of dicts shaped like
-    ``{"agent_id", "config_name", "methodology", "mode"}`` — and emits
-    one :class:`Send` per item. Empty list routes back to the planner.
-    """
-    pending = state.get("pending_dispatch", []) or []
-
-    if not pending:
-        logger.info(
-            "fanout_pending_dispatch: nothing to dispatch, returning to planner."
-        )
-        return ["planner"]
-
-    logger.info(
-        "fanout_pending_dispatch: dispatching %d parallel workflow(s).",
-        len(pending),
-    )
-    return [
-        Send(
-            "pentest_workflow",
-            {
-                **state,
-                "agent_id": item["agent_id"],
-                "config_name": item["config_name"],
-                "methodology": item["methodology"],
-                "mode": item.get("mode", "analyze"),
-            },
-        )
-        for item in pending
-    ]

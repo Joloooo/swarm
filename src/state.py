@@ -81,7 +81,6 @@ class SwarmState:
 
     # -- Planning / routing metadata --
     active_agents: Annotated[list[str], operator.add]
-    tier2_activated: bool
 
 
 # LangGraph needs a TypedDict or dict-like schema.
@@ -114,18 +113,18 @@ class SwarmGraphState(TypedDict, total=False):
 
     # Planning
     active_agents: Annotated[list[str], operator.add]
-    tier2_activated: bool  # legacy flag kept for report_node compatibility
 
     # -- Supervisor planner state (src/nodes/planner.py) --
     # The action the planner chose on its most recent turn. Read by
     # route_after_planner to pick the next node.
-    next_action: str  # "recon" | "playbook" | "dynamic" | "report"
+    next_action: str  # "attack" | "recon" | "web_search" | "report"
     # How many times the supervisor has been invoked this run. Capped
     # to prevent runaway supervision loops.
     planner_iters: int
-    # Configs the dispatch nodes (playbook_dispatch, dynamic_dispatch)
-    # stage for the shared fan-out edge. Overwritten each dispatch,
-    # not reduced.
+    # Configs the planner staged for attack fan-out. Populated by
+    # planner_node when it picks action="attack"; read by
+    # route_after_planner to emit one Send() per item. Overwritten each
+    # turn, not reduced.
     pending_dispatch: list[dict]
     # Convenience flag the planner can check to avoid asking for recon
     # again when it has already run at least once.

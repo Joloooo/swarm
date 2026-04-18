@@ -22,6 +22,8 @@ async def report_node(state: SwarmGraphState) -> dict:
         key=lambda f: severity_order.get(f.severity.value, 5),
     )
 
+    custom_used = sum(1 for r in results if r.methodology == "custom")
+
     summary_lines = [
         "## SwarmAttacker Penetration Test Report",
         f"**Target:** {state.get('target_url', 'unknown')}",
@@ -31,7 +33,7 @@ async def report_node(state: SwarmGraphState) -> dict:
         f"**Total findings:** {len(findings)}",
         f"**WAF detected:** {'Yes' if state.get('waf_detected') else 'No'}",
         f"**Stealth level:** {state.get('stealth_level', 0)}",
-        f"**Tier 2 activated:** {'Yes' if state.get('tier2_activated') else 'No'}",
+        f"**Custom configs used:** {custom_used}",
         "",
     ]
 

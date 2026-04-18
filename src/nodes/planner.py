@@ -1,15 +1,24 @@
-"""Supervisor planner node — the brain of the SwarmAttacker graph.
+"""Supervisor planner node — the single decision-maker of the graph.
 
-The planner is the **only** decision-maker in the graph. Every other
-node (recon, playbook_dispatch, dynamic_dispatch, pentest_workflow,
-web_search, report) edges back here, and the planner decides the next
-hop by emitting a JSON directive:
+The planner is the only decision layer in SwarmAttacker. Every other
+node (recon, pentest_workflow, web_search, report) edges back here,
+and the planner decides the next hop by emitting a JSON directive:
 
-    {"action": "recon" | "playbook" | "dynamic" | "web_search" | "report",
+    {"action": "attack" | "recon" | "web_search" | "report",
+     "configs": [...],
+     "custom_configs": [...],
+     "mode": "analyze" | "full",
      "target_url": "...",
      "target_scope": "...",
-     "search_query": "...",   # only when action == "web_search"
+     "search_query": "...",
      "note": "one-sentence reasoning"}
+
+When the planner picks ``action="attack"`` it also supplies the exact
+set of attack configs to run — either by name (for the 12 pre-registered
+configs under ``src/agents/configs/**``) via the ``configs`` field, or by
+inventing a tailored one on the fly via ``custom_configs``. The planner
+therefore owns what used to be split across ``playbook_dispatch`` and
+``dynamic_dispatch``.
 
 The planner has two tools it can call mid-turn:
 
@@ -17,8 +26,8 @@ The planner has two tools it can call mid-turn:
 - ``validate_website`` — HTTP reachability check. Reports facts;
   the planner judges whether a failure blocks the run.
 
-It does *not* have shell access. That only becomes available once
-the planner routes to an attack node.
+It does *not* have shell access. That only becomes available once the
+planner routes to an attack node via ``pentest_workflow``.
 """
 
 from __future__ import annotations
@@ -28,11 +37,14 @@ import logging
 import re
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.prebuilt import create_react_agent
 
+from src.agents.base import AgentConfig
+from src.agents.configs.registry import get_workflow, register_config
 from src.llm.provider import LLMConfig, get_llm
 from src.state import SwarmGraphState
+from src.tools.terminal import run_command
 from src.tools.url import normalize_url, validate_website
 
 logger = logging.getLogger(__name__)
@@ -42,7 +54,12 @@ logger = logging.getLogger(__name__)
 # keeps asking for more work without making progress.
 MAX_PLANNER_ITERS = 12
 
-VALID_ACTIONS = {"recon", "playbook", "dynamic", "web_search", "report"}
+VALID_ACTIONS = {"attack", "recon", "web_search", "report"}
+
+# Budget defaults for LLM-invented custom attack configs. Match the old
+# dynamic_agents.py defaults so the custom path keeps its prior behavior.
+_CUSTOM_MAX_TOOL_CALLS = 40
+_CUSTOM_MAX_ITERATIONS = 25
 
 SUPERVISOR_SYSTEM_PROMPT = """\
 You are the supervisor of a penetration-testing swarm. You are the
@@ -52,90 +69,96 @@ you and you decide the next step.
 
 # Available actions
 
-Each turn you must end your response with a fenced JSON block
-declaring your decision. The allowed values for "action" are:
+Each turn you must end your response with a fenced JSON block declaring
+your decision. The allowed values for "action" are:
 
-- "recon"    — run the reconnaissance agent against the target.
-               Usually the right first step, but optional: if the
-               user already described the target in detail, or if
-               recon has already run, you can skip ahead.
-- "playbook" — dispatch the Shannon-style deterministic playbook
-               library. This expands recon output into a set of
-               known attack workflows (sqli, xss, auth-testing,
-               idor, ssti, ssrf, lfi, input-validation, session-mgmt,
-               error-handling, crypto, business-logic, chain-ssrf).
-               The three always-on picks (sqli, xss, input-validation)
-               fire even if no regex matched. Choose this when recon
-               returned substantive content.
-- "dynamic"  — ask a dedicated LLM to generate custom attack configs
-               tailored to the target. Prefer this over "playbook"
-               when recon output is thin, hostile, or describes an
-               unusual tech stack that the regex library won't match
-               well.
-- "web_search" — run an external web search (Tavily) and crawl the
-               top hits (HTTP with Playwright fallback) for grounded
-               background knowledge. This action does NOT probe the
-               target. Use it when you need public information that
-               isn't on the target itself — for example:
-               * recon named a framework/CMS/plugin you don't
-                 recognise and you need to know its common attack
-                 surface before picking playbook vs dynamic;
-               * a workflow failed with an error string you want to
-                 understand (a library quirk, a CVE, a WAF signature);
-               * the user asked a knowledge question ("what is X?"
-                 "how does Y work?") that isn't answered by the
-                 target's own pages;
-               * you want to confirm whether a fingerprinted version
-                 is vulnerable to a specific CVE before firing an
-                 exploit.
-               Avoid web_search when: the missing information can be
-               obtained by scanning the target (use recon instead);
-               the target itself is what needs to be crawled (recon
-               already crawls); or the question is purely about what
-               to do next (just decide).
-- "report"   — finalize the run. Aggregates every finding into a
-               report and ends the graph. Choose this when you have
-               enough evidence, when further tries are unlikely to
-               pay off, or when the target is clearly unreachable
-               and the user's intent can't be satisfied.
+- "recon"      — run the reconnaissance agent against the target.
+                 Usually the right first step, but optional: if the
+                 user already described the target in detail, or if
+                 recon has already run, you can skip ahead.
+- "attack"     — run one or more attack workflows in parallel. You
+                 must also supply the configs to run, either by name
+                 ("configs") or as freshly-invented ones
+                 ("custom_configs"), or both.
+- "web_search" — look up an external fact (CVE details, bypass
+                 technique, tool syntax). Also supply "search_query".
+- "report"     — finalize the run. Aggregate every finding into a
+                 report and end the graph. Choose this when you have
+                 enough evidence, further tries are unlikely to pay
+                 off, or the target is clearly unreachable.
+
+# Available attack configs (for action="attack")
+
+Pick any subset by name in "configs". Use the one-line descriptions
+below to judge which configs apply to the recon output you have. You
+are NOT required to include any particular config — decide based on
+the target. If recon shows the target has no inputs, picking xss is
+pointless; if it's a pure static site, most of these don't fit.
+
+Pre-registered configs:
+- sqli: SQL injection probing of URL params, forms, headers, cookies;
+  uses sqlmap for confirmed injection points.
+- xss: reflected and stored cross-site scripting against reflected-input
+  surfaces (search, comment, name, feedback fields, etc.).
+- idor: insecure direct object reference — tampering with IDs in URLs
+  and API paths to access other users' resources.
+- lfi: local file inclusion via path traversal on file/path/include params.
+- ssrf: server-side request forgery on URL-taking inputs (webhook,
+  callback, import-from-url, redirect).
+- ssti: server-side template injection against Jinja/Twig/Freemarker/etc.
+- auth-testing: authentication bypass, default credentials, weak JWT,
+  auth-flow tampering.
+- session-mgmt: cookie flags, session fixation, token entropy, CSRF.
+- error-handling: verbose errors, stack-trace leaks, tech headers exposed.
+- crypto: weak TLS configs, bad hashes, predictable tokens, mixed content.
+- business-logic: workflow/state tampering on carts, payments, roles,
+  admin functions.
+- input-validation: generic fuzzing on upload/API surfaces for encoding
+  and boundary issues.
+- chain-ssrf-to-rce: exploit chain from SSRF to RCE via internal metadata
+  services.
+
+# Custom configs
+
+If recon reveals a stack or attack surface that none of the above cover
+well (niche CMS plugin, unusual API pattern, chained findings from prior
+turns), add an entry to "custom_configs" instead:
+
+- "config_name": unique short identifier (e.g. "graphql-introspection-abuse").
+- "system_prompt": detailed instructions telling that agent what to probe,
+  which tools to run, and what payloads to try.
+
+Custom configs run with the same shell tool as the pre-registered ones.
 
 # URL handling
 
-The URL is load-bearing but not strictly required to be a public
-URL. Targets may be IPv4/IPv6 addresses, RFC1918 internal ranges,
-docker-compose hosts, or CTF boxes. Always call ``normalize_url``
-on whatever the user provided, even if it already looks clean —
-this gives you a structured object (href, host, is_ip, is_private,
-scheme, port) you can reason about.
+The URL is load-bearing but not strictly required to be a public URL.
+Targets may be IPv4/IPv6 addresses, RFC1918 internal ranges, docker-compose
+hosts, or CTF boxes. Always call ``normalize_url`` on whatever the user
+provided, even if it already looks clean — this gives you a structured
+object (href, host, is_ip, is_private, scheme, port) you can reason about.
 
-Call ``validate_website`` only when reachability evidence would
-actually change your decision. A failed check is NOT authoritative:
-private IPs, firewalled hosts, and WAF-protected sites can all fail
-it legitimately. If ``is_private`` is true, don't be surprised when
-``validate_website`` times out. Read the ``reason`` field — a DNS
-failure is a stronger "don't proceed" signal than a timeout.
+Call ``validate_website`` only when reachability evidence would actually
+change your decision. A failed check is NOT authoritative: private IPs,
+firewalled hosts, and WAF-protected sites can all fail it legitimately.
+If ``is_private`` is true, don't be surprised when ``validate_website``
+times out. Read the ``reason`` field — a DNS failure is a stronger
+"don't proceed" signal than a timeout.
 
 # Reassessment
 
 After each worker, look at what came back:
 
-- New findings?   Consider continuing with a different tactic or
-                  going to report.
-- Recon empty?    Don't blindly fall back to "playbook" — its
-                  regexes will mostly miss. Prefer "dynamic", or
-                  use "web_search" first if the little recon did
-                  surface points at an unfamiliar stack.
-- Unknown stack?  If recon named something you can't immediately
-                  reason about (niche CMS, obscure framework,
-                  unfamiliar CVE identifier), pick "web_search"
-                  once, then go back to playbook/dynamic armed
-                  with the background knowledge. Do not loop
-                  web_search — one round is usually enough.
-- Stealth level   If waf_detected is true and stealth_level is 2,
-  rising?         be more conservative — consider report rather
-                  than firing another loud scan.
-- Same action     If you keep picking the same action and nothing
-  repeating?      is changing, pick "report" instead.
+- New findings?   Consider continuing with a different tactic or going
+                  to report.
+- Recon empty?    Don't blindly run every config; pick a minimal set
+                  or go straight to custom_configs tailored to whatever
+                  tiny signal recon did surface.
+- Stealth level   If waf_detected is true and stealth_level is 2, be
+  rising?         more conservative — consider report rather than firing
+                  another loud scan.
+- Same action     If you keep picking the same action and nothing is
+  repeating?      changing, pick "report" instead.
 
 # Output contract
 
@@ -143,22 +166,28 @@ End EVERY turn with a fenced JSON block of this exact shape:
 
 ```json
 {
-  "action": "recon",
+  "action": "attack",
+  "configs": ["sqli", "xss"],
+  "custom_configs": [
+    {"config_name": "wp-plugin-cve-lookup",
+     "system_prompt": "You test WordPress plugins for known CVEs..."}
+  ],
+  "mode": "analyze",
   "target_url": "http://example.com",
   "target_scope": "example.com",
-  "note": "initial recon on normalized target"
+  "note": "recon showed PHP+MySQL; attacking the obvious surfaces"
 }
 ```
 
-- "action" must be one of: recon, playbook, dynamic, web_search, report.
-- "target_url" must be set once you've normalized it; carry it
-  forward on every subsequent turn.
-- "target_scope" defaults to the hostname unless the user gave a
-  broader scope (e.g. "*.example.com").
-- "search_query" is REQUIRED when "action" is "web_search" and must
-  be a short, specific natural-language query (e.g. "CVE-2024-1234
-  Apache Struts RCE exploit conditions", not "Apache"). Omit it for
-  all other actions.
+Rules:
+
+- "action" must be one of: attack, recon, web_search, report.
+- When action=="attack", at least one of "configs" or "custom_configs"
+  must be non-empty. If you have nothing worth running, pick "report".
+- "mode" is "analyze" (default) or "full". "full" lets configs that
+  define an exploit phase run it after analyze.
+- "search_query" is required iff action=="web_search".
+- Carry "target_url" / "target_scope" forward on every subsequent turn.
 - "note" is a single sentence for the audit log — not marketing copy.
 
 If you cannot parse the user's intent, choose "report" with a note
@@ -177,7 +206,8 @@ _JSON_BLOCK = re.compile(
 def _parse_decision(text: str) -> dict | None:
     """Extract the supervisor's JSON decision from its final message.
 
-    Returns None if no well-formed block is found.
+    Returns None if no well-formed block is found. Uses a forgiving
+    two-pass regex — fenced block first, bare object as fallback.
     """
     if not text:
         return None
@@ -201,7 +231,6 @@ def _final_text(messages: list) -> str:
             content = msg.content
             if isinstance(content, str):
                 return content
-            # Some providers return a list of content blocks.
             if isinstance(content, list):
                 parts = []
                 for block in content:
@@ -212,6 +241,80 @@ def _final_text(messages: list) -> str:
                 return "\n".join(parts)
             return str(content)
     return ""
+
+
+def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
+    """Register any custom configs and build the pending_dispatch list.
+
+    Skips unknown named configs and malformed ``custom_configs`` entries
+    with a warning. Returns the list of dispatch items (possibly empty —
+    the caller is responsible for falling back to "report" in that case).
+    """
+    mode = decision.get("mode") or state.get("mode") or "analyze"
+
+    # Step 1: register custom configs so get_workflow() can resolve them.
+    custom_names: list[str] = []
+    raw_custom = decision.get("custom_configs") or []
+    if not isinstance(raw_custom, list):
+        raw_custom = []
+    seen_custom: set[str] = set()
+    for entry in raw_custom:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("config_name") or "").strip()
+        prompt = str(entry.get("system_prompt") or "").strip()
+        if not name or not prompt:
+            logger.warning(
+                "planner: dropping malformed custom_config %r (missing name or prompt)",
+                entry,
+            )
+            continue
+        if name in seen_custom:
+            logger.warning(
+                "planner: dropping duplicate custom_config name %r", name
+            )
+            continue
+        seen_custom.add(name)
+        cfg = AgentConfig(
+            agent_id=f"custom-{name}",
+            methodology="custom",
+            config_name=name,
+            system_prompt=prompt,
+            tools=[run_command],
+            max_tool_calls=_CUSTOM_MAX_TOOL_CALLS,
+            max_iterations=_CUSTOM_MAX_ITERATIONS,
+        )
+        register_config(cfg)
+        custom_names.append(name)
+
+    # Step 2: union the named configs with the freshly-registered customs,
+    # resolve each against the registry, and stage them for fan-out.
+    raw_named = decision.get("configs") or []
+    if not isinstance(raw_named, list):
+        raw_named = []
+    named = [str(n).strip() for n in raw_named if str(n).strip()]
+
+    pending: list[dict] = []
+    seen: set[str] = set()
+    for i, name in enumerate(named + custom_names):
+        if name in seen:
+            continue
+        seen.add(name)
+        wf = get_workflow(name)
+        if wf is None:
+            logger.warning(
+                "planner: unknown config %r (not in registry after custom "
+                "registration) — skipping",
+                name,
+            )
+            continue
+        pending.append({
+            "agent_id": f"{name}-{i}",
+            "config_name": name,
+            "methodology": wf.analyze.methodology,
+            "mode": mode,
+        })
+    return pending
 
 
 def make_planner_node(llm_config: LLMConfig | None = None):
@@ -254,7 +357,6 @@ def make_planner_node(llm_config: LLMConfig | None = None):
         # them as the record of what happened.
         prior_messages = list(state.get("messages", []))
         if not prior_messages:
-            # First turn with no user input at all — synthesize a stub.
             prior_messages = [
                 HumanMessage(
                     content="No target provided. Ask the user for one via report."
@@ -274,8 +376,6 @@ def make_planner_node(llm_config: LLMConfig | None = None):
             }
 
         result_messages: list = result.get("messages", [])
-        # Only append the NEW messages the agent produced (anything past
-        # the prior conversation we fed in).
         new_messages = result_messages[len(prior_messages):]
 
         final_text = _final_text(result_messages)
@@ -308,14 +408,6 @@ def make_planner_node(llm_config: LLMConfig | None = None):
             or target_url
         ).strip()
 
-        logger.info(
-            "Supervisor turn %d → action=%s target=%s note=%s",
-            iters,
-            action,
-            target_url or "<unset>",
-            decision.get("note", "")[:80],
-        )
-
         update: dict[str, Any] = {
             "planner_iters": iters,
             "next_action": action,
@@ -325,12 +417,32 @@ def make_planner_node(llm_config: LLMConfig | None = None):
             update["target_url"] = target_url
         if target_scope:
             update["target_scope"] = target_scope
-        # Pass search_query through to state when the planner asked for
-        # a web search. web_search_node reads this field first.
-        if action == "web_search":
-            search_query = (decision.get("search_query") or "").strip()
-            if search_query:
-                update["search_query"] = search_query
+
+        if action == "attack":
+            pending = _stage_attack(decision, state)
+            if not pending:
+                logger.warning(
+                    "planner: action=attack but no runnable configs after "
+                    "validation — forcing report."
+                )
+                update["next_action"] = "report"
+            else:
+                mode = decision.get("mode") or state.get("mode") or "analyze"
+                update["mode"] = mode
+                update["pending_dispatch"] = pending
+        elif action == "web_search":
+            query = (decision.get("search_query") or "").strip()
+            if query:
+                update["search_query"] = query
+        # recon / report need no extra fields.
+
+        logger.info(
+            "Supervisor turn %d → action=%s target=%s note=%s",
+            iters,
+            update["next_action"],
+            target_url or "<unset>",
+            (decision.get("note") or "")[:80],
+        )
         return update
 
     planner_node.__name__ = "planner_node"

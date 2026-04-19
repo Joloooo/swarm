@@ -14,10 +14,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool
-from langgraph.prebuilt import create_react_agent
 
 from src.llm.provider import LLMConfig, get_llm
 from src.state import AgentResult, AgentState, Finding, Severity
@@ -276,7 +276,7 @@ def make_agent_node(
 ):
     """Create a node function for the orchestrator graph.
 
-    This wraps create_react_agent into a function that:
+    This wraps create_agent into a function that:
     1. Injects the target_url and knowledge layers into the system prompt
     2. Runs the agent subgraph with loop detection
     3. Extracts structured findings from the agent's output
@@ -296,11 +296,11 @@ def make_agent_node(
             config, target_url, runtime_config, phase1_findings,
         )
 
-        # Create the react agent with iteration limit
-        agent = create_react_agent(
+        # Create the agent with iteration limit
+        agent = create_agent(
             model=llm,
             tools=config.tools,
-            prompt=system_msg,
+            system_prompt=system_msg,
         )
 
         trace: list = []
@@ -314,10 +314,10 @@ def make_agent_node(
             messages = result.get("messages", [])
             findings = _extract_findings(messages, config.agent_id)
 
-            # Mirror the inner ReAct trace up to the parent so Studio chat
+            # Mirror the inner agent trace up to the parent so Studio chat
             # shows every tool call (`run_command("curl ...")`) and the
             # corresponding ToolMessage response inline. Without this the
-            # entire conversation is hidden inside the create_react_agent
+            # entire conversation is hidden inside the create_agent
             # sub-graph and the parent chat looks frozen.
             trace = [m for m in messages if isinstance(m, (AIMessage, ToolMessage))]
             for m in trace:

@@ -37,8 +37,8 @@ import logging
 import re
 from typing import Any
 
+from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.prebuilt import create_react_agent
 
 from src.agents.base import AgentConfig
 from src.agents.configs.registry import get_workflow, register_config
@@ -324,10 +324,10 @@ def make_planner_node(llm_config: LLMConfig | None = None):
     without mutating module state.
     """
     llm = get_llm(llm_config)
-    agent = create_react_agent(
+    agent = create_agent(
         model=llm,
         tools=[normalize_url, validate_website],
-        prompt=SUPERVISOR_SYSTEM_PROMPT,
+        system_prompt=SUPERVISOR_SYSTEM_PROMPT,
     )
 
     async def planner_node(state: SwarmGraphState) -> dict:

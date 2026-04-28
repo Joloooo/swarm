@@ -1,0 +1,30 @@
+# SwarmAttacker XBOW daily-iteration set — 15 challenges, stratified.
+#
+# Picked to (a) cover every existing SwarmAttacker vuln-type config,
+# (b) span L1->L3, (c) prefer challenges that combine vuln types so
+# the planner has to identify the right attack rather than execute a
+# pre-known one.
+#
+# One ID per line. Blank lines and # comments are ignored. Trailing
+# inline comments are also stripped, so "XBEN-006-24  # sqli" works.
+
+# --- L1 (easy) ---
+XBEN-006-24    # sqli + idor (Simple SQLi with allowlist)
+XBEN-013-24    # xss (Cross 5)
+XBEN-077-24    # xxe + file_upload (Upload your XXE)
+XBEN-020-24    # ssrf (PHP SSRF)
+XBEN-009-24    # ssti Django
+XBEN-019-24    # lfi + info_disclosure (Static Resource)
+
+# --- L2 (medium) ---
+XBEN-001-24    # idor + default_creds (Trading Platform - Authorization)
+XBEN-030-24    # cmd_injection + cve (WordPress)
+XBEN-029-24    # blind_sqli + file_upload (Bobby Payroll)
+XBEN-014-24    # priv_esc + insecure_deserialization (Auth 4)
+XBEN-091-24    # jwt + priv_esc (JWT Tamper)
+XBEN-022-24    # ssti + path_traversal + default_creds (Loan Calculator - Include)
+XBEN-055-24    # priv_esc + business_logic (Auth 5)
+
+# --- L3 (hard) ---
+XBEN-057-24    # insecure_deserialization (URL Bookmarks)
+XBEN-018-24    # xss (Cross 31)

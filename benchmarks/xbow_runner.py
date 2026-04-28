@@ -28,13 +28,29 @@ import time
 from pathlib import Path
 
 from src.graph import build_graph
+from src.observability import (
+    make_run_id,
+    run_dir,
+    write_final_state,
+    write_summary,
+)
+from src.tools.terminal import set_log_file as _set_terminal_log_file
 
 logger = logging.getLogger(__name__)
 
 XBOW_ROOT = Path(__file__).resolve().parents[2] / "Benchmarks" / "xbow-validation"
 RESULTS_DIR = Path(__file__).parent / "results"
 DAILY_LIST = Path(__file__).parent / "daily_15.txt"
-RUN_TIMEOUT_S = 15 * 60
+
+# Per-phase timeouts. Bound everything so an overnight --daily run can't
+# stall on a single rotten benchmark (slow mirror, dead apt repo, hung
+# pip resolver). On timeout the subprocess is killed and the finally
+# clause still runs `docker compose down`.
+BUILD_TIMEOUT_S = 1500      # 25 min: image pulls + apt + pip (first build can be slow)
+UP_TIMEOUT_S = 180          # 3 min: `docker compose up --wait` + healthcheck
+DOWN_TIMEOUT_S = 90         # 1.5 min: cleanup
+DISCOVER_TIMEOUT_S = 30     # 30s: `docker compose ps`
+RUN_TIMEOUT_S = 15 * 60     # 15 min: agent invocation
 
 
 def expected_flag(benchmark_id: str) -> str:
@@ -43,29 +59,46 @@ def expected_flag(benchmark_id: str) -> str:
     return f"FLAG{{{digest}}}"
 
 
-def _run(cmd: list[str], cwd: Path, *, capture: bool = False, check: bool = True):
-    logger.info("$ %s  (cwd=%s)", " ".join(cmd), cwd)
+def _run(
+    cmd: list[str],
+    cwd: Path,
+    *,
+    timeout: float | None,
+    capture: bool = False,
+    check: bool = True,
+):
+    """Run a subprocess with a hard timeout. On timeout the child is killed
+    and a CalledProcessError-shaped TimeoutExpired propagates so the caller
+    can decide whether to retry or move on."""
+    logger.info("$ %s  (cwd=%s, timeout=%s)", " ".join(cmd), cwd, timeout)
     return subprocess.run(
         cmd, cwd=cwd, check=check,
         capture_output=capture, text=capture,
+        timeout=timeout,
     )
 
 
-def make_target(benchmark_id: str, target: str) -> None:
-    _run(["make", f"BENCHMARK={benchmark_id}", target], cwd=XBOW_ROOT)
+def make_build(benchmark_id: str) -> None:
+    _run(["make", f"BENCHMARK={benchmark_id}", "build"],
+         cwd=XBOW_ROOT, timeout=BUILD_TIMEOUT_S)
+
+
+def make_run(benchmark_id: str) -> None:
+    _run(["make", f"BENCHMARK={benchmark_id}", "run"],
+         cwd=XBOW_ROOT, timeout=UP_TIMEOUT_S)
 
 
 def docker_down(benchmark_id: str) -> None:
     bench_dir = XBOW_ROOT / "benchmarks" / benchmark_id
     _run(["docker", "compose", "down", "--remove-orphans"],
-         cwd=bench_dir, check=False)
+         cwd=bench_dir, timeout=DOWN_TIMEOUT_S, check=False)
 
 
 def discover_target_url(benchmark_id: str) -> str:
     """Return http://localhost:<port> for the first published port."""
     bench_dir = XBOW_ROOT / "benchmarks" / benchmark_id
     out = _run(["docker", "compose", "ps", "--format", "json"],
-               cwd=bench_dir, capture=True).stdout
+               cwd=bench_dir, timeout=DISCOVER_TIMEOUT_S, capture=True).stdout
 
     services: list[dict] = []
     stripped = out.strip()
@@ -89,8 +122,16 @@ def discover_target_url(benchmark_id: str) -> str:
 async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
     flag = expected_flag(benchmark_id)
     started = time.time()
+    # Pin run_id and log dir BEFORE any graph activity so every traced()
+    # node and every terminal-tool call lands in the same per-run folder.
+    run_id = make_run_id(benchmark_id=benchmark_id)
+    rdir = run_dir(run_id)
+    _set_terminal_log_file(rdir / "terminal_events.jsonl")
+
     result: dict = {
         "benchmark_id": benchmark_id,
+        "run_id": run_id,
+        "run_dir": str(rdir),
         "expected_flag": flag,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "flag_found": False,
@@ -99,18 +140,20 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         "target_url": None,
         "error": None,
     }
+    agent_state: dict = {}
 
     try:
         if not skip_build:
-            make_target(benchmark_id, "build")
-        make_target(benchmark_id, "run")
+            make_build(benchmark_id)
+        make_run(benchmark_id)
         result["target_url"] = discover_target_url(benchmark_id)
-        logger.info("[%s] target=%s expected_flag=%s",
-                    benchmark_id, result["target_url"], flag)
+        logger.info("[%s] target=%s expected_flag=%s run_dir=%s",
+                    benchmark_id, result["target_url"], flag, rdir)
 
         graph = build_graph()
         agent_state = await asyncio.wait_for(
             graph.ainvoke({
+                "run_id": run_id,
                 "target_url": result["target_url"],
                 "target_scope": result["target_url"],
                 "messages": [],
@@ -126,7 +169,17 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         result["findings_count"] = len(agent_state.get("findings") or [])
 
     except asyncio.TimeoutError:
-        result["error"] = f"timeout after {RUN_TIMEOUT_S}s"
+        result["error"] = f"agent timeout after {RUN_TIMEOUT_S}s"
+        logger.error("[%s] %s", benchmark_id, result["error"])
+    except subprocess.TimeoutExpired as e:
+        # build / up / down / ps hung past its phase timeout
+        phase = "unknown"
+        cmd0 = (e.cmd or [None])[0]
+        if cmd0 == "make":
+            phase = "build" if "build" in (e.cmd or []) else "up"
+        elif cmd0 == "docker":
+            phase = "down" if "down" in (e.cmd or []) else "ps"
+        result["error"] = f"phase '{phase}' timeout after {e.timeout}s"
         logger.error("[%s] %s", benchmark_id, result["error"])
     except Exception as e:  # noqa: BLE001
         result["error"] = f"{type(e).__name__}: {e}"
@@ -137,6 +190,26 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         except Exception:  # noqa: BLE001
             logger.exception("[%s] docker compose down failed", benchmark_id)
         result["duration_s"] = round(time.time() - started, 1)
+
+        # Persist run artifacts even on partial failures — final_state may
+        # be empty, summary will still be informative about where it died.
+        try:
+            write_final_state(run_id, agent_state)
+        except Exception:  # noqa: BLE001
+            logger.exception("[%s] write_final_state failed", benchmark_id)
+        try:
+            write_summary(
+                run_id,
+                benchmark_id=benchmark_id,
+                target_url=result["target_url"],
+                expected_flag=flag,
+                flag_found=result["flag_found"] if not result["error"] else None,
+                duration_s=result["duration_s"],
+                error=result["error"],
+                final_state=agent_state,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("[%s] write_summary failed", benchmark_id)
 
     return result
 
@@ -189,7 +262,9 @@ async def main_async(args) -> int:
 
         print(
             f"  {verdict}  ({r['duration_s']}s, "
-            f"{r['findings_count']} findings) → {path}",
+            f"{r['findings_count']} findings)\n"
+            f"     summary  → {r['run_dir']}/summary.md\n"
+            f"     jsonl    → {path}",
             flush=True,
         )
 

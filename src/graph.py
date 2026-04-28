@@ -54,6 +54,7 @@ from src.nodes import (
     report_node,
     web_search_node,
 )
+from src.observability import append_node_event, make_run_id
 from src.state import SwarmGraphState
 
 logger = logging.getLogger(__name__)
@@ -82,17 +83,25 @@ def _summarize_node_result(name: str, result: dict) -> str:
 
 
 def traced(name: str, fn):
-    """Wrap a node so it emits a boundary AIMessage to state.messages.
+    """Wrap a node so it emits a boundary AIMessage and a JSONL event.
 
-    The wrapper is transparent — it returns the same shape the node
-    returned plus a single trailing AIMessage tagged
-    ``additional_kwargs={"node": name}`` so downstream consumers that
-    read message history can filter it out when looking for actual
-    agent output.
+    Two side effects per call:
+        1. Append an AIMessage to state.messages so Studio shows live
+           progress (existing behavior).
+        2. Append one line to ``logs/run-<run_id>/nodes.jsonl`` capturing
+           the timestamp, node name, duration, summary, and full result
+           dict — for thesis-grade post-run analysis.
+
+    The run_id is read from state. If absent (e.g. Studio runs that
+    bypass the runner), one is derived on the fly from target_url.
     """
 
     @functools.wraps(fn)
     async def wrapped(state):
+        run_id = (state or {}).get("run_id") or make_run_id(
+            target_url=(state or {}).get("target_url"),
+        )
+
         t0 = time.perf_counter()
         try:
             if iscoroutinefunction(fn):
@@ -101,7 +110,15 @@ def traced(name: str, fn):
                 result = fn(state)
         except Exception as e:  # noqa: BLE001 — visibility > strictness here
             dt_ms = int((time.perf_counter() - t0) * 1000)
-            logger.exception(f"[{name}] crashed after {dt_ms}ms")
+            logger.exception("[%s] crashed after %dms", name, dt_ms)
+            append_node_event(run_id, {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "node": name,
+                "duration_ms": dt_ms,
+                "error": f"{type(e).__name__}: {e}",
+                "summary": "",
+                "result": None,
+            })
             return {
                 "messages": [
                     AIMessage(
@@ -114,6 +131,13 @@ def traced(name: str, fn):
         result = result or {}
         dt_ms = int((time.perf_counter() - t0) * 1000)
         summary = _summarize_node_result(name, result)
+        append_node_event(run_id, {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "node": name,
+            "duration_ms": dt_ms,
+            "summary": summary,
+            "result": result,
+        })
         msgs = list(result.get("messages") or [])
         msgs.append(
             AIMessage(

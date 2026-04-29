@@ -1,0 +1,29 @@
+# SwarmAttacker XBOW daily set biased toward targets that build on current
+# Docker Desktop/macOS without known EOL base-image problems.
+#
+# This keeps the original daily_15.txt intact for thesis stratification, but
+# avoids the known bit-rot cases seen locally:
+# - python:2.7.18-slim / python:3.8-slim-buster apt 404s
+# - mysql:5.7.15 manifest/cache validation failures on Apple Silicon
+# - newer Node image drift
+#
+# One ID per line. Blank lines and # comments are ignored.
+
+# --- Existing daily entries that built and reached SwarmAttacker ---
+XBEN-006-24    # sqli + idor
+XBEN-077-24    # xxe + file_upload
+XBEN-020-24    # ssrf
+XBEN-009-24    # ssti Django
+XBEN-019-24    # lfi + info_disclosure
+XBEN-030-24    # cmd_injection + cve
+XBEN-029-24    # blind_sqli + file_upload
+XBEN-014-24    # priv_esc + insecure_deserialization
+XBEN-055-24    # priv_esc + business_logic
+XBEN-057-24    # insecure_deserialization
+
+# --- Replacements for known build-bitrot entries ---
+XBEN-021-24    # idor + default_creds
+XBEN-026-24    # cve + path_traversal + lfi
+XBEN-032-24    # xxe + default_creds
+XBEN-038-24    # graphql + sqli
+XBEN-041-24    # file_upload + command_injection

@@ -8,14 +8,140 @@ survives crashes, and gives each agent its own isolated shell.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 from langchain_core.tools import tool
 
 logger = logging.getLogger(__name__)
+
+
+# -- Structured event log (JSONL, tail -f friendly) --
+#
+# Every tmux operation — session/pane setup, command send, output capture,
+# timeout, error — is appended to a JSONL file as one event per line.
+# Pair with ``tail -f <file> | jq`` in a separate terminal while the graph
+# runs. Every agent's commands are logged with an ``agent`` field so you
+# can filter per-agent, e.g. ``jq 'select(.agent=="owasp-recon")'``.
+#
+# Override the directory with the ``SWARM_LOG_DIR`` env var. Default is
+# ``./logs/`` relative to the working directory so both ``langgraph dev``
+# and the ``swarmattacker`` CLI drop logs in the project root.
+
+def _init_log_file() -> Path:
+    """Pick a log file path, falling back to /tmp if the preferred dir is unwritable."""
+    preferred = Path(os.getenv("SWARM_LOG_DIR", "logs"))
+    for base in (preferred, Path("/tmp/swarmattacker-logs")):
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            return base / f"run-{datetime.now():%Y%m%d-%H%M%S}-{os.getpid()}.jsonl"
+        except Exception:
+            continue
+    # Last resort: a flat file in /tmp with a unique name.
+    return Path(f"/tmp/swarmattacker-run-{os.getpid()}.jsonl")
+
+
+_LOG_FILE = _init_log_file()
+_LOG_LOCK = threading.Lock()
+
+# Tell the user where the log lives — printed to stderr so it always shows,
+# even if stdout is being captured by another process (langgraph dev, pytest).
+print(
+    f"[swarmattacker] terminal event log → {_LOG_FILE.resolve()}\n"
+    f"[swarmattacker] live-tail with:  tail -f {_LOG_FILE} | jq",
+    file=sys.stderr,
+    flush=True,
+)
+
+
+def set_log_file(path: Path) -> Path:
+    """Redirect terminal event logging to *path* for the rest of the process.
+
+    Used by the benchmark runner to land all artifacts of a run under a
+    shared ``logs/run-<run_id>/`` directory. The parent directory is
+    created if missing. Returns the new path so callers can confirm.
+
+    Safe to call multiple times across a multi-benchmark sweep — each
+    benchmark sets its own log file before invoking the graph.
+    """
+    global _LOG_FILE
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _LOG_FILE = path
+    print(
+        f"[swarmattacker] terminal event log → {_LOG_FILE.resolve()}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return _LOG_FILE
+
+
+def _verbose_print(event: str, *, agent: str | None, payload: dict) -> None:
+    """Live-stream a human-readable view of a tool event to stderr.
+
+    Active only when ``SWARM_VERBOSE=1`` is in the environment (set by the
+    benchmark runner's ``--verbose`` flag). Designed for "I want to watch
+    the agent think" debug sessions: one tool call per stanza, full output
+    not truncated.
+    """
+    if not os.getenv("SWARM_VERBOSE"):
+        return
+    if event not in ("command", "output"):
+        return
+    ts = datetime.now().strftime("%H:%M:%S")
+    tag = f"[{agent or '?'} @ {ts}]"
+    if event == "command":
+        cmd = payload.get("cmd", "")
+        reason = payload.get("reasoning", "")
+        print(f"\n{tag} $ {cmd}", file=sys.stderr, flush=True)
+        if reason:
+            print(f"{tag}   reasoning: {reason}", file=sys.stderr, flush=True)
+    elif event == "output":
+        dur_ms = payload.get("duration_ms", "?")
+        nbytes = payload.get("bytes", "?")
+        tail = payload.get("tail", "") or ""
+        print(
+            f"{tag} ↳ output ({dur_ms} ms, {nbytes} bytes):",
+            file=sys.stderr, flush=True,
+        )
+        for line in str(tail).splitlines() or [""]:
+            print(f"{tag}   {line}", file=sys.stderr, flush=True)
+
+
+def _log_event(event: str, *, agent: str | None = None, **payload) -> None:
+    """Append one JSON event to the run log. Failures are swallowed.
+
+    Never raises — logging is observability, not a hard dependency. If
+    the disk is full or the file gets unlinked mid-run, the graph should
+    still finish. We also serialize writes through a lock so parallel
+    agents don't produce interleaved half-lines.
+
+    When ``SWARM_VERBOSE=1`` is set we also stream a human-readable
+    rendering of ``command`` / ``output`` events to stderr so the user
+    can watch the agent live without a second ``tail -f`` window.
+    """
+    _verbose_print(event, agent=agent, payload=payload)
+    try:
+        record: dict = {
+            "ts": datetime.now().isoformat(timespec="milliseconds"),
+            "event": event,
+        }
+        if agent is not None:
+            record["agent"] = agent
+        record.update(payload)
+        line = json.dumps(record, default=str, ensure_ascii=False) + "\n"
+        with _LOG_LOCK, _LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        # Intentionally swallow. Do NOT let a log failure interrupt a run.
+        pass
 
 
 # -- tmux session manager (used internally by tools) --
@@ -51,12 +177,19 @@ def _ensure_session() -> None:
             check=False,
         )
         if result.returncode != 0:
+            stderr = result.stderr.strip() or result.stdout.strip()
+            _log_event(
+                "session_ensure_failed",
+                session=SESSION_NAME,
+                rc=result.returncode,
+                stderr=stderr,
+            )
             # `-A` should make this idempotent; if it still fails something
             # is genuinely wrong (e.g. tmux not installed). Surface it.
             raise RuntimeError(
-                f"tmux session creation failed (rc={result.returncode}): "
-                f"{result.stderr.strip() or result.stdout.strip()}"
+                f"tmux session creation failed (rc={result.returncode}): {stderr}"
             )
+        _log_event("session_ensure", session=SESSION_NAME)
 
 
 def _get_or_create_pane(agent_id: str) -> str:
@@ -72,7 +205,9 @@ def _get_or_create_pane(agent_id: str) -> str:
                 capture_output=True,
             )
             if check.returncode == 0:
+                _log_event("pane_reuse", agent=agent_id, pane=pane_id)
                 return pane_id
+            _log_event("pane_stale", agent=agent_id, pane=pane_id)
             del _PANE_REGISTRY[agent_id]
 
         _ensure_session()
@@ -87,6 +222,7 @@ def _get_or_create_pane(agent_id: str) -> str:
         )
         pane_id = result.stdout.strip()
         _PANE_REGISTRY[agent_id] = pane_id
+        _log_event("pane_create", agent=agent_id, pane=pane_id)
         return pane_id
 
 
@@ -146,13 +282,24 @@ async def _async_run_in_pane(pane_id: str, command: str, timeout: int = 120) -> 
 # -- LangChain tools exposed to agents --
 
 @tool
-async def run_command(command: str, agent_id: str = "default") -> str:
+async def run_command(
+    reasoning: str,
+    command: str,
+    agent_id: str = "default",
+) -> str:
     """Execute a shell command in the agent's isolated tmux session.
 
     Use this for any command-line tool: nmap, curl, sqlmap, gobuster, etc.
     Each agent has its own tmux pane, so commands don't interfere.
 
     Args:
+        reasoning: Required. One to two sentences stating the hypothesis
+            you are testing with this command and what a positive or
+            negative result would mean for the next step. Shown to the
+            operator live in Studio and recorded in the run log.
+            Don't narrate mechanics ("I will run curl"); narrate the
+            decision ("Gobuster listed /admin — confirming whether it
+            is a login page or an open panel").
         command: The shell command to execute.
         agent_id: The agent's ID (used to route to the correct tmux pane).
 
@@ -160,7 +307,35 @@ async def run_command(command: str, agent_id: str = "default") -> str:
         The command's stdout output (truncated if very large).
     """
     pane_id = await asyncio.to_thread(_get_or_create_pane, agent_id)
+
+    t0 = time.perf_counter()
+    _log_event(
+        "command",
+        agent=agent_id,
+        pane=pane_id,
+        cmd=command,
+        reasoning=reasoning,
+    )
+
     output = await _async_run_in_pane(pane_id, command)
+
+    dt_ms = int((time.perf_counter() - t0) * 1000)
+    raw_bytes = len(output)
+    # Log the tail of raw output BEFORE context-window truncation so the
+    # debug log reflects what tmux actually produced, not what the agent
+    # sees after we shrink it. Capped at 4 KB to keep jq-view readable.
+    _log_event(
+        "output",
+        agent=agent_id,
+        pane=pane_id,
+        cmd=command,
+        reasoning=reasoning,
+        duration_ms=dt_ms,
+        bytes=raw_bytes,
+        tail=output[-4000:],
+        truncated_in_log=raw_bytes > 4000,
+        timed_out=output.startswith("[TIMEOUT"),
+    )
 
     # Context management layer 2: output truncation
     # Keep first 100 + last 50 lines, discard middle
@@ -175,7 +350,7 @@ async def run_command(command: str, agent_id: str = "default") -> str:
 
 
 @tool
-async def read_file(file_path: str) -> str:
+async def read_file(reasoning: str, file_path: str) -> str:
     """Read the contents of a file on the target system.
 
     Use this to read files discovered during testing (config files,
@@ -183,6 +358,10 @@ async def read_file(file_path: str) -> str:
     are returned.
 
     Args:
+        reasoning: Required. Why does reading this specific file matter
+            for the investigation — what configuration, credential, or
+            code pattern do you expect to find and how will it advance
+            the attack plan?
         file_path: Absolute path to the file.
 
     Returns:
@@ -194,9 +373,19 @@ async def read_file(file_path: str) -> str:
         async with aiofiles.open(file_path, "r") as f:
             content = await f.read()
     except Exception as e:
+        _log_event(
+            "read_file_error", path=file_path, reasoning=reasoning, error=str(e)
+        )
         return f"Error reading {file_path}: {e}"
 
     lines = content.split("\n")
+    _log_event(
+        "read_file",
+        path=file_path,
+        reasoning=reasoning,
+        bytes=len(content),
+        lines=len(lines),
+    )
     if len(lines) > 500:
         content = "\n".join(lines[:500]) + f"\n\n... [{len(lines) - 500} more lines]"
 
@@ -213,6 +402,7 @@ def cleanup_session() -> None:
     import subprocess
 
     with _SESSION_LOCK, _PANE_LOCK:
+        prior_panes = dict(_PANE_REGISTRY)
         result = subprocess.run(
             ["tmux", "kill-session", "-t", SESSION_NAME],
             capture_output=True,
@@ -220,4 +410,17 @@ def cleanup_session() -> None:
         )
         if result.returncode == 0:
             logger.info(f"Killed stale tmux session: {SESSION_NAME}")
+            _log_event(
+                "session_killed", session=SESSION_NAME, panes=prior_panes
+            )
+        else:
+            # Most common benign case: no session existed to kill. Logged
+            # so the absence of a kill event isn't mysterious when reading
+            # the run log back.
+            _log_event(
+                "session_kill_noop",
+                session=SESSION_NAME,
+                rc=result.returncode,
+                stderr=result.stderr.strip(),
+            )
         _PANE_REGISTRY.clear()

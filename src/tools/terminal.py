@@ -226,13 +226,17 @@ def _get_or_create_pane(agent_id: str) -> str:
         return pane_id
 
 
-def _run_in_pane(pane_id: str, command: str, timeout: int = 120) -> str:
+def _run_in_pane(pane_id: str, command: str, timeout: int | None = None) -> str:
     """Send a command to a tmux pane and capture the output.
 
     Uses a marker-based approach: sends the command, then a unique
     echo marker, and reads pane output until the marker appears.
     """
     import subprocess
+    from src.graph import budgets
+
+    if timeout is None:
+        timeout = budgets.tool_command_timeout_s
 
     marker = f"__SWARM_DONE_{int(time.time() * 1000)}__"
 
@@ -274,8 +278,9 @@ def _run_in_pane(pane_id: str, command: str, timeout: int = 120) -> str:
     return f"[TIMEOUT after {timeout}s] Last output:\n{output[-2000:]}"
 
 
-async def _async_run_in_pane(pane_id: str, command: str, timeout: int = 120) -> str:
-    """Async wrapper around _run_in_pane."""
+async def _async_run_in_pane(pane_id: str, command: str, timeout: int | None = None) -> str:
+    """Async wrapper around _run_in_pane. timeout=None lets _run_in_pane
+    fall back to budgets.tool_command_timeout_s."""
     return await asyncio.to_thread(_run_in_pane, pane_id, command, timeout)
 
 

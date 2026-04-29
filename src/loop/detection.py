@@ -16,6 +16,8 @@ import hashlib
 from collections import Counter
 from dataclasses import dataclass, field
 
+from src.graph import budgets
+
 
 @dataclass
 class LoopDetectionResult:
@@ -29,12 +31,20 @@ class LoopDetector:
 
     def __init__(
         self,
-        max_tool_calls: int = 50,
-        max_repeated_calls: int = 3,
+        max_tool_calls: int | None = None,
+        max_repeated_calls: int | None = None,
         budget_pressure: bool = True,
     ):
-        self.max_tool_calls = max_tool_calls
-        self.max_repeated_calls = max_repeated_calls
+        # Defaults pulled from centralized Budgets so the same caps apply
+        # everywhere unless an explicit per-agent override is passed.
+        self.max_tool_calls = (
+            max_tool_calls if max_tool_calls is not None
+            else budgets.worker_max_tool_calls
+        )
+        self.max_repeated_calls = (
+            max_repeated_calls if max_repeated_calls is not None
+            else budgets.loop_max_repeated_calls
+        )
         self.budget_pressure = budget_pressure
         self._call_history: list[str] = []
         self._tool_names: list[str] = []
@@ -67,14 +77,15 @@ class LoopDetector:
                 )
 
         # Strategy 3: Same-tool repetition (different args but same tool)
-        if len(self._tool_names) >= 5:
-            recent_tools = self._tool_names[-5:]
+        same_tool_threshold = budgets.loop_same_tool_threshold
+        if len(self._tool_names) >= same_tool_threshold:
+            recent_tools = self._tool_names[-same_tool_threshold:]
             if len(set(recent_tools)) == 1:
                 return LoopDetectionResult(
                     should_stop=True,
                     reason=(
-                        f"Same tool called 5 times in a row: {recent_tools[0]}. "
-                        f"Agent may be stuck."
+                        f"Same tool called {same_tool_threshold} times in a row: "
+                        f"{recent_tools[0]}. Agent may be stuck."
                     ),
                 )
 
@@ -83,12 +94,12 @@ class LoopDetector:
         if self.budget_pressure:
             remaining = self.calls_remaining
             total = self.max_tool_calls
-            if remaining <= 5:
+            if remaining <= budgets.loop_budget_warn_critical:
                 budget_warning = (
                     f"\n[BUDGET WARNING: {remaining}/{total} tool calls remaining. "
                     f"Wrap up and report your findings now.]\n"
                 )
-            elif remaining <= total * 0.25:
+            elif remaining <= total * budgets.loop_budget_warn_pct:
                 budget_warning = (
                     f"\n[BUDGET: {remaining}/{total} tool calls remaining. "
                     f"Prioritize your most important tests.]\n"

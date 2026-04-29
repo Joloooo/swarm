@@ -34,6 +34,8 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 
+from src.graph import budgets
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,7 +54,7 @@ class CrawlerOptions:
     than drop a real result.
     """
 
-    timeout_ms: int = 300_000
+    timeout_ms: int = field(default_factory=lambda: budgets.tool_crawler_timeout_ms)
     max_redirects: int = 5
     ignore_ssl_errors: bool = True
     user_agent: str = (

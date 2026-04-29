@@ -28,6 +28,8 @@ import ipaddress
 import time
 from urllib.parse import urlsplit, urlunsplit
 
+from src.graph import budgets
+
 from langchain_core.tools import tool
 
 
@@ -149,7 +151,7 @@ async def normalize_url(
 async def validate_website(
     reasoning: str,
     url: str,
-    timeout_seconds: float = 5.0,
+    timeout_seconds: float | None = None,
 ) -> dict:
     """Best-effort HTTP reachability check. Never raises.
 
@@ -184,6 +186,8 @@ async def validate_website(
     and weigh it against the user's intent.
     """
     _ = reasoning
+    if timeout_seconds is None:
+        timeout_seconds = budgets.tool_url_validate_timeout_s
     start = time.monotonic()
 
     try:

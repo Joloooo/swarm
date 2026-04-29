@@ -20,6 +20,7 @@ dependencies = [
     "httpx>=0.27",
     "aiofiles>=23.0",
     "python-nmap>=0.7.1",
+    "langgraph-cli[inmem]>=0.2",
 ]
 
 [project.scripts]

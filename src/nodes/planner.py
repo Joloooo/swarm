@@ -49,25 +49,22 @@ from src.tools.url import normalize_url, validate_website
 
 logger = logging.getLogger(__name__)
 
-# Money-runaway safety net, NOT the primary termination signal.
-#
-# The right way for a run to end is for the planner to decide it's done —
-# either by picking action="report" (which we route to END) or by signaling
-# completion. This cap only kicks in if the planner is genuinely stuck in
-# a loop and won't terminate on its own; at that point we cut the run to
-# avoid burning LLM budget.
-#
-# Set high enough that it almost never fires for legitimate work. Override
-# at runtime with the SWARM_MAX_PLANNER_ITERS env var when debugging.
-import os as _os
-MAX_PLANNER_ITERS = int(_os.getenv("SWARM_MAX_PLANNER_ITERS", "50"))
+# Budgets are centralized in src/graph.py (`Budgets` dataclass + `budgets`
+# singleton). The locals below are kept as thin re-bindings so existing call
+# sites at lines ~301/353/... don't all need to change.
+from src.graph import budgets
+
+# Money-runaway safety net, NOT the primary termination signal. Set high
+# enough that it almost never fires for legitimate work — the right way for
+# a run to end is the planner picking action="report" (routed to END) by
+# itself. Override via SWARM_PLANNER_MAX_ITERS.
+MAX_PLANNER_ITERS = budgets.planner_max_iters
 
 VALID_ACTIONS = {"attack", "recon", "web_search", "report"}
 
-# Budget defaults for LLM-invented custom attack configs. Match the old
-# dynamic_agents.py defaults so the custom path keeps its prior behavior.
-_CUSTOM_MAX_TOOL_CALLS = 40
-_CUSTOM_MAX_ITERATIONS = 25
+# Budget defaults for LLM-invented custom attack configs.
+_CUSTOM_MAX_TOOL_CALLS = budgets.custom_attack_max_tool_calls
+_CUSTOM_MAX_ITERATIONS = budgets.custom_attack_max_iterations
 
 SUPERVISOR_SYSTEM_PROMPT = """\
 You are the supervisor of a penetration-testing swarm. You are the

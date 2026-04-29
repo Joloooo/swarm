@@ -21,6 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_tavily import TavilySearch
 from pydantic import BaseModel, Field
 
+from src.graph import budgets
 from src.llm.provider import LLMConfig, get_llm
 from src.state import SwarmGraphState
 from src.tools.crawler import crawl_many
@@ -30,8 +31,8 @@ logger = logging.getLogger(__name__)
 # How much crawled HTML/text to include per source in the LLM context.
 # Tavily snippets are ~300 chars; adding ~3k chars of real page content
 # gives the model enough to ground the answer without blowing the
-# context window when Tavily returns 10 URLs.
-_MAX_CRAWLED_CHARS = 3000
+# context window when Tavily returns 10 URLs. Centralized in src/graph.py.
+_MAX_CRAWLED_CHARS = budgets.web_search_max_crawled_chars
 
 
 class WebSearchAnalysis(BaseModel):
@@ -77,7 +78,7 @@ async def web_search_node(state: SwarmGraphState) -> dict[str, Any]:
     try:
         # Step 1: Tavily search.
         tavily_tool = TavilySearch(
-            max_results=10,
+            max_results=budgets.web_search_max_tavily_results,
             search_depth="basic",
             include_answer=False,
             include_raw_content=False,

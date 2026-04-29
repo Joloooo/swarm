@@ -27,6 +27,8 @@ from typing import Any, Iterator
 
 import httpx
 
+from src.graph import budgets
+
 logger = logging.getLogger(__name__)
 
 # --- Constants (from OpenCode v1.4.0 / Codex CLI) ---
@@ -177,9 +179,11 @@ def stream_codex(
     tool_choice: str | None = None,
     temperature: float | None = None,
     max_output_tokens: int | None = None,
-    timeout: float = 120.0,
+    timeout: float | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Stream SSE events from the Codex Responses API."""
+    if timeout is None:
+        timeout = budgets.llm_request_timeout_s
     body: dict[str, Any] = {
         "model": model,
         "input": input_items,
@@ -250,9 +254,11 @@ async def astream_codex(
     tool_choice: str | None = None,
     temperature: float | None = None,
     max_output_tokens: int | None = None,
-    timeout: float = 120.0,
+    timeout: float | None = None,
 ) -> Any:
     """Async stream SSE events from the Codex Responses API."""
+    if timeout is None:
+        timeout = budgets.llm_request_timeout_s
     body: dict[str, Any] = {
         "model": model,
         "input": input_items,

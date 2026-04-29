@@ -45,7 +45,11 @@ def _classify_host(host: str) -> tuple[bool, bool]:
 
 
 @tool
-async def normalize_url(input: str, default_scheme: str = "http") -> dict:
+async def normalize_url(
+    reasoning: str,
+    input: str,
+    default_scheme: str = "http",
+) -> dict:
     """Normalize a user-provided target string into a canonical URL.
 
     Accepts hostnames ("example.com"), IPv4/IPv6 addresses with or
@@ -66,11 +70,16 @@ async def normalize_url(input: str, default_scheme: str = "http") -> dict:
     - ``valid``: false if parsing failed (planner should ask the user)
 
     Args:
+        reasoning: Required. Short explanation of why you're normalizing
+            this particular input right now — e.g. "user gave a bare
+            domain, canonicalizing before reachability check". Shown
+            to the operator live in Studio.
         input: The raw target string from the user.
         default_scheme: Scheme to prepend when the input has none.
             Defaults to ``"http"`` because pentest targets skew
             internal; pass ``"https"`` for public web targets.
     """
+    _ = reasoning
     original = input or ""
     trimmed = original.strip()
     if not trimmed:
@@ -137,12 +146,25 @@ async def normalize_url(input: str, default_scheme: str = "http") -> dict:
 
 
 @tool
-async def validate_website(url: str, timeout_seconds: float = 5.0) -> dict:
+async def validate_website(
+    reasoning: str,
+    url: str,
+    timeout_seconds: float = 5.0,
+) -> dict:
     """Best-effort HTTP reachability check. Never raises.
 
     Sends a HEAD first, falls back to GET on 405/400 (some servers
     reject HEAD). Follows redirects. TLS verification is disabled so
     self-signed and expired certs don't produce false negatives.
+
+    Args:
+        reasoning: Required. Why does reachability evidence matter
+            for this decision right now — e.g. "confirming target is
+            up before committing to recon", "diagnosing why whatweb
+            returned nothing". The ``reason`` field in the return dict
+            is the HTTP failure reason and is unrelated to this input.
+        url: The URL to probe.
+        timeout_seconds: Request timeout (default 5s).
 
     Returns:
         A dict with:
@@ -161,6 +183,7 @@ async def validate_website(url: str, timeout_seconds: float = 5.0) -> dict:
     legitimately fail this check. The planner should read ``reason``
     and weigh it against the user's intent.
     """
+    _ = reasoning
     start = time.monotonic()
 
     try:

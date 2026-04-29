@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Union
 
+from langgraph.graph import END
 from langgraph.types import Send
 
 from src.state import SwarmGraphState
@@ -22,14 +23,27 @@ from src.state import SwarmGraphState
 logger = logging.getLogger(__name__)
 
 
+# DEBUG-FOCUS MODE: the report node is currently bypassed.
+#
+# While the agent is being tuned we don't want a 3-5s LLM call producing
+# a polished final report; we want to land at END the moment the planner
+# decides we're done so the run-folder artifacts (nodes.jsonl,
+# terminal_events.jsonl, summary.md, final_state.json) are the source of
+# truth for analysis.
+#
+# To re-enable the report node later, change `_TERMINATE` back to "report".
+_TERMINATE: Union[str, type] = END
+
+
 def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
     """Pick the next graph transition based on the supervisor's decision.
 
     For ``attack``: return a list of Send()s, one per staged dispatch
     item. If the planner wrote an empty list (defensive — it should
-    have flipped to report itself), fall back to the report node.
+    have flipped to report itself), terminate.
 
-    For every other action: return the node name as a string.
+    For every other action: return the node name (or END if the
+    planner picked report and report is currently bypassed).
     """
     action = state.get("next_action", "report")
 
@@ -38,9 +52,9 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
         if not pending:
             logger.warning(
                 "route_after_planner: action=attack but pending_dispatch "
-                "is empty; routing to report."
+                "is empty; terminating."
             )
-            return "report"
+            return _TERMINATE
         logger.info(
             "route_after_planner: fanning out %d parallel pentest_workflow(s).",
             len(pending),
@@ -59,11 +73,13 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
             for item in pending
         ]
 
-    if action in {"recon", "web_search", "report"}:
+    if action == "report":
+        return _TERMINATE  # bypassed — see _TERMINATE comment above
+    if action in {"recon", "web_search"}:
         return action
 
     logger.warning(
-        "route_after_planner: unknown next_action=%r, routing to report.",
+        "route_after_planner: unknown next_action=%r, terminating.",
         action,
     )
-    return "report"
+    return _TERMINATE

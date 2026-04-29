@@ -96,15 +96,17 @@ last-resort workaround.
 
 ## Running
 
-```bash
-source .venv/bin/activate
-langgraph dev --allow-blocking
-```
+The canonical entry point while iterating is the benchmark runner —
+see "Debug a single benchmark" above. The graph is invoked in-process
+via `graph.ainvoke()`; no LangGraph Studio / dev server involved.
 
-Studio opens automatically in your browser. `--allow-blocking` is needed
-because the tmux-based terminal tool uses subprocess calls that
-LangGraph's blockbuster detector flags (they're already wrapped in
-`asyncio.to_thread` and don't actually block the event loop).
+The `langgraph dev` Studio UI is currently disabled for this workflow.
+If you need to re-enable it (interactive node-by-node debugging in a
+browser), run `langgraph dev --allow-blocking` from the project root.
+`--allow-blocking` is required because the tmux-based terminal tool
+uses subprocess calls that LangGraph's blockbuster detector flags
+(they're already wrapped in `asyncio.to_thread` and don't actually
+block the event loop).
 
 ## Architecture
 
@@ -113,15 +115,18 @@ START → initialize → planner ←──────────────�
                       │                                  │
          ┌────────────┼────────────┬─────────────┐       │
          ↓            ↓            ↓             ↓       │
-       recon   pentest_workflow  web_search    report    │
-                 (×N parallel,                   │       │
-                 Send() fan-out)                 │       │
-                      │                          │       │
-                      └── all workers return ────┘       │
-                                 │                       │
-                                 └───────────────────────┘
-                                        report → END
+       recon   pentest_workflow  web_search    END *     │
+                 (×N parallel,                           │
+                 Send() fan-out)                         │
+                      │                                  │
+                      └── all workers return ────────────┘
 ```
+
+\* The `report` node is currently bypassed: when the planner picks
+`action="report"` the graph routes straight to `END`. Run-folder
+artifacts (`summary.md`, `nodes.jsonl`, `final_state.json`,
+`terminal_events.jsonl`) are the source of truth instead. To re-enable
+`report`, edit `_TERMINATE` in `src/edges/routing.py`.
 
 Supervisor-shaped graph: the `planner` node is the single decision-maker.
 Every worker edges back to it, and on each turn the planner emits a JSON

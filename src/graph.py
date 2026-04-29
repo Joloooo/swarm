@@ -201,6 +201,8 @@ def build_graph():
     # Supervisor is the only decision-maker. `route_after_planner` returns
     # either a node name (recon / web_search / report) OR a list of Send()
     # calls that fan out to parallel pentest_workflow runs for "attack".
+    # END is a valid destination too — see `_TERMINATE` in
+    # src/edges/routing.py for the report-bypass note.
     graph.add_conditional_edges(
         "planner",
         route_after_planner,
@@ -209,6 +211,7 @@ def build_graph():
             "pentest_workflow",
             "web_search",
             "report",
+            END,
         ],
     )
 

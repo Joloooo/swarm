@@ -215,6 +215,7 @@ def build_graph():
         ],
     )
 
+    #this is like loop every loop combinations recon is allowed to go to planner basically every node is only allowed to talk to planner
     # Workers always return to the supervisor so it can reassess.
     graph.add_edge("recon", "planner")
     graph.add_edge("pentest_workflow", "planner")

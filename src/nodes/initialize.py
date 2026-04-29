@@ -16,6 +16,7 @@ first turn, after reading the user's message and calling the
   process).
 """
 
+import asyncio
 import logging
 
 from langchain_core.messages import AIMessage
@@ -32,8 +33,14 @@ async def initialize_node(state: SwarmGraphState) -> dict:
     # calls ``_ensure_session()``. Without this, the next agent can
     # collide with a stale session created by a previous run inside the
     # same ``langgraph dev`` process and fail with ``duplicate session``.
+    #
+    # ``cleanup_session`` does ``subprocess.run(["tmux", "kill-session"])``
+    # which is synchronous and would otherwise trigger langgraph-api's
+    # blockbuster guard (the "Blocking call to os.read" warning) by
+    # running sync I/O directly on the event-loop thread. Offload to a
+    # worker thread so the event loop stays responsive.
     try:
-        cleanup_session()
+        await asyncio.to_thread(cleanup_session)
     except Exception as e:  # noqa: BLE001 — never block the graph on cleanup
         logger.warning(f"tmux cleanup failed (non-fatal): {e}")
 

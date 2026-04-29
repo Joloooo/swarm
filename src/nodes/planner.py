@@ -11,7 +11,7 @@ and the planner decides the next hop by emitting a JSON directive:
      "target_url": "...",
      "target_scope": "...",
      "search_query": "...",
-     "note": "one-sentence reasoning"}
+     "reasoning": "one or two sentences of reasoning"}
 
 When the planner picks ``action="attack"`` it also supplies the exact
 set of attack configs to run — either by name (for the 12 pre-registered
@@ -49,10 +49,18 @@ from src.tools.url import normalize_url, validate_website
 
 logger = logging.getLogger(__name__)
 
-# Hard cap on how many times the supervisor can run per session.
-# Prevents runaway planner → worker → planner loops when the LLM
-# keeps asking for more work without making progress.
-MAX_PLANNER_ITERS = 12
+# Money-runaway safety net, NOT the primary termination signal.
+#
+# The right way for a run to end is for the planner to decide it's done —
+# either by picking action="report" (which we route to END) or by signaling
+# completion. This cap only kicks in if the planner is genuinely stuck in
+# a loop and won't terminate on its own; at that point we cut the run to
+# avoid burning LLM budget.
+#
+# Set high enough that it almost never fires for legitimate work. Override
+# at runtime with the SWARM_MAX_PLANNER_ITERS env var when debugging.
+import os as _os
+MAX_PLANNER_ITERS = int(_os.getenv("SWARM_MAX_PLANNER_ITERS", "50"))
 
 VALID_ACTIONS = {"attack", "recon", "web_search", "report"}
 
@@ -66,6 +74,16 @@ You are the supervisor of a penetration-testing swarm. You are the
 only decision-maker in the graph — every other node runs only because
 you chose it. After each worker node completes, the graph returns to
 you and you decide the next step.
+
+# Reasoning fields (required everywhere)
+
+Both the tools you can call (``normalize_url``, ``validate_website``)
+and your own JSON decision block require a ``reasoning`` field as
+the first argument. The operator reads these live in the Studio chat
+and in the audit log. Fill them with one or two sentences that state
+the evidence you are acting on and the hypothesis or outcome you
+expect — not mechanics ("I will normalize the URL") and not filler
+("Proceeding with the plan"). State the evidence → decision link.
 
 # Available actions
 
@@ -175,7 +193,7 @@ End EVERY turn with a fenced JSON block of this exact shape:
   "mode": "analyze",
   "target_url": "http://example.com",
   "target_scope": "example.com",
-  "note": "recon showed PHP+MySQL; attacking the obvious surfaces"
+  "reasoning": "Recon surfaced PHP + MySQL with a login form at /admin. Attacking the obvious injection and reflection surfaces before expanding scope."
 }
 ```
 
@@ -188,10 +206,16 @@ Rules:
   define an exploit phase run it after analyze.
 - "search_query" is required iff action=="web_search".
 - Carry "target_url" / "target_scope" forward on every subsequent turn.
-- "note" is a single sentence for the audit log — not marketing copy.
+- "reasoning" is REQUIRED on every turn. One to two sentences
+  explaining the evidence that led you to this decision and what
+  you expect this step to teach you. It appears in the Studio chat
+  and in audit logs — this is how the operator follows along in
+  real time. Do not omit it. Do not write marketing fluff ("Let's
+  proceed with the plan"). State the evidence → decision link.
 
-If you cannot parse the user's intent, choose "report" with a note
-explaining what you need. Never omit the JSON block.
+If you cannot parse the user's intent, choose "report" with a
+``reasoning`` field explaining what you need. Never omit the JSON
+block.
 """
 
 
@@ -356,6 +380,18 @@ def make_planner_node(llm_config: LLMConfig | None = None):
         # will have appended their own AIMessages; the supervisor reads
         # them as the record of what happened.
         prior_messages = list(state.get("messages", []))
+        seeded_target = (state.get("target_url") or "").strip()
+        if seeded_target:
+            prior_messages.insert(
+                0,
+                HumanMessage(
+                    content=(
+                        "The graph invocation already includes this authorized "
+                        f"benchmark target_url: {seeded_target}. Treat it as "
+                        "the user-supplied target. Do not ask for a target."
+                    )
+                ),
+            )
         if not prior_messages:
             prior_messages = [
                 HumanMessage(
@@ -437,11 +473,13 @@ def make_planner_node(llm_config: LLMConfig | None = None):
         # recon / report need no extra fields.
 
         logger.info(
-            "Supervisor turn %d → action=%s target=%s note=%s",
+            "Supervisor turn %d → action=%s target=%s reasoning=%s",
             iters,
             update["next_action"],
             target_url or "<unset>",
-            (decision.get("note") or "")[:80],
+            # Prefer "reasoning" (current contract); fall back to legacy
+            # "note" so older checkpoints deserialize without log noise.
+            (decision.get("reasoning") or decision.get("note") or "")[:120],
         )
         return update
 

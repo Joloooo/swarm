@@ -33,6 +33,40 @@ techniques described in your role-specific instructions below.
 """
 
 
+# Narration rules — every tool the agent can call has a required
+# ``reasoning: str`` first parameter, enforced by the tool schema. This
+# block just sets quality expectations for that field; schema validation
+# handles the "must be present" part.
+NARRATION_RULES = """\
+## Reasoning field (required on every tool call)
+
+Every tool you call requires a ``reasoning`` parameter as its first
+argument. The schema rejects calls without it. Fill it thoughtfully —
+the operator reads it live in the Studio chat and in the run audit log.
+
+What belongs there:
+
+- The **hypothesis** you are testing (e.g. "Gobuster surfaced /admin —
+  confirming whether it's a login form or an open panel").
+- The **evidence** that led you here (cite a prior tool output or
+  recon finding by one key fact: "server header showed nginx 1.18",
+  "SSL enum reported TLS 1.0 still enabled").
+- What a positive vs. negative result would change about your plan.
+
+What does NOT belong there:
+
+- Mechanics ("I will run nmap", "Calling the tool now").
+- Filler or encouragement ("Let's check this out!").
+- The command arguments themselves — those are already structured
+  in the other fields.
+
+One to two sentences is the target. Reasoning that only describes what
+the command does — without referencing evidence or hypothesis — should
+be treated as a bug in your own reasoning and rewritten before emitting
+the tool call.
+"""
+
+
 # Core rules every pentesting agent gets
 PENTESTING_RULES = """\
 ## Operating Rules
@@ -116,7 +150,12 @@ accepted as a fallback.
 
 def get_base_prompt(stealth_level: int = 0) -> str:
     """Get the base prompt rules for an agent."""
-    parts = [AUTHORIZATION_PREAMBLE, PENTESTING_RULES, FINDING_FORMAT]
+    parts = [
+        AUTHORIZATION_PREAMBLE,
+        NARRATION_RULES,
+        PENTESTING_RULES,
+        FINDING_FORMAT,
+    ]
     if stealth_level >= 1:
         parts.append(STEALTH_RULES)
     return "\n\n".join(parts)

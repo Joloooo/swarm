@@ -12,7 +12,7 @@ llm:
 knowledge:
   base_rules: true     # Layer 1: prompt-embedded rules
   skill_loading: true  # Layer 2: full technique docs per agent
-  rag: true            # Layer 3: dynamic vector store lookup
+  rag: false           # Layer 3: vector store — shelved in src/experimental/rag/
 
 # Agent system
 agents:
@@ -22,10 +22,16 @@ agents:
     custom: true
   max_parallel: 10     # Max agents running simultaneously
 
-# Stealth
+# Stealth — shelved in src/experimental/stealth/. WAF detection runs but
+# no evasion behavior is implemented; flip to true only when reviving.
 stealth:
-  enabled: true
+  enabled: false
   initial_level: 0     # 0=none, 1=cautious, 2=evasive
+
+# Cross-run experience replay — shelved in src/experimental/experience/.
+# Store/load not wired into the active loop.
+experience:
+  enabled: false
 
 # Loop detection
 loop_detection:

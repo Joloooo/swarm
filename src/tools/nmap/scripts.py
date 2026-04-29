@@ -10,6 +10,7 @@ from src.tools.nmap._schema import ScanResult
 
 @tool
 async def nmap_default_scripts(
+    reasoning: str,
     target: str,
     ports: str,
     agent_id: str = "default",
@@ -21,6 +22,10 @@ async def nmap_default_scripts(
     a fast_scan identifies open ports.
 
     Args:
+        reasoning: Required. State what enrichment you expect from
+            default scripts against this port set (banner, cert
+            subject, service-specific info) and how it feeds the
+            next step.
         target: Host or IP.
         ports: REQUIRED port list (e.g. "22,80,443").
         agent_id: Agent identifier.
@@ -29,13 +34,14 @@ async def nmap_default_scripts(
         ScanResult — ports[] entries carry scripts[] with script
         id and output.
     """
-    _ = agent_id
+    _ = agent_id, reasoning
     args = f"-sC -sV -p {ports} --script-timeout 60s --host-timeout 5m"
     return await run(tool="nmap_default_scripts", target=target, user_args=args)
 
 
 @tool
 async def nmap_script(
+    reasoning: str,
     target: str,
     script: str,
     ports: str,
@@ -49,6 +55,9 @@ async def nmap_script(
     for this when you need a script they don't cover.
 
     Args:
+        reasoning: Required. Name the specific hypothesis this script
+            tests and why the purpose-built tools (ssl_enum, http_enum,
+            etc.) don't cover it.
         target: Host or IP.
         script: NSE script name, comma-separated list, or category
             (e.g. "http-title", "ssl-cert,ssl-dh-params", "default,safe").
@@ -60,7 +69,7 @@ async def nmap_script(
     Returns:
         ScanResult — scripts[] entries under each matching port.
     """
-    _ = agent_id
+    _ = agent_id, reasoning
     pieces = [f"--script={script}", f"-p {ports}", "--script-timeout 2m", "--host-timeout 10m"]
     if script_args:
         pieces.append(f"--script-args={script_args}")

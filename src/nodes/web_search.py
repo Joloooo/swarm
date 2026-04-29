@@ -78,7 +78,7 @@ async def web_search_node(state: SwarmGraphState) -> dict[str, Any]:
     try:
         # Step 1: Tavily search.
         tavily_tool = TavilySearch(
-            max_results=budgets.web_search_max_tavily_results,
+            max_results=10,
             search_depth="basic",
             include_answer=False,
             include_raw_content=False,

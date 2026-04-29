@@ -60,16 +60,15 @@ DAILY_LIST = Path(__file__).parent / "daily_15.txt"
 # Per-phase timeouts. Bound everything so an overnight --daily run can't
 # stall on a single rotten benchmark (slow mirror, dead apt repo, hung
 # pip resolver). On timeout the subprocess is killed and the finally
-# clause still runs `docker compose down`. Defaults pulled from the
-# centralized `Budgets` block in src/graph.py — override per-field via
-# SWARM_RUNNER_*_TIMEOUT env vars.
-from src.graph import budgets
-
-BUILD_TIMEOUT_S = budgets.runner_build_timeout_s
-UP_TIMEOUT_S = budgets.runner_up_timeout_s
-DOWN_TIMEOUT_S = budgets.runner_down_timeout_s
-DISCOVER_TIMEOUT_S = budgets.runner_discover_timeout_s
-RUN_TIMEOUT_S = budgets.runner_agent_timeout_s
+# clause still runs `docker compose down`.
+#
+# These are infrastructure timeouts, not agent budgets — they belong
+# here next to the runner code, not in src/graph.py:Budgets.
+BUILD_TIMEOUT_S = 1500      # 25 min: image pulls + apt + pip (first build is slow)
+UP_TIMEOUT_S = 180          # 3 min: `docker compose up --wait` + healthcheck
+DOWN_TIMEOUT_S = 90         # 1.5 min: cleanup
+DISCOVER_TIMEOUT_S = 30     # 30 s: `docker compose ps`
+RUN_TIMEOUT_S = 15 * 60     # 15 min: per-bench wall-clock leash on graph.ainvoke
 
 
 def docker_is_available() -> tuple[bool, str]:

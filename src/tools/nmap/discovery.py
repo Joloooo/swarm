@@ -11,7 +11,11 @@ from src.tools.nmap._schema import ScanResult
 
 
 @tool
-async def nmap_ping_sweep(network: str, agent_id: str = "default") -> ScanResult:
+async def nmap_ping_sweep(
+    reasoning: str,
+    network: str,
+    agent_id: str = "default",
+) -> ScanResult:
     """Discover live hosts across a network range without port scanning.
 
     Runs `nmap -sn` (no port scan) against a CIDR block or host list,
@@ -19,6 +23,10 @@ async def nmap_ping_sweep(network: str, agent_id: str = "default") -> ScanResult
     as the first step when given an unknown network range.
 
     Args:
+        reasoning: Required. One to two sentences stating the hypothesis
+            you are testing with this call and what finding or not finding
+            live hosts would change about your plan. The operator reads
+            this in real time; narrate the decision, not the mechanics.
         network: Target CIDR (e.g. "10.0.0.0/24"), hyphenated range
                  (e.g. "10.0.0.1-20"), or space-separated host list.
         agent_id: Agent identifier (unused internally, kept for parity
@@ -28,7 +36,7 @@ async def nmap_ping_sweep(network: str, agent_id: str = "default") -> ScanResult
         ScanResult — hosts list contains one entry per live host.
         Empty hosts list means nothing responded.
     """
-    _ = agent_id
+    _ = agent_id, reasoning
     return await run(
         tool="nmap_ping_sweep",
         target=network,
@@ -39,6 +47,7 @@ async def nmap_ping_sweep(network: str, agent_id: str = "default") -> ScanResult
 
 @tool
 async def nmap_host_discovery(
+    reasoning: str,
     target: str,
     method: Literal["icmp", "tcp-syn", "tcp-ack", "udp"] = "icmp",
     agent_id: str = "default",
@@ -50,6 +59,9 @@ async def nmap_host_discovery(
     ports.
 
     Args:
+        reasoning: Required. One to two sentences stating why this
+            probe method is the right next step given what prior
+            evidence has shown. Rendered inline in Studio.
         target: Host or IP to probe.
         method: Discovery probe type.
             - "icmp": ICMP echo (-PE)
@@ -61,7 +73,7 @@ async def nmap_host_discovery(
     Returns:
         ScanResult — host entry present iff the probe got a reply.
     """
-    _ = agent_id
+    _ = agent_id, reasoning
     probe_flags = {
         "icmp": "-PE",
         "tcp-syn": "-PS80,443",

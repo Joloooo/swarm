@@ -151,12 +151,18 @@ list of attack configs to fan out), `web_search`, or `report`.
 
 **Key subsystems:**
 - `agents/` — config-driven agent pattern. One function, different configs. 13 configs across 3 methodologies (OWASP, vuln-type, custom chains)
-- `knowledge/` — triple-hybrid knowledge delivery. Layer 1: prompt rules. Layer 2: skill docs. Layer 3: RAG vector store
-- `stealth/` — WAF/IDS detection (Cloudflare, ModSecurity, AWS WAF) with stealth level propagation
+- `knowledge/` — prompt rules + skill docs (the RAG layer is shelved, see below)
 - `loop/` — 4-strategy loop detection (hard cap, exact repeat, same-tool repeat, budget pressure)
-- `experience/` — guide storage for learning from past runs (Jaccard similarity matching)
 - `llm/` — provider-agnostic interface (Anthropic, OpenAI, OpenRouter, Codex)
   - `llm/codex.py` — self-contained LangChain chat model for the ChatGPT subscription / Codex backend. Handles OAuth token loading + refresh, Responses API SSE streaming, tool calls, all without any third-party library
+
+**Experimental subsystems (off by default):** `src/experimental/` holds research
+scaffolds that aren't part of the active agent loop. Each one is gated behind
+a config flag in `configs/default.yaml` and stays here as evidence of design
+exploration. Currently shelved:
+- `experimental/rag/` — knowledge vector store (FAISS), `knowledge.rag: false`
+- `experimental/stealth/` — WAF/IDS detection (no evasion behavior), `stealth.enabled: false`
+- `experimental/experience/` — cross-run guide store, `experience.enabled: false`
 
 ## Project structure
 
@@ -183,11 +189,10 @@ SwarmAttacker/
 │   ├── agents/                 # Config-driven agent system
 │   │   ├── base.py             # AgentConfig, WorkflowConfig, make_agent_node
 │   │   └── configs/            # 13 agent configs (owasp/, vulntype/, custom/)
-│   ├── knowledge/              # 3-layer knowledge system
+│   ├── knowledge/              # Prompt rules + skill docs
 │   ├── tools/                  # tmux-based command execution
-│   ├── stealth/                # WAF/IDS detection
 │   ├── loop/                   # Loop detection
-│   ├── experience/             # Guide storage
+│   ├── experimental/           # Shelved scaffolds (rag/, stealth/, experience/)
 │   └── llm/                    # Provider-agnostic LLM interface
 └── tests/
 ```
@@ -197,8 +202,8 @@ SwarmAttacker/
 Runtime behavior is controlled by `configs/default.yaml`. Each setting can be overridden per-experiment via files in `configs/experiments/`.
 
 Key toggles:
-- `knowledge.base_rules` / `skill_loading` / `rag` — enable/disable each knowledge layer
-- `stealth.enabled` — enable/disable WAF/IDS evasion
+- `knowledge.base_rules` / `skill_loading` — enable/disable each active knowledge layer
+- `knowledge.rag` / `stealth.enabled` / `experience.enabled` — flip on to revive shelved subsystems in `src/experimental/`
 - `agents.methodologies.owasp` / `vulntype` / `custom` — enable/disable agent groups
 
 ## Dependencies

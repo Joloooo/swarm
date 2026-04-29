@@ -25,6 +25,46 @@ cp .env.example .env     # create .env (can stay empty if using Codex auth)
 codex                    # one-time ChatGPT login (saves tokens to ~/.codex/auth.json)
 ```
 
+## Debug a single benchmark (recommended while iterating)
+
+Use this when you want to watch the agent think on **one** XBOW challenge
+and see every tool call and output live in the terminal — the right
+rhythm while the agent itself is still being tuned.
+
+```bash
+uv run python -m benchmarks.xbow_runner --bench XBEN-006-24 --verbose
+```
+
+What `--verbose` adds, streamed to stderr in real time:
+
+- Every shell command the agent runs (with the agent's own reasoning).
+- Every command's output, in full (no truncation).
+- Every node transition with duration and a one-line summary.
+- Every new AI message a node added, so the planner's decisions and the
+  worker's reasoning land in the same terminal as the tool I/O.
+
+When the run finishes you also get a per-run folder with all artifacts:
+
+```
+logs/run-XBEN-006-24-<ts>-<pid>/
+  nodes.jsonl              # one JSON line per traced() node call, full result
+  terminal_events.jsonl    # one JSON line per tool call/output (machine-readable)
+  final_state.json         # graph.ainvoke return value, full state
+  summary.md               # human-readable digest: timeline + findings + full
+                           # message stream + per-node result dumps
+```
+
+`summary.md` is the file to open after the run. Pick a benchmark from
+`benchmarks/daily_15.txt` (or any `XBEN-XXX-24`), run with `--verbose`,
+read the summary, fix one thing, re-run. That's the loop.
+
+**Tip — second-terminal live-tail:** if you ever need a structured view
+while a run is going (without `--verbose`), open another terminal and:
+
+```bash
+tail -f "logs/run-XBEN-006-24-"*"/terminal_events.jsonl" | jq
+```
+
 ## Quick start (local, vulnerable target)
 
 When debugging the agent, point it at a known-vulnerable container running

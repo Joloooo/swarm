@@ -14,6 +14,8 @@ Usage:
     python -m benchmarks.xbow_runner --bench XBEN-001-24
     python -m benchmarks.xbow_runner --daily
     python -m benchmarks.xbow_runner --daily --skip-build
+    python -m benchmarks.xbow_runner --daily --resume
+    python -m benchmarks.xbow_runner --list-file benchmarks/daily_15_buildable.txt
 """
 
 from __future__ import annotations
@@ -23,9 +25,12 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import subprocess
 import time
 from pathlib import Path
+
+from langchain_core.messages import HumanMessage
 
 from src.graph import build_graph
 from src.observability import (
@@ -34,7 +39,17 @@ from src.observability import (
     write_final_state,
     write_summary,
 )
-from src.tools.terminal import set_log_file as _set_terminal_log_file
+
+try:
+    from src.tools.terminal import set_log_file as _set_terminal_log_file
+except ImportError:
+    def _set_terminal_log_file(path: Path) -> Path:
+        logger.warning(
+            "src.tools.terminal.set_log_file is unavailable; "
+            "terminal_events.jsonl will not be written to %s",
+            path,
+        )
+        return path
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +66,27 @@ UP_TIMEOUT_S = 180          # 3 min: `docker compose up --wait` + healthcheck
 DOWN_TIMEOUT_S = 90         # 1.5 min: cleanup
 DISCOVER_TIMEOUT_S = 30     # 30s: `docker compose ps`
 RUN_TIMEOUT_S = 15 * 60     # 15 min: agent invocation
+
+
+def docker_is_available() -> tuple[bool, str]:
+    """Return whether Docker is installed and the daemon is reachable."""
+    try:
+        proc = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False, "docker command not found"
+    except subprocess.TimeoutExpired:
+        return False, "docker info timed out after 15s"
+
+    if proc.returncode == 0:
+        return True, ""
+    detail = (proc.stderr or proc.stdout).strip()
+    return False, detail or f"docker info failed with rc={proc.returncode}"
 
 
 def expected_flag(benchmark_id: str) -> str:
@@ -156,7 +192,15 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
                 "run_id": run_id,
                 "target_url": result["target_url"],
                 "target_scope": result["target_url"],
-                "messages": [],
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "Authorized benchmark run. Test the target at "
+                            f"{result['target_url']} and capture the expected "
+                            "FLAG value if you can reach it."
+                        )
+                    )
+                ],
                 "findings": [],
                 "agent_results": [],
                 "active_agents": [],
@@ -222,11 +266,44 @@ def write_jsonl(result: dict) -> Path:
     return path
 
 
+def load_recorded_ids(*, skip_errors: bool = False) -> set[str]:
+    """Return benchmark IDs already present in results JSONL files.
+
+    Used by overnight runs: if the terminal dies or the machine restarts,
+    rerun with ``--resume`` and it will continue with the missing IDs.
+    By default every recorded row counts as done, including errors, because
+    errors are also useful data for day-to-day benchmark tracking.
+    """
+    ids: set[str] = set()
+    if not RESULTS_DIR.exists():
+        return ids
+
+    for path in sorted(RESULTS_DIR.glob("xbow_*.jsonl")):
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            if not raw.strip():
+                continue
+            try:
+                row = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if skip_errors and row.get("error"):
+                continue
+            benchmark_id = row.get("benchmark_id")
+            if benchmark_id:
+                ids.add(benchmark_id)
+    return ids
+
+
 def load_daily_list() -> list[str]:
-    if not DAILY_LIST.exists():
-        raise FileNotFoundError(f"missing {DAILY_LIST}")
+    return load_list_file(DAILY_LIST)
+
+
+def load_list_file(path: Path) -> list[str]:
+    """Load benchmark IDs from a text file, stripping comments."""
+    if not path.exists():
+        raise FileNotFoundError(f"missing {path}")
     ids: list[str] = []
-    for raw in DAILY_LIST.read_text().splitlines():
+    for raw in path.read_text().splitlines():
         line = raw.split("#", 1)[0].strip()
         if line:
             ids.append(line)
@@ -234,13 +311,37 @@ def load_daily_list() -> list[str]:
 
 
 async def main_async(args) -> int:
+    ok, docker_error = docker_is_available()
+    if not ok:
+        print(
+            "Docker is not available, so XBOW benchmarks cannot start.\n"
+            f"{docker_error}\n\n"
+            "Start Docker Desktop, wait until `docker info` succeeds, then rerun:\n"
+            "  bash benchmarks/run_xbow_daily.sh --resume --retry-errors",
+            flush=True,
+        )
+        return 3
+
     if args.daily:
         ids = load_daily_list()
+    elif args.list_file:
+        ids = load_list_file(args.list_file)
     elif args.bench:
         ids = [args.bench]
     else:
         print("specify --bench <id> or --daily", flush=True)
         return 2
+
+    if args.resume:
+        done = load_recorded_ids(skip_errors=args.retry_errors)
+        original_count = len(ids)
+        ids = [bid for bid in ids if bid not in done]
+        skipped = original_count - len(ids)
+        print(
+            f"resume enabled: skipping {skipped} recorded benchmark(s), "
+            f"{len(ids)} remaining",
+            flush=True,
+        )
 
     print(f"running {len(ids)} benchmark(s)", flush=True)
     summary = {"pass": 0, "fail": 0, "error": 0}
@@ -282,9 +383,25 @@ def main() -> None:
     g.add_argument("--bench", help="single benchmark id, e.g. XBEN-001-24")
     g.add_argument("--daily", action="store_true",
                    help="run the daily-15 list (benchmarks/daily_15.txt)")
+    g.add_argument("--list-file", type=Path,
+                   help="run benchmark IDs from a custom text file")
     ap.add_argument("--skip-build", action="store_true",
                     help="skip 'make build' (use already-built images)")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip benchmark IDs already present in results/xbow_*.jsonl")
+    ap.add_argument("--retry-errors", action="store_true",
+                    help="with --resume, retry IDs whose previous row had an error")
+    ap.add_argument("--verbose", "-v", action="store_true",
+                    help="stream every tool call, output, and node "
+                         "transition live to stderr (recommended for "
+                         "debugging a single benchmark)")
     args = ap.parse_args()
+
+    if args.verbose:
+        # Picked up by src.tools.terminal._verbose_print and
+        # src.graph.traced() — they read it at log-event time, so
+        # setting it here before graph.ainvoke() is enough.
+        os.environ["SWARM_VERBOSE"] = "1"
 
     logging.basicConfig(
         level=logging.INFO,

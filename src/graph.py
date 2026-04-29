@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
+import sys
 import time
 from inspect import iscoroutinefunction
 
@@ -138,6 +140,34 @@ def traced(name: str, fn):
             "summary": summary,
             "result": result,
         })
+        if os.getenv("SWARM_VERBOSE"):
+            ts_short = time.strftime("%H:%M:%S")
+            print(
+                f"\n─── [{ts_short}] node `{name}` finished in {dt_ms} ms ───\n"
+                f"    {summary}",
+                file=sys.stderr, flush=True,
+            )
+            # Print any new AI messages this node added so the full
+            # reasoning stream lives in the same terminal.
+            for msg in result.get("messages") or []:
+                content = getattr(msg, "content", None)
+                if not content:
+                    continue
+                # Filter out the ✅ boundary messages we ourselves emit
+                # (added below) so we don't log them twice.
+                kw = getattr(msg, "additional_kwargs", None) or {}
+                if kw.get("node") and isinstance(content, str) and (
+                    content.startswith("✅ [") or content.startswith("❌ [")
+                ):
+                    continue
+                role = type(msg).__name__
+                text = content if isinstance(content, str) else str(content)
+                print(
+                    f"    └── {role}:",
+                    file=sys.stderr, flush=True,
+                )
+                for line in text.splitlines() or [""]:
+                    print(f"        {line}", file=sys.stderr, flush=True)
         msgs = list(result.get("messages") or [])
         msgs.append(
             AIMessage(

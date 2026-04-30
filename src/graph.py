@@ -50,11 +50,11 @@ from inspect import iscoroutinefunction
 # Centralized budgets — every cap, timeout, and iteration count.
 #
 # This block exists HERE (top of graph.py, BEFORE any other imports) so that
-# transitive imports — planner.py, loop/detection.py, tools/*, llm/* — can
-# turn around and `from src.graph import budgets` without hitting an import
-# cycle. Python hands them whatever's been bound in this module's namespace
-# at the time of the partial import; as long as `budgets` is bound before
-# the `from src.nodes import (...)` block below, the partial-import works.
+# transitive imports — planner.py, tools/*, llm/* — can turn around and
+# `from src.graph import budgets` without hitting an import cycle. Python
+# hands them whatever's been bound in this module's namespace at the time
+# of the partial import; as long as `budgets` is bound before the
+# `from src.nodes import (...)` block below, the partial-import works.
 #
 # DO NOT MOVE THIS BLOCK BELOW THE NODE/STATE/EDGE IMPORTS or the cycle
 # returns and you'll get `ImportError: cannot import name 'budgets'`.
@@ -75,16 +75,6 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
 @dataclass(frozen=True)
 class Budgets:
     """Resource budgets for LLM-running nodes only.
@@ -101,18 +91,11 @@ class Budgets:
     planner_max_iters:             int   = _env_int("SWARM_PLANNER_MAX_ITERS",        50)
 
     # --- Worker agents (per invocation) ---
-    worker_max_tool_calls:         int   = _env_int("SWARM_WORKER_MAX_TOOL_CALLS",    50)
     worker_max_iterations:         int   = _env_int("SWARM_WORKER_MAX_ITERATIONS",    30)
 
     # --- Planner-invented "custom" attacks ---
     custom_attack_max_tool_calls:  int   = _env_int("SWARM_CUSTOM_MAX_TOOL_CALLS",    40)
     custom_attack_max_iterations:  int   = _env_int("SWARM_CUSTOM_MAX_ITERATIONS",    25)
-
-    # --- Loop detection (worker LLM loop) ---
-    loop_max_repeated_calls:       int   = _env_int("SWARM_LOOP_MAX_REPEATED",         3)
-    loop_same_tool_threshold:      int   = _env_int("SWARM_LOOP_SAME_TOOL_THRESHOLD",  5)
-    loop_budget_warn_critical:     int   = _env_int("SWARM_LOOP_BUDGET_CRITICAL",      5)
-    loop_budget_warn_pct:          float = _env_float("SWARM_LOOP_BUDGET_PCT",       0.25)
 
     # --- LLM (per-call output cap) ---
     llm_max_tokens:                int   = _env_int("SWARM_LLM_MAX_TOKENS",         4096)

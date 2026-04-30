@@ -421,6 +421,17 @@ class PlannerNode(BaseNode):
                 )
             ]
 
+        # Supervisor-level loop detection. If the same skill has run
+        # repeatedly with no findings, surface a SYSTEM NOTE so the LLM
+        # picks a different action this turn instead of dispatching the
+        # same useless attack again.
+        warning = self.detect_repetition(state)
+        if warning:
+            self.log.warning("loop check fired: %s", warning)
+            prior_messages.append(
+                HumanMessage(content=f"[SYSTEM NOTE] {warning}")
+            )
+
         try:
             result = await self._agent.ainvoke({"messages": prior_messages})
         except Exception as e:

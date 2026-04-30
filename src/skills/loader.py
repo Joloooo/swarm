@@ -22,7 +22,7 @@ from pathlib import Path
 
 import yaml
 
-from src.agents.base import AgentConfig
+from src.nodes.base import AgentConfig
 from src.tools.registry import resolve_tools
 
 logger = logging.getLogger(__name__)

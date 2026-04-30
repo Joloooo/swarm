@@ -37,10 +37,12 @@ import logging
 import re
 from typing import Any
 
+from typing import TYPE_CHECKING
+
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.llm.provider import LLMConfig, get_llm
+from src.nodes.base import BaseNode
 from src.skills.loader import (
     list_dispatchable_skills,
     load_skill,
@@ -48,6 +50,13 @@ from src.skills.loader import (
 )
 from src.state import SwarmGraphState
 from src.tools.url import normalize_url, validate_website
+
+# ``src.llm.provider`` is imported lazily inside ``PlannerNode.__init__``
+# to break the circular chain
+# ``nodes.__init__ → nodes.planner → llm.provider → graph → nodes.__init__``
+# that fires when ``src.nodes`` is loaded before ``src.graph``.
+if TYPE_CHECKING:
+    from src.llm.provider import LLMConfig
 
 logger = logging.getLogger(__name__)
 
@@ -347,25 +356,32 @@ def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
     return pending
 
 
-def make_planner_node(llm_config: LLMConfig | None = None):
-    """Build the supervisor node function.
+class PlannerNode(BaseNode):
+    """Supervisor planner — the only decision-maker in the graph.
 
-    Factory so the graph can inject an ablation LLM config in tests
-    without mutating module state.
+    The ``llm_config`` constructor argument lets tests inject an
+    ablation LLM without mutating module state, the same role the
+    earlier ``make_planner_node`` factory served.
     """
-    llm = get_llm(llm_config)
-    agent = create_agent(
-        model=llm,
-        tools=[normalize_url, validate_website],
-        system_prompt=SUPERVISOR_SYSTEM_PROMPT,
-    )
 
-    async def planner_node(state: SwarmGraphState) -> dict:
+    def __init__(self, llm_config: LLMConfig | None = None) -> None:
+        super().__init__(name="planner")
+        # Lazy — see import comment above; ``LLMConfig`` is only a type
+        # annotation and is resolved through ``TYPE_CHECKING``.
+        from src.llm.provider import get_llm
+        llm = get_llm(llm_config)
+        self._agent = create_agent(
+            model=llm,
+            tools=[normalize_url, validate_website],
+            system_prompt=SUPERVISOR_SYSTEM_PROMPT,
+        )
+
+    async def execute(self, state: SwarmGraphState) -> dict:
         iters = state.get("planner_iters", 0) + 1
 
         # Hard cap — force report rather than loop forever.
         if iters > MAX_PLANNER_ITERS:
-            logger.warning(
+            self.log.warning(
                 "Supervisor exceeded MAX_PLANNER_ITERS=%d; forcing report.",
                 MAX_PLANNER_ITERS,
             )
@@ -406,9 +422,9 @@ def make_planner_node(llm_config: LLMConfig | None = None):
             ]
 
         try:
-            result = await agent.ainvoke({"messages": prior_messages})
+            result = await self._agent.ainvoke({"messages": prior_messages})
         except Exception as e:
-            logger.exception("Supervisor planner failed: %s", e)
+            self.log.exception("Supervisor planner failed: %s", e)
             return {
                 "planner_iters": iters,
                 "next_action": "report",
@@ -424,7 +440,7 @@ def make_planner_node(llm_config: LLMConfig | None = None):
         decision = _parse_decision(final_text)
 
         if decision is None:
-            logger.warning(
+            self.log.warning(
                 "Supervisor produced no parseable JSON decision; forcing report. "
                 "Final text starts: %r",
                 final_text[:200],
@@ -463,7 +479,7 @@ def make_planner_node(llm_config: LLMConfig | None = None):
         if action == "attack":
             pending = _stage_attack(decision, state)
             if not pending:
-                logger.warning(
+                self.log.warning(
                     "planner: action=attack but no runnable configs after "
                     "validation — forcing report."
                 )
@@ -478,7 +494,7 @@ def make_planner_node(llm_config: LLMConfig | None = None):
                 update["search_query"] = query
         # recon / report need no extra fields.
 
-        logger.info(
+        self.log.info(
             "Supervisor turn %d → action=%s target=%s reasoning=%s",
             iters,
             update["next_action"],
@@ -489,9 +505,6 @@ def make_planner_node(llm_config: LLMConfig | None = None):
         )
         return update
 
-    planner_node.__name__ = "planner_node"
-    return planner_node
-
 
 # Module-level singleton so graph.py can import it directly.
-planner_node = make_planner_node()
+planner_node = PlannerNode()

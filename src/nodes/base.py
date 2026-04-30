@@ -1,8 +1,33 @@
-"""Config-driven agent: one function, different configs.
+"""BaseNode — common base for every LangGraph node in SwarmAttacker.
 
-Each swarm agent is the same LangGraph node function parameterized by
-an AgentConfig (system prompt, tools, methodology, budget). This is
-the dominant pattern across pentesting implementations (6/9 use it).
+Every concrete node (PlannerNode, ReconNode, ReportNode, InitializeNode,
+WebSearchNode, PentestWorkflowNode) inherits directly from ``BaseNode``.
+There is no intermediate class. Cross-cutting capabilities — per-node
+logger, skill lookup, the LLM-agent loop that used to live in
+``make_agent_node`` — are methods on this base, so any node can call
+them via ``self.<capability>``.
+
+What this module does NOT do (handled elsewhere):
+
+- Top-level error handling / boundary AIMessage / JSONL run logging —
+  those live in ``src.graph.traced``.
+- LangGraph's native streams (`messages`, `tasks`, `updates`) — Studio
+  surfaces those without us doing anything.
+
+Subclasses override ``execute()``. Instances are callable directly via
+``__call__``, so ``graph.add_node("planner", PlannerNode())`` works.
+
+Also exports ``AgentConfig`` and the skill-agent helper functions that
+``run_skill_agent`` uses internally. These were ported verbatim from the
+old ``src/agents/base.py``; the only behavioral change is that the
+runner uses the per-node logger (``self.log``) instead of a module
+logger so log lines are tagged by agent_id.
+
+NB: ``src.llm.provider`` and ``src.skills.loader`` are imported lazily
+inside the methods that need them. The cycle is
+``skills.loader → nodes.base → llm.provider → graph → nodes →
+nodes.base``; importing either at module level wedges the loader at
+startup.
 """
 
 from __future__ import annotations
@@ -10,20 +35,51 @@ from __future__ import annotations
 import json
 import logging
 import re
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any
 
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
-# NB: ``src.llm.provider`` is imported lazily inside ``make_agent_node``
-# to break the circular import chain
-# ``skills.loader → agents.base → llm.provider → graph → nodes → agents.base``.
-# Importing it at module level wedges the loader at startup.
 from src.state import AgentResult, Finding, Severity
 
-logger = logging.getLogger(__name__)
+
+# ────────────────────────────────────────────────────────────────────────────
+# AgentConfig — the in-memory carrier produced by ``src.skills.loader``
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class AgentConfig:
+    """Everything that makes one swarm agent different from another.
+
+    Skill content (system_prompt + tool list + caps) comes from SKILL.md
+    files under ``src/skills/`` parsed by ``src/skills/loader.py``. This
+    dataclass is the in-memory carrier the loader produces.
+    """
+
+    # Identity
+    agent_id: str  # unique name, e.g. "owasp-auth-testing"
+    methodology: str  # "owasp" | "vulntype" | "custom" | "skill"
+    config_name: str  # primary key for planner dispatch — matches skill folder
+
+    # Prompt body (the SKILL.md body, minus frontmatter)
+    system_prompt: str = ""
+
+    # Tools (LangChain tool instances, resolved from SKILL.md tool names)
+    tools: list[BaseTool] = field(default_factory=list)
+
+    # Budget / loop detection
+    max_tool_calls: int = 50
+    max_iterations: int = 30
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Refusal detection
+# ────────────────────────────────────────────────────────────────────────────
 
 
 # Phrases that indicate the model refused the task (so we don't silently
@@ -50,29 +106,9 @@ def _looks_like_refusal(text: str) -> bool:
     return any(p in lower for p in REFUSAL_PATTERNS)
 
 
-@dataclass
-class AgentConfig:
-    """Everything that makes one swarm agent different from another.
-
-    Skill content (system_prompt + tool list + caps) now comes from
-    SKILL.md files under ``src/skills/`` parsed by ``src/skills/loader.py``.
-    This dataclass is the in-memory carrier the loader produces.
-    """
-
-    # Identity
-    agent_id: str  # unique name, e.g. "owasp-auth-testing"
-    methodology: str  # "owasp" | "vulntype" | "custom" | "skill"
-    config_name: str  # primary key for planner dispatch — matches skill folder
-
-    # Prompt body (the SKILL.md body, minus frontmatter)
-    system_prompt: str = ""
-
-    # Tools (LangChain tool instances, resolved from SKILL.md tool names)
-    tools: list[BaseTool] = field(default_factory=list)
-
-    # Budget / loop detection
-    max_tool_calls: int = 50
-    max_iterations: int = 30
+# ────────────────────────────────────────────────────────────────────────────
+# System-prompt assembly
+# ────────────────────────────────────────────────────────────────────────────
 
 
 def _build_system_message(
@@ -83,9 +119,9 @@ def _build_system_message(
 ) -> str:
     """Assemble the full system prompt from config + knowledge layers.
 
-    Respects ablation toggles from runtime_config.
-    When phase1_findings is provided, injects analysis results into
-    the prompt so the exploit phase knows what to target.
+    Respects ablation toggles from runtime_config. When phase1_findings
+    is provided, injects analysis results into the prompt so the exploit
+    phase knows what to target.
     """
     from src.config import is_enabled
 
@@ -138,7 +174,8 @@ def _build_system_message(
     return "\n\n".join(parts)
 
 
-# -- Finding extraction from agent output --
+# ────────────────────────────────────────────────────────────────────────────
+# Finding extraction from agent output
 #
 # Two parsers run on every assistant message:
 # 1. The structured **FINDING:** / ## Finding format defined in base_rules.py
@@ -147,6 +184,8 @@ def _build_system_message(
 # The structured pattern only requires Title and Severity now (Category, URL,
 # Evidence are optional). Bounded `[\s\S]{0,N}?` gaps prevent runaway matches
 # across unrelated headings.
+# ────────────────────────────────────────────────────────────────────────────
+
 
 FINDING_PATTERN = re.compile(
     r"(?:\*\*FINDING:?\*\*|##\s+FINDING|##\s+Finding)"
@@ -241,26 +280,72 @@ def _extract_findings(messages: list, agent_id: str) -> list[Finding]:
     return findings
 
 
-def make_agent_node(
-    config: AgentConfig,
-    llm: BaseChatModel | None = None,
-    runtime_config: dict | None = None,
-):
-    """Create a node function for the orchestrator graph.
+# ────────────────────────────────────────────────────────────────────────────
+# BaseNode
+# ────────────────────────────────────────────────────────────────────────────
 
-    This wraps create_agent into a function that:
-    1. Injects the target_url and knowledge layers into the system prompt
-    2. Runs the agent subgraph with loop detection
-    3. Extracts structured findings from the agent's output
-    4. Handles errors gracefully (no agent crash kills the swarm)
-    5. Returns updates to the parent SwarmGraphState
+
+class BaseNode(ABC):
+    """Abstract base for every SwarmAttacker LangGraph node.
+
+    Subclasses override :meth:`execute`. Instances are callable through
+    :meth:`__call__`, so they can be passed to ``graph.add_node`` or
+    wrapped by ``src.graph.traced`` directly.
     """
-    if llm is None:
-        from src.llm.provider import get_llm  # lazy — see top-of-file note
-        llm = get_llm()
 
-    async def agent_node(state: dict) -> dict:
-        """Execute this agent and return findings + chat trace to the parent."""
+    def __init__(self, name: str | None = None) -> None:
+        self.name = name or self._default_name()
+        self.log = logging.getLogger(f"node.{self.name}")
+
+    def _default_name(self) -> str:
+        # ``WebSearchNode`` → ``web_search``; ``PlannerNode`` → ``planner``.
+        cls = self.__class__.__name__.removesuffix("Node")
+        if not cls:
+            return self.__class__.__name__.lower()
+        return re.sub(r"(?<!^)(?=[A-Z])", "_", cls).lower()
+
+    @abstractmethod
+    async def execute(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Subclasses implement node logic here."""
+
+    async def __call__(self, state: dict[str, Any]) -> dict[str, Any]:
+        return await self.execute(state)
+
+    # ── Shared capabilities ────────────────────────────────────────────────
+
+    def load_skill(self, name: str) -> AgentConfig | None:
+        """Resolve a SKILL.md by name. Lazy import breaks the
+        ``skills.loader → nodes.base → llm.provider → graph → nodes``
+        circular chain at startup."""
+        from src.skills.loader import load_skill
+        return load_skill(name)
+
+    async def run_skill_agent(
+        self,
+        config: AgentConfig,
+        state: dict,
+        llm: BaseChatModel | None = None,
+        runtime_config: dict | None = None,
+    ) -> dict:
+        """Run a ``create_agent`` loop with the given skill config.
+
+        Returns the standard worker-node update dict::
+
+            {
+                "messages":      [...],   # mirrored agent trace
+                "agent_results": [AgentResult(...)],
+                "findings":      [Finding, ...],
+                "active_agents": [agent_id],
+            }
+
+        This is the body of the old ``make_agent_node`` factory's inner
+        function, lifted onto ``BaseNode`` so every node can invoke a
+        skill-driven agent the same way.
+        """
+        if llm is None:
+            from src.llm.provider import get_llm  # lazy — see module docstring
+            llm = get_llm()
+
         target_url = state.get("target_url", "")
 
         # Build system message with all knowledge layers
@@ -314,12 +399,12 @@ def make_agent_node(
 
             refused = (not findings) and _looks_like_refusal(last_text)
             if not findings:
-                logger.warning(
+                self.log.warning(
                     f"[{config.agent_id}] produced 0 findings — "
                     f"last output: {last_text[:500]!r}"
                 )
             if refused:
-                logger.warning(f"[{config.agent_id}] looks like a model refusal")
+                self.log.warning(f"[{config.agent_id}] looks like a model refusal")
                 trace.append(AIMessage(
                     content=(
                         f"⚠️ [{config.agent_id}] model refused the task. "
@@ -340,7 +425,7 @@ def make_agent_node(
                 error="model refused" if refused else None,
             )
         except Exception as e:
-            logger.error(f"Agent {config.agent_id} failed: {e}")
+            self.log.error(f"Agent {config.agent_id} failed: {e}")
             trace = [AIMessage(
                 content=f"❌ [{config.agent_id}] crashed: {e}",
                 additional_kwargs={"agent_id": config.agent_id, "error": True},
@@ -360,6 +445,3 @@ def make_agent_node(
             "findings": findings,
             "active_agents": [config.agent_id],
         }
-
-    agent_node.__name__ = config.agent_id.replace("-", "_")
-    return agent_node

@@ -36,11 +36,25 @@ SKILLS_DIR = Path(__file__).parent
 # Cache: config_name -> AgentConfig. Populated lazily by `load_skill`,
 # then augmented at run-time by `register_custom_skill`.
 _CACHE: dict[str, AgentConfig] = {}
+
+# Parallel cache: config_name -> short description (from SKILL.md
+# frontmatter). The planner uses these to build its dispatch menu —
+# the LLM's "what does this skill do" hint without loading the full
+# system prompt.
+_DESCRIPTIONS: dict[str, str] = {}
+
+# Skills with no metadata.agent_id are reference-only (e.g. the nmap
+# skill — a tool-selection cheatsheet, not an attack vector). They get
+# loaded into _CACHE so other skills can pull them, but stay out of the
+# planner's dispatch menu.
+_DISPATCHABLE: set[str] = set()
+
 _FILE_INDEX_BUILT = False
 
 
 def _split_frontmatter(text: str) -> tuple[dict, str]:
-    """Split a SKILL.md into (frontmatter dict, body string).
+    """basically extracting basics of skill from yaml part and that would be provided in every context
+    Split a SKILL.md into (frontmatter dict, body string).
 
     Accepts the standard ``---\\n<yaml>\\n---\\n<body>`` shape. Returns
     ``({}, text)`` for files without frontmatter so callers don't have
@@ -65,8 +79,14 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
     return meta, body.lstrip("\n")
 
 
-def _build_config(skill_name: str, meta: dict, body: str) -> AgentConfig:
-    """Construct an AgentConfig from parsed SKILL.md content."""
+def _build_config(skill_name: str, meta: dict, body: str) -> tuple[AgentConfig, str, bool]:
+    """Construct an AgentConfig from parsed SKILL.md content.
+
+    Returns ``(config, description, dispatchable)``. A skill is
+    "dispatchable" when its frontmatter sets ``metadata.agent_id`` —
+    skills without that (e.g. the nmap reference) are loaded but not
+    offered to the planner as attack targets.
+    """
     md = meta.get("metadata") or {}
     if not isinstance(md, dict):
         md = {}
@@ -76,7 +96,10 @@ def _build_config(skill_name: str, meta: dict, body: str) -> AgentConfig:
         tool_names = []
     tools = resolve_tools([str(n) for n in tool_names])
 
-    return AgentConfig(
+    description = str(meta.get("description") or "").strip()
+    dispatchable = bool(md.get("agent_id"))
+
+    cfg = AgentConfig(
         agent_id=str(md.get("agent_id") or f"skill-{skill_name}"),
         methodology=str(md.get("methodology") or "skill"),
         config_name=str(md.get("config_name") or skill_name),
@@ -85,19 +108,27 @@ def _build_config(skill_name: str, meta: dict, body: str) -> AgentConfig:
         max_tool_calls=int(md.get("max_tool_calls") or 50),
         max_iterations=int(md.get("max_iterations") or 30),
     )
+    return cfg, description, dispatchable
 
 
 def _load_from_disk(name: str) -> AgentConfig | None:
     """Read ``src/skills/<name>/SKILL.md`` and build an AgentConfig.
 
-    Returns None if the directory or SKILL.md doesn't exist.
+    Returns None if the directory or SKILL.md doesn't exist. Side
+    effects: populates ``_DESCRIPTIONS`` and ``_DISPATCHABLE`` so the
+    planner-facing helpers reflect this skill on subsequent calls.
     """
     path = SKILLS_DIR / name / "SKILL.md"
     if not path.exists():
         return None
     text = path.read_text(encoding="utf-8")
     meta, body = _split_frontmatter(text)
-    return _build_config(name, meta, body)
+    cfg, description, dispatchable = _build_config(name, meta, body)
+    if description:
+        _DESCRIPTIONS[cfg.config_name] = description
+    if dispatchable:
+        _DISPATCHABLE.add(cfg.config_name)
+    return cfg
 
 
 def _build_file_index() -> None:
@@ -159,6 +190,7 @@ def register_custom_skill(name: str, system_prompt: str) -> AgentConfig:
         max_iterations=budgets.custom_attack_max_iterations,
     )
     _CACHE[name] = cfg
+    _DISPATCHABLE.add(name)
     return cfg
 
 
@@ -166,6 +198,19 @@ def list_skills() -> list[str]:
     """All skill names known to the loader (file-backed + custom)."""
     _build_file_index()
     return sorted(_CACHE.keys())
+
+
+def list_dispatchable_skills() -> list[tuple[str, str]]:
+    """``[(config_name, description), ...]`` for the planner's menu.
+
+    Reference-only skills (e.g. the nmap cheatsheet) are filtered out —
+    only skills whose frontmatter declares them as a real attack vector
+    via ``metadata.agent_id`` show up here.
+    """
+    _build_file_index()
+    return sorted(
+        (name, _DESCRIPTIONS.get(name, "")) for name in _DISPATCHABLE
+    )
 
 
 def load_reference(skill_name: str, reference_file: str) -> str | None:

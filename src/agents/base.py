@@ -11,16 +11,17 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
 
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
-from src.llm.provider import LLMConfig, get_llm
-from src.state import AgentResult, AgentState, Finding, Severity
+# NB: ``src.llm.provider`` is imported lazily inside ``make_agent_node``
+# to break the circular import chain
+# ``skills.loader → agents.base → llm.provider → graph → nodes → agents.base``.
+# Importing it at module level wedges the loader at startup.
+from src.state import AgentResult, Finding, Severity
 
 logger = logging.getLogger(__name__)
 
@@ -51,43 +52,27 @@ def _looks_like_refusal(text: str) -> bool:
 
 @dataclass
 class AgentConfig:
-    """Everything that makes one swarm agent different from another."""
+    """Everything that makes one swarm agent different from another.
+
+    Skill content (system_prompt + tool list + caps) now comes from
+    SKILL.md files under ``src/skills/`` parsed by ``src/skills/loader.py``.
+    This dataclass is the in-memory carrier the loader produces.
+    """
 
     # Identity
     agent_id: str  # unique name, e.g. "owasp-auth-testing"
-    methodology: str  # "owasp" | "vulntype" | "custom"
-    config_name: str  # e.g. "auth-testing", "sqli", "chain-ssrf-rce"
+    methodology: str  # "owasp" | "vulntype" | "custom" | "skill"
+    config_name: str  # primary key for planner dispatch — matches skill folder
 
-    # Prompt
+    # Prompt body (the SKILL.md body, minus frontmatter)
     system_prompt: str = ""
-    skill_names: list[str] = field(default_factory=list)  # skill doc names to load
-    skill_docs: list[str] = field(default_factory=list)  # direct paths (legacy)
 
-    # Tools (LangChain tool instances)
+    # Tools (LangChain tool instances, resolved from SKILL.md tool names)
     tools: list[BaseTool] = field(default_factory=list)
 
     # Budget / loop detection
     max_tool_calls: int = 50
     max_iterations: int = 30
-
-    # LLM config (can override per-agent for ablation)
-    llm_config: LLMConfig | None = None
-
-
-@dataclass
-class WorkflowConfig:
-    """Multi-step workflow definition. Wraps one or two AgentConfigs.
-
-    A workflow has two phases:
-    - analyze: always runs — identifies vulnerabilities
-    - exploit: only runs if mode="full" AND phase 1 found something
-
-    Single-phase configs are auto-wrapped with exploit=None by the registry.
-    """
-
-    config_name: str
-    analyze: AgentConfig
-    exploit: AgentConfig | None = None
 
 
 def _build_system_message(
@@ -137,22 +122,9 @@ def _build_system_message(
             f"{findings_text}\n"
         )
 
-    # Config-provided system prompt (attack instructions)
+    # Config-provided system prompt (the SKILL.md body — attack instructions)
     if config.system_prompt:
         parts.append(config.system_prompt)
-
-    # Knowledge layer 2: skill loading (toggleable)
-    if is_enabled(rc, "knowledge", "skill_loading") if rc else True:
-        from src.knowledge.skills.loader import load_skills
-        # Load by skill_names first, then fall back to direct paths
-        if config.skill_names:
-            skill_content = load_skills(config.skill_names)
-            if skill_content:
-                parts.append(skill_content)
-        for skill_path in config.skill_docs:
-            path = Path(skill_path)
-            if path.exists():
-                parts.append(f"\n--- Skill: {path.stem} ---\n{path.read_text()}")
 
     # Knowledge layer 3: RAG hint (actual retrieval happens at query time)
     if is_enabled(rc, "knowledge", "rag") if rc else True:
@@ -284,7 +256,8 @@ def make_agent_node(
     5. Returns updates to the parent SwarmGraphState
     """
     if llm is None:
-        llm = get_llm(config.llm_config)
+        from src.llm.provider import get_llm  # lazy — see top-of-file note
+        llm = get_llm()
 
     async def agent_node(state: dict) -> dict:
         """Execute this agent and return findings + chat trace to the parent."""

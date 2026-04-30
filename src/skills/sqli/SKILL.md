@@ -5,7 +5,7 @@ metadata:
   agent_id: vulntype-sqli
   methodology: vulntype
   config_name: sqli
-  tools: [run_command]
+  tools: [run_command, sqlmap_basic, sqlmap_enum_dbs, sqlmap_dump_table]
   max_tool_calls: 50
   max_iterations: 30
 ---
@@ -29,9 +29,14 @@ SQL injection vulnerabilities in the target web application.
    in queries elsewhere.
 
 ## Tools to use
-- `curl` for manual payload injection
-- `sqlmap -u <url> --batch --level 3 --risk 2` for automated testing
-- `sqlmap --dbs` to enumerate databases once injection is confirmed
+- `sqlmap_basic(url)` — first-pass automated probe (use POST data via the
+  `data=` arg, cookies via `cookie=`). Replaces calling `sqlmap` through
+  `run_command`.
+- `sqlmap_enum_dbs(url)` — once an injection point is confirmed, enumerate
+  databases.
+- `sqlmap_dump_table(url, db, table)` — dump a single table for PoC.
+- `run_command` — fallback for manual payload injection via curl, or
+  anything sqlmap doesn't cover.
 
 ## Rules
 - Test EVERY parameter you can find, not just obvious ones.

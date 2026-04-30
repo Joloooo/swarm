@@ -40,11 +40,13 @@ from typing import Any
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.agents.base import AgentConfig
-from src.agents.configs.registry import get_workflow, register_config
 from src.llm.provider import LLMConfig, get_llm
+from src.skills.loader import (
+    list_dispatchable_skills,
+    load_skill,
+    register_custom_skill,
+)
 from src.state import SwarmGraphState
-from src.tools.terminal import run_command
 from src.tools.url import normalize_url, validate_website
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,34 @@ VALID_ACTIONS = {"attack", "recon", "web_search", "report"}
 _CUSTOM_MAX_TOOL_CALLS = budgets.custom_attack_max_tool_calls
 _CUSTOM_MAX_ITERATIONS = budgets.custom_attack_max_iterations
 
+def _build_skills_menu() -> str:
+    """Render the dispatchable-skills list as a bulleted menu.
+
+    Read at module import time and inlined into ``SUPERVISOR_SYSTEM_PROMPT``
+    via f-string. The menu reflects whatever SKILL.md files exist under
+    ``src/skills/`` at startup; new skills picked up automatically on the
+    next process restart.
+    """
+    entries = list_dispatchable_skills()
+    if not entries:
+        return "  (no skills loaded — check src/skills/)"
+    lines = []
+    for name, desc in entries:
+        # Each SKILL.md description is a long sentence designed for
+        # progressive disclosure; trim to a short menu hint here.
+        short = desc.split(". ")[0].strip().rstrip(".")
+        if len(short) > 220:
+            short = short[:220].rstrip() + "..."
+        lines.append(f"- {name}: {short}.")
+    return "\n".join(lines)
+
+
+_SKILLS_MENU = _build_skills_menu()
+
+
+# NB: regular string, not f-string. The prompt body contains JSON examples
+# with literal ``{`` / ``}`` that would otherwise need escaping. The skills
+# menu is spliced in below via ``.replace()`` against a sentinel marker.
 SUPERVISOR_SYSTEM_PROMPT = """\
 You are the supervisor of a penetration-testing swarm. You are the
 only decision-maker in the graph — every other node runs only because
@@ -102,36 +132,16 @@ your decision. The allowed values for "action" are:
                  enough evidence, further tries are unlikely to pay
                  off, or the target is clearly unreachable.
 
-# Available attack configs (for action="attack")
+# Available attack skills (for action="attack")
 
 Pick any subset by name in "configs". Use the one-line descriptions
-below to judge which configs apply to the recon output you have. You
-are NOT required to include any particular config — decide based on
+below to judge which skills apply to the recon output you have. You
+are NOT required to include any particular skill — decide based on
 the target. If recon shows the target has no inputs, picking xss is
 pointless; if it's a pure static site, most of these don't fit.
 
-Pre-registered configs:
-- sqli: SQL injection probing of URL params, forms, headers, cookies;
-  uses sqlmap for confirmed injection points.
-- xss: reflected and stored cross-site scripting against reflected-input
-  surfaces (search, comment, name, feedback fields, etc.).
-- idor: insecure direct object reference — tampering with IDs in URLs
-  and API paths to access other users' resources.
-- lfi: local file inclusion via path traversal on file/path/include params.
-- ssrf: server-side request forgery on URL-taking inputs (webhook,
-  callback, import-from-url, redirect).
-- ssti: server-side template injection against Jinja/Twig/Freemarker/etc.
-- auth-testing: authentication bypass, default credentials, weak JWT,
-  auth-flow tampering.
-- session-mgmt: cookie flags, session fixation, token entropy, CSRF.
-- error-handling: verbose errors, stack-trace leaks, tech headers exposed.
-- crypto: weak TLS configs, bad hashes, predictable tokens, mixed content.
-- business-logic: workflow/state tampering on carts, payments, roles,
-  admin functions.
-- input-validation: generic fuzzing on upload/API surfaces for encoding
-  and boundary issues.
-- chain-ssrf-to-rce: exploit chain from SSRF to RCE via internal metadata
-  services.
+Pre-registered skills:
+__SKILLS_MENU__
 
 # Custom configs
 
@@ -215,6 +225,13 @@ If you cannot parse the user's intent, choose "report" with a
 block.
 """
 
+# Splice the dynamic skills menu in. Done after the prompt is defined so
+# the prompt body can keep its literal ``{`` / ``}`` JSON examples without
+# escaping.
+SUPERVISOR_SYSTEM_PROMPT = SUPERVISOR_SYSTEM_PROMPT.replace(
+    "__SKILLS_MENU__", _SKILLS_MENU
+)
+
 
 # Extracts a fenced ```json { ... } ``` block from the LLM's final
 # message. We are lenient: also accept an un-fenced trailing object.
@@ -265,15 +282,16 @@ def _final_text(messages: list) -> str:
 
 
 def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
-    """Register any custom configs and build the pending_dispatch list.
+    """Register custom skills inline, then build the pending_dispatch list.
 
-    Skips unknown named configs and malformed ``custom_configs`` entries
+    Skips unknown named skills and malformed ``custom_configs`` entries
     with a warning. Returns the list of dispatch items (possibly empty —
     the caller is responsible for falling back to "report" in that case).
     """
     mode = decision.get("mode") or state.get("mode") or "analyze"
 
-    # Step 1: register custom configs so get_workflow() can resolve them.
+    # Step 1: register custom skills the planner invented inline so that
+    # the next ``load_skill(name)`` call can resolve them.
     custom_names: list[str] = []
     raw_custom = decision.get("custom_configs") or []
     if not isinstance(raw_custom, list):
@@ -296,20 +314,11 @@ def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
             )
             continue
         seen_custom.add(name)
-        cfg = AgentConfig(
-            agent_id=f"custom-{name}",
-            methodology="custom",
-            config_name=name,
-            system_prompt=prompt,
-            tools=[run_command],
-            max_tool_calls=_CUSTOM_MAX_TOOL_CALLS,
-            max_iterations=_CUSTOM_MAX_ITERATIONS,
-        )
-        register_config(cfg)
+        register_custom_skill(name, prompt)
         custom_names.append(name)
 
-    # Step 2: union the named configs with the freshly-registered customs,
-    # resolve each against the registry, and stage them for fan-out.
+    # Step 2: union the named skills with the freshly-registered customs,
+    # resolve each through the loader, and stage them for fan-out.
     raw_named = decision.get("configs") or []
     if not isinstance(raw_named, list):
         raw_named = []
@@ -321,18 +330,18 @@ def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
         if name in seen:
             continue
         seen.add(name)
-        wf = get_workflow(name)
-        if wf is None:
+        cfg = load_skill(name)
+        if cfg is None:
             logger.warning(
-                "planner: unknown config %r (not in registry after custom "
-                "registration) — skipping",
+                "planner: unknown skill %r (no SKILL.md and not registered "
+                "as custom) — skipping",
                 name,
             )
             continue
         pending.append({
             "agent_id": f"{name}-{i}",
             "config_name": name,
-            "methodology": wf.analyze.methodology,
+            "methodology": cfg.methodology,
             "mode": mode,
         })
     return pending

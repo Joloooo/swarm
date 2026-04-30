@@ -320,6 +320,43 @@ class BaseNode(ABC):
         from src.skills.loader import load_skill
         return load_skill(name)
 
+    def detect_repetition(
+        self,
+        state: dict,
+        window: int = 3,
+    ) -> str | None:
+        """Return a human-readable warning if the swarm is looping at
+        the supervisor level, or ``None`` otherwise.
+
+        Reads ``state["agent_results"]`` only — no per-tool-call
+        bookkeeping needed because the standard worker-node update dict
+        already records every completed agent. The check fires when the
+        last ``window`` agent_results all share the same ``config_name``
+        AND together produced zero findings, i.e. the planner has been
+        hammering the same skill with no progress.
+
+        The intended consumer is :class:`PlannerNode`, which prepends
+        the warning to the supervisor's prompt so the LLM can pivot
+        (different skill, web search, or report) instead of dispatching
+        the same useless attack again.
+        """
+        results = state.get("agent_results") or []
+        if len(results) < window:
+            return None
+        recent = results[-window:]
+        config_names = {getattr(r, "config_name", None) for r in recent}
+        if len(config_names) != 1 or None in config_names:
+            return None
+        total_findings = sum(len(getattr(r, "findings", None) or []) for r in recent)
+        if total_findings > 0:
+            return None
+        cfg = recent[0].config_name
+        return (
+            f"Loop detected: skill {cfg!r} has run {window} times in a row "
+            "with 0 findings. Try a different skill, do web_search to learn "
+            "more, or pick report if the target seems exhausted."
+        )
+
     async def run_skill_agent(
         self,
         config: AgentConfig,

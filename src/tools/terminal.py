@@ -281,6 +281,64 @@ async def _async_run_in_pane(pane_id: str, command: str, timeout: int = 120) -> 
     return await asyncio.to_thread(_run_in_pane, pane_id, command, timeout)
 
 
+def _truncate_output(output: str) -> str:
+    """Apply the same head+tail line truncation that `run_command` does."""
+    lines = output.split("\n")
+    if len(lines) <= 200:
+        return output
+    head = lines[:100]
+    tail = lines[-50:]
+    truncated = len(lines) - 150
+    return "\n".join(head + [f"\n... [{truncated} lines truncated] ...\n"] + tail)
+
+
+async def shell(
+    command: str,
+    *,
+    agent_id: str = "default",
+    reasoning: str = "",
+    timeout: int = 120,
+) -> str:
+    """Run a shell command in the agent's tmux pane and return captured output.
+
+    Internal helper used by the typed tool wrappers (sqlmap_basic,
+    sslscan_full, gobuster_dir, etc.) so they don't have to drive the
+    LangChain `@tool` machinery to get at the same plumbing as
+    ``run_command``. Logs every call to the JSONL run log just like
+    ``run_command`` does, so verbose mode and the audit trail stay
+    consistent regardless of which entry point fired.
+    """
+    pane_id = await asyncio.to_thread(_get_or_create_pane, agent_id)
+
+    t0 = time.perf_counter()
+    _log_event(
+        "command",
+        agent=agent_id,
+        pane=pane_id,
+        cmd=command,
+        reasoning=reasoning,
+    )
+
+    output = await _async_run_in_pane(pane_id, command, timeout)
+
+    dt_ms = int((time.perf_counter() - t0) * 1000)
+    raw_bytes = len(output)
+    _log_event(
+        "output",
+        agent=agent_id,
+        pane=pane_id,
+        cmd=command,
+        reasoning=reasoning,
+        duration_ms=dt_ms,
+        bytes=raw_bytes,
+        tail=output[-4000:],
+        truncated_in_log=raw_bytes > 4000,
+        timed_out=output.startswith("[TIMEOUT"),
+    )
+
+    return _truncate_output(output)
+
+
 # -- LangChain tools exposed to agents --
 
 @tool

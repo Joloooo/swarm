@@ -32,16 +32,17 @@ from src.tools.nmap import (
     nmap_udp_scan,
     nmap_vuln_scan,
 )
+from src.tools.shell import bash, read_file, run_command
 from src.tools.sqlmap import sqlmap_basic, sqlmap_dump_table, sqlmap_enum_dbs
 from src.tools.sslscan import sslscan_full
-from src.tools.terminal import read_file, run_command
 from src.tools.testssl import testssl_full
 from src.tools.web_recon import gobuster_dir, nikto_scan, whatweb
 
 
 _REGISTRY: dict[str, BaseTool] = {
     # Generic shell + file
-    "run_command":            run_command,
+    "bash":                   bash,         # one-shot non-interactive
+    "run_command":            run_command,  # interactive tmux pane
     "read_file":              read_file,
 
     # nmap (typed)

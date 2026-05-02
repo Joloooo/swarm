@@ -6,6 +6,8 @@
 #   - nmap      (port scanning, service detection)
 #   - gobuster  (directory/endpoint brute-forcing)
 #   - sqlmap    (SQL injection testing)
+#   - whatweb   (technology fingerprinting)
+#   - nikto     (web-server vulnerability sweep)
 #   - curl      (HTTP requests — usually pre-installed)
 #
 # Supports macOS (Homebrew) and Linux (apt / dnf / pacman).
@@ -40,6 +42,8 @@ REQUIRED_TOOLS=(
     "nmap:port scanning and service detection"
     "gobuster:directory and endpoint brute-forcing"
     "sqlmap:SQL injection testing"
+    "whatweb:technology fingerprinting"
+    "nikto:web-server vulnerability sweep"
     "curl:HTTP requests"
 )
 

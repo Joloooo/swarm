@@ -7,15 +7,15 @@ logger, skill lookup, the LLM-agent loop that used to live in
 ``make_agent_node`` — are methods on this base, so any node can call
 them via ``self.<capability>``.
 
-What this module does NOT do (handled elsewhere):
-
-- Top-level error handling / boundary AIMessage / JSONL run logging —
-  those live in ``src.graph.traced``.
-- LangGraph's native streams (`messages`, `tasks`, `updates`) — Studio
-  surfaces those without us doing anything.
-
-Subclasses override ``execute()``. Instances are callable directly via
-``__call__``, so ``graph.add_node("planner", PlannerNode())`` works.
+``__call__`` itself is instrumented: it times the node, catches
+crashes and surfaces them as a visible ``❌`` AIMessage, appends a
+boundary ``✅ [name] Xms — summary`` AIMessage so LangGraph Studio
+chat shows continuous progress, writes one JSONL line per call to
+``logs/run-<run_id>/nodes.jsonl`` for thesis-grade post-run analysis,
+and (when ``SWARM_VERBOSE=1``) streams a live transition + new
+AIMessages summary to stderr. None of that needs per-subclass code —
+subclasses only override :meth:`execute`. The graph wires nodes
+directly: ``graph.add_node("planner", PlannerNode())``.
 
 Also exports ``AgentConfig`` and the skill-agent helper functions that
 ``run_skill_agent`` uses internally. These were ported verbatim from the
@@ -23,18 +23,25 @@ old ``src/agents/base.py``; the only behavioral change is that the
 runner uses the per-node logger (``self.log``) instead of a module
 logger so log lines are tagged by agent_id.
 
+LangGraph's native streams (``messages``, ``tasks``, ``updates``) —
+Studio surfaces those without us doing anything.
+
 NB: ``src.llm.provider`` and ``src.skills.loader`` are imported lazily
 inside the methods that need them. The cycle is
 ``skills.loader → nodes.base → llm.provider → graph → nodes →
 nodes.base``; importing either at module level wedges the loader at
-startup.
+startup. ``src.observability`` is dependency-light (stdlib only) and
+safe to import at module level.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import sys
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -44,6 +51,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
+from src.observability import append_node_event, make_run_id
 from src.state import AgentResult, Finding, Severity
 
 
@@ -285,12 +293,38 @@ def _extract_findings(messages: list, agent_id: str) -> list[Finding]:
 # ────────────────────────────────────────────────────────────────────────────
 
 
+def _summarize_node_result(name: str, result: dict) -> str:
+    """One-line summary of what a node returned, for the chat trace."""
+    if not isinstance(result, dict):
+        return "ok"
+    parts = []
+    if "findings" in result:
+        parts.append(f"{len(result['findings'])} findings")
+    if "agent_results" in result:
+        ars = result["agent_results"] or []
+        completed = sum(1 for a in ars if getattr(a, "completed", False))
+        parts.append(f"{completed}/{len(ars)} agents ok")
+    if result.get("active_agents"):
+        parts.append(f"active: {','.join(result['active_agents'])}")
+    if result.get("waf_detected"):
+        parts.append(f"WAF (level {result.get('stealth_level', 0)})")
+    if result.get("next_action"):
+        parts.append(f"→ {result['next_action']}")
+    if result.get("pending_dispatch"):
+        parts.append(f"staged {len(result['pending_dispatch'])} workflow(s)")
+    return ", ".join(parts) or "ok"
+
+
 class BaseNode(ABC):
     """Abstract base for every SwarmAttacker LangGraph node.
 
     Subclasses override :meth:`execute`. Instances are callable through
-    :meth:`__call__`, so they can be passed to ``graph.add_node`` or
-    wrapped by ``src.graph.traced`` directly.
+    :meth:`__call__`, which wraps :meth:`execute` with timing,
+    crash-to-AIMessage conversion, JSONL run logging, optional
+    `SWARM_VERBOSE` streaming, and a boundary message so Studio chat
+    stays alive during long-running parallel work. Pass the instance
+    straight to ``graph.add_node("planner", PlannerNode())`` — no
+    further wrapping required.
     """
 
     def __init__(self, name: str | None = None) -> None:
@@ -309,7 +343,97 @@ class BaseNode(ABC):
         """Subclasses implement node logic here."""
 
     async def __call__(self, state: dict[str, Any]) -> dict[str, Any]:
-        return await self.execute(state)
+        """Run :meth:`execute` with cross-cutting instrumentation.
+
+        Side effects per call:
+            1. Append a boundary ``✅ [name] Xms — summary`` AIMessage
+               to ``state.messages`` so Studio shows live progress.
+            2. Append one line to ``logs/run-<run_id>/nodes.jsonl``
+               capturing timestamp, node name, duration, summary, and
+               full result dict — for thesis-grade post-run analysis.
+            3. On crash, return a ``❌ [name] crashed`` AIMessage and
+               log the JSONL row with ``error`` set, instead of
+               propagating the exception and killing the graph.
+            4. With ``SWARM_VERBOSE=1``, stream the node transition and
+               every new AIMessage to stderr.
+
+        ``run_id`` is read from state. If absent (e.g. Studio runs that
+        bypass the runner), one is derived on the fly from target_url.
+        """
+        name = self.name
+        run_id = (state or {}).get("run_id") or make_run_id(
+            target_url=(state or {}).get("target_url"),
+        )
+
+        t0 = time.perf_counter()
+        try:
+            result = await self.execute(state)
+        except Exception as e:  # noqa: BLE001 — visibility > strictness here
+            dt_ms = int((time.perf_counter() - t0) * 1000)
+            self.log.exception("[%s] crashed after %dms", name, dt_ms)
+            append_node_event(run_id, {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "node": name,
+                "duration_ms": dt_ms,
+                "error": f"{type(e).__name__}: {e}",
+                "summary": "",
+                "result": None,
+            })
+            return {
+                "messages": [
+                    AIMessage(
+                        content=f"❌ [{name}] crashed after {dt_ms}ms: {e}",
+                        additional_kwargs={"node": name, "error": True},
+                    )
+                ]
+            }
+
+        result = result or {}
+        dt_ms = int((time.perf_counter() - t0) * 1000)
+        summary = _summarize_node_result(name, result)
+        append_node_event(run_id, {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "node": name,
+            "duration_ms": dt_ms,
+            "summary": summary,
+            "result": result,
+        })
+        if os.getenv("SWARM_VERBOSE"):
+            ts_short = time.strftime("%H:%M:%S")
+            print(
+                f"\n─── [{ts_short}] node `{name}` finished in {dt_ms} ms ───\n"
+                f"    {summary}",
+                file=sys.stderr, flush=True,
+            )
+            # Print any new AI messages this node added so the full
+            # reasoning stream lives in the same terminal.
+            for msg in result.get("messages") or []:
+                content = getattr(msg, "content", None)
+                if not content:
+                    continue
+                # Filter out the ✅ boundary messages we ourselves emit
+                # (added below) so we don't log them twice.
+                kw = getattr(msg, "additional_kwargs", None) or {}
+                if kw.get("node") and isinstance(content, str) and (
+                    content.startswith("✅ [") or content.startswith("❌ [")
+                ):
+                    continue
+                role = type(msg).__name__
+                text = content if isinstance(content, str) else str(content)
+                print(
+                    f"    └── {role}:",
+                    file=sys.stderr, flush=True,
+                )
+                for line in text.splitlines() or [""]:
+                    print(f"        {line}", file=sys.stderr, flush=True)
+        msgs = list(result.get("messages") or [])
+        msgs.append(
+            AIMessage(
+                content=f"✅ [{name}] {dt_ms}ms — {summary}",
+                additional_kwargs={"node": name},
+            )
+        )
+        return {**result, "messages": msgs}
 
     # ── Shared capabilities ────────────────────────────────────────────────
 

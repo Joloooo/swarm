@@ -2,7 +2,7 @@
 
 For each run we write everything under ``logs/run-<run_id>/``:
 
-    nodes.jsonl           one line per traced() node call (full result)
+    nodes.jsonl           one line per BaseNode.__call__ (full result)
     final_state.json      graph.ainvoke() return value, in full
     summary.md            human-readable digest of the whole run
     terminal_events.jsonl tool-call log (redirected from src/tools/terminal.py)
@@ -156,8 +156,8 @@ def write_summary(
 ) -> Path:
     """Generate ``summary.md`` — a human-readable digest of the run.
 
-    Reads ``nodes.jsonl`` (already written by traced()) and the
-    final_state to produce a single document the user can scan.
+    Reads ``nodes.jsonl`` (already written by BaseNode.__call__) and
+    the final_state to produce a single document the user can scan.
     """
     nodes = _read_node_events(run_id)
     findings = final_state.get("findings") or []

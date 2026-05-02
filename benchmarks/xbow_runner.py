@@ -161,8 +161,9 @@ def discover_target_url(benchmark_id: str) -> str:
 async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
     flag = expected_flag(benchmark_id)
     started = time.time()
-    # Pin run_id and log dir BEFORE any graph activity so every traced()
-    # node and every terminal-tool call lands in the same per-run folder.
+    # Pin run_id and log dir BEFORE any graph activity so every
+    # BaseNode call and every terminal-tool call lands in the same
+    # per-run folder.
     run_id = make_run_id(benchmark_id=benchmark_id)
     rdir = run_dir(run_id)
     _set_terminal_log_file(rdir / "terminal_events.jsonl")
@@ -402,7 +403,7 @@ def main() -> None:
 
     if args.verbose:
         # Picked up by src.tools.terminal._verbose_print and
-        # src.graph.traced() — they read it at log-event time, so
+        # BaseNode.__call__ — they read it at log-event time, so
         # setting it here before graph.ainvoke() is enough.
         os.environ["SWARM_VERBOSE"] = "1"
 

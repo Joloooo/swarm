@@ -93,8 +93,8 @@ class SwarmGraphState(TypedDict, total=False):
     """The actual LangGraph state — TypedDict for graph compatibility."""
 
     # Run identity. Set once at graph invocation by the runner (or by
-    # the initialize node as a fallback for Studio runs). Read by the
-    # traced() wrapper to route per-node JSONL events into the correct
+    # the initialize node as a fallback for Studio runs). Read by
+    # BaseNode.__call__ to route per-node JSONL events into the correct
     # logs/run-<run_id>/ directory.
     run_id: str
 

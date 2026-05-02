@@ -107,6 +107,7 @@ def _build_config(skill_name: str, meta: dict, body: str) -> tuple[AgentConfig, 
         tools=tools,
         max_tool_calls=int(md.get("max_tool_calls") or 50),
         max_iterations=int(md.get("max_iterations") or 30),
+        skip_base_prompt=bool(md.get("skip_base_prompt", False)),
     )
     return cfg, description, dispatchable
 

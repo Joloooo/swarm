@@ -5,7 +5,7 @@ description: Use when planning nmap scans, choosing between scan types, reading 
 
 # Nmap — Typed Tool Reference
 
-You have typed nmap tools. Prefer them over `run_command("nmap ...")` —
+You have typed nmap tools. Prefer them over `bash("nmap ...")` —
 they return structured dicts, set safe timeouts, and hide flag syntax.
 Every tool's output is a `ScanResult` dict: `{ok, tool, target, command,
 elapsed_seconds, hosts: [...], summary, error?, warnings?}`.
@@ -73,12 +73,12 @@ When `ok=False`, the `error.code` tells you what to try next:
 
 | error.code | What it means | What to do |
 |---|---|---|
-| `binary_missing` | nmap not installed in sandbox | Fall back to `run_command` + curl, or ask user to install nmap |
+| `binary_missing` | nmap not installed in sandbox | Fall back to `bash` + curl, or ask user to install nmap |
 | `permission_denied` | scan needs root (UDP/OS detection) | For port scans: retry with `tcp_connect=True`. For OS/UDP: skip entirely |
 | `invalid_target` | hostname did not resolve | Try an IP directly; verify DNS |
 | `timeout` | exceeded `--host-timeout` | Narrow ports (smaller `top_ports`, specific `ports`) — DON'T just retry with the same args |
 | `invalid_args` | nmap rejected flags | Read `error.stderr`, fix the offending arg |
-| `unknown` | unexpected | Read `error.stderr`, retry once, else `run_command` |
+| `unknown` | unexpected | Read `error.stderr`, retry once, else `bash` |
 
 If `ok=True` but `hosts=[]` → target is filtered or down; try
 `nmap_host_discovery(target, method="tcp-syn")` before giving up.

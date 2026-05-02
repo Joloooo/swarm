@@ -467,6 +467,71 @@ async def bash(
     return truncate_output(formatted)
 
 
+async def bash_exec(
+    command: str,
+    *,
+    agent_id: str = "default",
+    reasoning: str = "",
+    timeout: int = _DEFAULT_TIMEOUT_S,
+) -> str:
+    """Run a one-shot command and return its raw stdout.
+
+    Internal helper for the typed tool wrappers (sqlmap_basic,
+    gobuster_dir, nikto_scan, …) — same plumbing as the @tool
+    :func:`bash` but without the LLM-facing exit-code/cwd headers,
+    since those wrappers want to forward output verbatim. On a
+    non-zero exit the stderr is appended after a ``[stderr]`` marker
+    so the wrapper still sees error messages; on timeout the partial
+    output is prefixed with a ``[TIMEOUT]`` marker.
+
+    Logs the same ``bash_command`` / ``bash_output`` JSONL events as
+    :func:`bash` so verbose mode and the audit trail stay consistent
+    regardless of which entry point fired.
+    """
+    timeout = max(1, min(int(timeout), _MAX_TIMEOUT_S))
+
+    block = _check_safety(command, agent_id=agent_id)
+    if block:
+        return block
+
+    sess = await _get_or_create_session(agent_id)
+
+    _log_event(
+        "bash_command",
+        agent=agent_id,
+        cmd=command,
+        reasoning=reasoning,
+        timeout_s=timeout,
+        entrypoint="bash_exec",
+    )
+
+    async with sess.lock:
+        result = await _run_one(sess, command, timeout)
+
+    raw_total = len(result["stdout"]) + len(result["stderr"])
+    _log_event(
+        "bash_output",
+        agent=agent_id,
+        cmd=command,
+        reasoning=reasoning,
+        duration_ms=result["duration_ms"],
+        bytes=raw_total,
+        exit_code=result["exit_code"],
+        cwd=result["cwd"],
+        timed_out=result["timed_out"],
+        tail=(result["stdout"] + result["stderr"])[-4000:],
+        truncated_in_log=raw_total > 4000,
+        entrypoint="bash_exec",
+    )
+
+    out = result["stdout"]
+    if result["stderr"] and result["exit_code"] != 0:
+        out = (out + "\n[stderr]\n" + result["stderr"]).strip()
+    if result["timed_out"]:
+        out = f"[TIMEOUT after {timeout}s]\n{out}"
+    return truncate_output(out)
+
+
 async def cleanup_bash_sessions() -> None:
     """Tear down every persistent bash subprocess.
 
@@ -500,6 +565,7 @@ async def cleanup_bash_sessions() -> None:
 
 __all__ = [
     "bash",
+    "bash_exec",
     "cleanup_bash_sessions",
     "BashSession",
 ]

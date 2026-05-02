@@ -5,7 +5,7 @@ metadata:
   agent_id: owasp-business-logic
   methodology: owasp
   config_name: business-logic
-  tools: [run_command]
+  tools: [bash]
   max_tool_calls: 40
   max_iterations: 25
 ---

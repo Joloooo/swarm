@@ -5,7 +5,7 @@ metadata:
   agent_id: vulntype-xss
   methodology: vulntype
   config_name: xss
-  tools: [run_command]
+  tools: [bash]
   max_tool_calls: 50
   max_iterations: 30
 ---

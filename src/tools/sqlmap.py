@@ -1,11 +1,11 @@
 """Typed sqlmap tool wrappers.
 
-The agent today fires sqlmap by constructing the command line itself
-inside ``run_command(...)``. These typed wrappers replace that pattern:
-the LLM picks the right action, the wrapper builds a quoted command
-line with safe defaults, and tmux runs it. Same plumbing as
-``run_command`` (see ``src/tools/terminal.py::shell``); one less thing
-the LLM has to remember.
+The agent today fires sqlmap by constructing the command line itself.
+These typed wrappers replace that pattern: the LLM picks the right
+action, the wrapper builds a quoted command line with safe defaults,
+and the bash backend runs it. Same plumbing as the ``bash`` LLM-facing
+tool (see ``src/tools/shell/bash.py``) but returns raw stdout for
+forwarding back to the agent.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import shlex
 
 from langchain_core.tools import tool
 
-from src.tools.terminal import shell
+from src.tools.shell import bash_exec
 
 
 # sqlmap can take 5–10 minutes on a real target. Keep a generous default;
@@ -72,7 +72,7 @@ async def sqlmap_basic(
         f"--level {int(level)} --risk {int(risk)}"
         f"{_build_data_arg(data)}{_build_cookie_arg(cookie)}"
     )
-    return await shell(
+    return await bash_exec(
         cmd, agent_id=agent_id, reasoning=reasoning, timeout=_DEFAULT_TIMEOUT
     )
 
@@ -107,7 +107,7 @@ async def sqlmap_enum_dbs(
         f"sqlmap -u {shlex.quote(url)} --batch --dbs"
         f"{_build_data_arg(data)}{_build_cookie_arg(cookie)}"
     )
-    return await shell(
+    return await bash_exec(
         cmd, agent_id=agent_id, reasoning=reasoning, timeout=_DEFAULT_TIMEOUT
     )
 
@@ -145,6 +145,6 @@ async def sqlmap_dump_table(
         f"-D {shlex.quote(db)} -T {shlex.quote(table)} --dump"
         f"{_build_data_arg(data)}{_build_cookie_arg(cookie)}"
     )
-    return await shell(
+    return await bash_exec(
         cmd, agent_id=agent_id, reasoning=reasoning, timeout=_DEFAULT_TIMEOUT
     )

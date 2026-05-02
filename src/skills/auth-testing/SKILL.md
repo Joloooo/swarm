@@ -5,7 +5,7 @@ metadata:
   agent_id: owasp-auth
   methodology: owasp
   config_name: auth-testing
-  tools: [run_command, hydra_http_form, sqlmap_basic]
+  tools: [bash, hydra_http_form, sqlmap_basic]
   max_tool_calls: 40
   max_iterations: 25
 ---
@@ -24,7 +24,7 @@ vulnerabilities in the target's authentication mechanisms.
    tampering, forced browsing past auth, and JWT issues.
 
 ## Tools to use
-- `run_command` for manual `curl` requests to login endpoints, cookie
+- `bash` for manual `curl` requests to login endpoints, cookie
   inspection (`curl -v`), and any tool not listed below.
 - `hydra_http_form(host, path, form_spec, ...)` — typed credential
   brute-forcer. Use TINY wordlists first (the default) to confirm the

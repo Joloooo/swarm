@@ -21,23 +21,26 @@ import asyncio
 from langchain_core.messages import AIMessage
 
 from src.nodes.base import BaseNode
-from src.tools.terminal import cleanup_session
+from src.tools.shell import cleanup_bash_sessions, cleanup_session
 
 
 class InitializeNode(BaseNode):
-    """Seed stealth defaults, reset planner counters, clean tmux state."""
+    """Seed stealth defaults, reset planner counters, clean shell state."""
 
     async def execute(self, state: dict) -> dict:
-        # Wipe any leftover tmux session from a prior run before any agent
-        # calls ``_ensure_session()``. Without this, the next agent can
-        # collide with a stale session created by a previous run inside the
-        # same ``langgraph dev`` process and fail with ``duplicate session``.
+        # Wipe any leftover shell state from a prior run before any agent
+        # call. The bash backend (per-agent persistent subprocess) and the
+        # tmux backend (one shared session, one window per agent) both
+        # leave state that survives the graph but breaks the next run.
         #
         # ``cleanup_session`` does ``subprocess.run(["tmux", "kill-session"])``
         # which is synchronous and would otherwise trigger langgraph-api's
-        # blockbuster guard (the "Blocking call to os.read" warning) by
-        # running sync I/O directly on the event-loop thread. Offload to a
-        # worker thread so the event loop stays responsive.
+        # blockbuster guard by running sync I/O on the event-loop thread.
+        # Offload to a worker thread so the event loop stays responsive.
+        try:
+            await cleanup_bash_sessions()
+        except Exception as e:  # noqa: BLE001 — never block the graph on cleanup
+            self.log.warning(f"bash cleanup failed (non-fatal): {e}")
         try:
             await asyncio.to_thread(cleanup_session)
         except Exception as e:  # noqa: BLE001 — never block the graph on cleanup

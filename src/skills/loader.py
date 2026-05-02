@@ -173,19 +173,19 @@ def register_custom_skill(name: str, system_prompt: str) -> AgentConfig:
     """Register an in-memory skill for one of the planner's custom_configs.
 
     Used by the planner when the LLM invents a tailored config on the
-    fly. The custom skill always gets ``run_command`` as its sole tool —
-    if the planner needs typed tools it should pick a pre-built skill.
+    fly. The custom skill always gets ``bash`` as its sole tool — if the
+    planner needs typed tools it should pick a pre-built skill.
     Idempotent on the same name (overwrites).
     """
     from src.graph import budgets
-    from src.tools.terminal import run_command
+    from src.tools.shell import bash
 
     cfg = AgentConfig(
         agent_id=f"custom-{name}",
         methodology="custom",
         config_name=name,
         system_prompt=system_prompt,
-        tools=[run_command],
+        tools=[bash],
         max_tool_calls=budgets.custom_attack_max_tool_calls,
         max_iterations=budgets.custom_attack_max_iterations,
     )

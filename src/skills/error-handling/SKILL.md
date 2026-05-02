@@ -5,7 +5,7 @@ metadata:
   agent_id: owasp-error-handling
   methodology: owasp
   config_name: error-handling
-  tools: [run_command]
+  tools: [bash]
   max_tool_calls: 30
   max_iterations: 20
 ---

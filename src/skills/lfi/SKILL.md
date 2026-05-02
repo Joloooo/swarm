@@ -5,7 +5,7 @@ metadata:
   agent_id: vulntype-lfi
   methodology: vulntype
   config_name: lfi
-  tools: [run_command]
+  tools: [bash]
   max_tool_calls: 45
   max_iterations: 25
 ---

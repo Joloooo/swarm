@@ -36,7 +36,7 @@ metadata:
   agent_id: vulntype-example
   methodology: vulntype
   config_name: example-vector
-  tools: [run_command]
+  tools: [bash]
   max_tool_calls: 40
   max_iterations: 25
 ---

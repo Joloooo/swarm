@@ -6,7 +6,7 @@ import shlex
 
 from langchain_core.tools import tool
 
-from src.tools.terminal import shell
+from src.tools.shell import bash_exec
 
 
 _DEFAULT_TIMEOUT = 600
@@ -84,6 +84,6 @@ async def hydra_http_form(
         f"-t {int(threads)} -f -s {int(port)} "
         f"{shlex.quote(host)} {module} {shlex.quote(form_spec)}"
     )
-    return await shell(
+    return await bash_exec(
         cmd, agent_id=agent_id, reasoning=reasoning, timeout=_DEFAULT_TIMEOUT
     )

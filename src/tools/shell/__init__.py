@@ -24,7 +24,7 @@ from src.tools.shell._common import (
     set_workspace_root,
     workspace_for,
 )
-from src.tools.shell.bash import bash, cleanup_bash_sessions
+from src.tools.shell.bash import bash, bash_exec, cleanup_bash_sessions
 from src.tools.shell.safety import (
     check_attacker_host_safety,
     check_scope,
@@ -53,6 +53,7 @@ async def cleanup_shell() -> None:
 __all__ = [
     # tools
     "bash",
+    "bash_exec",
     "run_command",
     "read_file",
     "shell",

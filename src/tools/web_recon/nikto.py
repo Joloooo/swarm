@@ -6,7 +6,7 @@ import shlex
 
 from langchain_core.tools import tool
 
-from src.tools.terminal import shell
+from src.tools.shell import bash_exec
 
 
 # nikto is loud and slow. 8 minute cap covers a single host + default
@@ -44,6 +44,6 @@ async def nikto_scan(
     if tuning:
         parts.extend(["-Tuning", shlex.quote(tuning)])
     cmd = " ".join(parts)
-    return await shell(
+    return await bash_exec(
         cmd, agent_id=agent_id, reasoning=reasoning, timeout=_DEFAULT_TIMEOUT
     )

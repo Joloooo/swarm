@@ -5,7 +5,7 @@ metadata:
   agent_id: owasp-session
   methodology: owasp
   config_name: session-mgmt
-  tools: [run_command]
+  tools: [bash]
   max_tool_calls: 35
   max_iterations: 20
 ---

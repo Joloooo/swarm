@@ -450,10 +450,50 @@ class PlannerNode(BaseNode):
         final_text = _final_text(result_messages)
         decision = _parse_decision(final_text)
 
+        # One reprompt before giving up. The supervisor sometimes wraps
+        # its decision in prose that breaks parsing — a focused "JSON
+        # only" reminder usually salvages the turn. Beyond a single
+        # retry we're papering over a broken prompt; force report.
         if decision is None:
             self.log.warning(
-                "Supervisor produced no parseable JSON decision; forcing report. "
-                "Final text starts: %r",
+                "Supervisor produced no parseable JSON decision on first "
+                "attempt — retrying once with a JSON-only reprompt. Final "
+                "text started: %r",
+                final_text[:200],
+            )
+            retry_messages = list(prior_messages) + list(new_messages) + [
+                HumanMessage(
+                    content=(
+                        "Your previous response did not include a parseable "
+                        "JSON decision block. Output ONLY a single fenced "
+                        "```json``` block matching the schema in the system "
+                        "prompt — no prose before or after, no other tool "
+                        "calls. Re-emit your decision now."
+                    )
+                ),
+            ]
+            try:
+                retry_result = await self._agent.ainvoke({"messages": retry_messages})
+            except Exception as e:
+                self.log.exception("Supervisor retry failed: %s", e)
+                return {
+                    "planner_iters": iters,
+                    "next_action": "report",
+                    "messages": new_messages + [
+                        AIMessage(content=f"Supervisor retry error: {e}. Forcing report.")
+                    ],
+                }
+            retry_messages_out: list = retry_result.get("messages", [])
+            retry_new = retry_messages_out[len(retry_messages):]
+            retry_final_text = _final_text(retry_messages_out)
+            decision = _parse_decision(retry_final_text)
+            new_messages = list(new_messages) + list(retry_new)
+            final_text = retry_final_text
+
+        if decision is None:
+            self.log.warning(
+                "Supervisor produced no parseable JSON decision after retry; "
+                "forcing report. Final text starts: %r",
                 final_text[:200],
             )
             return {
@@ -463,7 +503,7 @@ class PlannerNode(BaseNode):
                     AIMessage(
                         content=(
                             "Supervisor output did not include a valid JSON "
-                            "decision block. Forcing report."
+                            "decision block after retry. Forcing report."
                         )
                     )
                 ],

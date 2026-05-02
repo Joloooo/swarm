@@ -31,12 +31,26 @@ from urllib.parse import urlsplit, urlunsplit
 from langchain_core.tools import tool
 
 
+# Reserved hostnames that resolve to a loopback / link-local address but
+# are NOT valid IP literals — `ipaddress.ip_address("localhost")` raises.
+# Without this, normalize_url returns is_private=False for "localhost",
+# which silently weakens scope-safety checks.
+_PRIVATE_HOSTNAMES = frozenset({
+    "localhost",
+    "ip6-localhost",
+    "ip6-loopback",
+})
+
+
 def _classify_host(host: str) -> tuple[bool, bool]:
-    """Return (is_ip, is_private). Non-IP hosts always return (False, False)."""
+    """Return (is_ip, is_private). Hostnames like 'localhost' are treated as
+    private even though they're not literal IPs."""
     if not host:
         return False, False
     # IPv6 addresses arrive bracketed from urlsplit's hostname; strip them.
-    bare = host.strip("[]")
+    bare = host.strip("[]").lower()
+    if bare in _PRIVATE_HOSTNAMES:
+        return False, True
     try:
         addr = ipaddress.ip_address(bare)
     except ValueError:

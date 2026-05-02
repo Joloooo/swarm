@@ -359,6 +359,17 @@ def _normalize_duplicate_language_path(url: str) -> tuple[str, bool]:
 # The Sec-Fetch-* family is what trips up a lot of WAF fingerprinters
 # when it's absent; most real Chrome requests include these so we
 # include them too.
+# Build Accept-Encoding once: include brotli only if the optional
+# `brotli` package is installed, since httpx can't decompress br
+# without it and the server's brotli response would arrive as garbage
+# binary data on `response.text`.
+try:
+    import brotli  # noqa: F401
+    _ACCEPT_ENCODING = "gzip, deflate, br"
+except ImportError:
+    _ACCEPT_ENCODING = "gzip, deflate"
+
+
 def _browser_headers(user_agent: str) -> dict[str, str]:
     return {
         "User-Agent": user_agent,
@@ -368,7 +379,7 @@ def _browser_headers(user_agent: str) -> dict[str, str]:
             "application/signed-exchange;v=b3;q=0.7"
         ),
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": _ACCEPT_ENCODING,
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
         "Sec-Fetch-Dest": "document",
@@ -393,8 +404,18 @@ async def _get_http_client(options: CrawlerOptions) -> httpx.AsyncClient:
     async with _http_client_lock:
         if _http_client is not None:
             return _http_client
+        # HTTP/2 needs the optional `h2` package. Detect at runtime so a
+        # vanilla `pip install httpx` (no extras) still gives us a working
+        # client — falls back to HTTP/1.1 cleanly. Pentest targets rarely
+        # care which version we use to fetch the homepage.
+        try:
+            import h2  # noqa: F401
+            _http2 = True
+        except ImportError:
+            logger.info("h2 not installed — using HTTP/1.1")
+            _http2 = False
         _http_client = httpx.AsyncClient(
-            http2=True,
+            http2=_http2,
             follow_redirects=True,
             max_redirects=options.max_redirects,
             timeout=httpx.Timeout(options.timeout_ms / 1000),

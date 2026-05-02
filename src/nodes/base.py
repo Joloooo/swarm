@@ -1,7 +1,7 @@
 """BaseNode — common base for every LangGraph node in SwarmAttacker.
 
 Every concrete node (PlannerNode, ReconNode, ReportNode, InitializeNode,
-WebSearchNode, PentestWorkflowNode) inherits directly from ``BaseNode``.
+WebSearchNode, ExecutorNode) inherits directly from ``BaseNode``.
 There is no intermediate class. Cross-cutting capabilities — per-node
 logger, skill lookup, the LLM-agent loop that used to live in
 ``make_agent_node`` — are methods on this base, so any node can call
@@ -177,6 +177,27 @@ PENTESTING_RULES = """\
   payload. Was it filtered? Wrong parameter? Wrong HTTP method?
 - Document every finding with: vulnerability type, affected URL/parameter,
   payload used, evidence (response excerpt), and severity.
+
+### Iteration discipline (do not stop at partial success)
+- A response that *changed* but did not *deliver the goal* means you
+  found the door but have not walked through it. Keep iterating.
+- Signals of partial success that look like dead ends but are not: a
+  status code shifted (200 → 500, 404 → 403), an error message leaked,
+  a body shape changed, an unexpected redirect appeared, a timing
+  difference emerged. Treat any of these as confirmation that your
+  input reached the vulnerable code path — now find the variant that
+  produces the goal.
+- When the obvious payload fails, vary it systematically before giving
+  up: case changes (`OR` → `Or`/`oR`), encoding (URL, double-URL, hex,
+  unicode, base64), doubled keywords that survive a single strip
+  (`OOORR` → `OR`), comment splits (`O/**/R`), whitespace tricks
+  (`%09`, `%0a`, `/**/`), alternate syntaxes for the same operation
+  (`UNION SELECT` vs `UNION ALL SELECT`, `'1'='1` vs `1=1`).
+- Reporting a HIGH or MEDIUM finding without extracted impact — a flag
+  captured, sensitive data leaked, an authenticated session obtained,
+  a command executed, an authorization check bypassed — is incomplete
+  work. The planner will send you back. Push past the door before you
+  return.
 
 ### Severity Classification
 - CRITICAL: Remote code execution, full database dump, admin access

@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 # logs/ at project root (this file lives at SwarmAttacker/src/observability.py).
 LOGS_ROOT = Path(__file__).resolve().parents[1] / "logs"
 
-_NODES_LOCK = threading.Lock()  # parallel pentest_workflow workers append concurrently
+_NODES_LOCK = threading.Lock()  # parallel executor workers append concurrently
 
 
 def _slug(s: str, *, max_len: int = 60) -> str:
@@ -74,8 +74,7 @@ def append_node_event(run_id: str, event: dict) -> None:
     """Append one JSON line to ``nodes.jsonl``.
 
     Failures are swallowed — observability must never break a graph run.
-    Lock-guarded so parallel pentest_workflow workers don't interleave
-    half-lines.
+    Lock-guarded so parallel executor workers don't interleave half-lines.
     """
     try:
         path = run_dir(run_id) / "nodes.jsonl"
@@ -302,3 +301,6 @@ def write_summary(
     path = run_dir(run_id) / "summary.md"
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+

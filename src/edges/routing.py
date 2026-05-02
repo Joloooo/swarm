@@ -3,11 +3,14 @@
 One edge function lives here. :func:`route_after_planner` reads the
 supervisor's state update and returns either a node name (for
 ``recon`` / ``web_search`` / ``report``) or a list of :class:`Send`
-calls (for ``attack``, which fans out to parallel ``pentest_workflow``
-runs — one per entry in ``state["pending_dispatch"]``).
+calls (for ``attack``, which fans out to parallel ``executor`` runs —
+one per entry in ``state["pending_dispatch"]``).
 
 The planner itself is responsible for populating ``pending_dispatch``
-when it picks ``action="attack"``; this edge only reads it.
+when it picks ``action="attack"``; this edge only reads it. Each entry
+runs the same ExecutorNode — whether it's a pre-built skill, a
+custom_config, or a generic free-form task is decided upstream by the
+loader, which always lands the dispatch as an ``AgentConfig`` in cache.
 """
 
 from __future__ import annotations
@@ -56,12 +59,12 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
             )
             return _TERMINATE
         logger.info(
-            "route_after_planner: fanning out %d parallel pentest_workflow(s).",
+            "route_after_planner: fanning out %d parallel executor(s).",
             len(pending),
         )
         return [
             Send(
-                "pentest_workflow",
+                "executor",
                 {
                     **state,
                     "agent_id": item["agent_id"],

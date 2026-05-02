@@ -1,24 +1,33 @@
 """Supervisor planner node — the single decision-maker of the graph.
 
 The planner is the only decision layer in SwarmAttacker. Every other
-node (recon, pentest_workflow, web_search, report) edges back here,
-and the planner decides the next hop by emitting a JSON directive:
+node (recon, executor, web_search, report) edges back here, and the
+planner decides the next hop by emitting a JSON directive:
 
     {"action": "attack" | "recon" | "web_search" | "report",
      "configs": [...],
      "custom_configs": [...],
+     "tasks": [...],
      "mode": "analyze" | "full",
      "target_url": "...",
      "target_scope": "...",
      "search_query": "...",
      "reasoning": "one or two sentences of reasoning"}
 
-When the planner picks ``action="attack"`` it also supplies the exact
-set of attack configs to run — either by name (for the 12 pre-registered
-configs under ``src/agents/configs/**``) via the ``configs`` field, or by
-inventing a tailored one on the fly via ``custom_configs``. The planner
-therefore owns what used to be split across ``playbook_dispatch`` and
-``dynamic_dispatch``.
+When the planner picks ``action="attack"`` it also supplies what to run:
+
+- ``configs``        — pre-built skills by name (sqli, xss, idor, ...).
+- ``custom_configs`` — invent a tailored skill on the fly with a full
+                       system_prompt the planner writes itself.
+- ``tasks``          — free-form task descriptions handed to a generic
+                       executor agent (Planner+Executor split, Happe &
+                       Cito 2025 / Fu et al. 2025).
+
+All three lanes fan out to the same ExecutorNode. The loader synthesises
+each into an AgentConfig and caches it; the executor just resolves by
+name. The planner therefore owns what used to be split across
+``playbook_dispatch`` and ``dynamic_dispatch``, plus the generic-task
+lane that previously had no representation.
 
 The planner has two tools it can call mid-turn:
 
@@ -27,7 +36,7 @@ The planner has two tools it can call mid-turn:
   the planner judges whether a failure blocks the run.
 
 It does *not* have shell access. That only becomes available once the
-planner routes to an attack node via ``pentest_workflow``.
+planner routes to the executor node.
 """
 
 from __future__ import annotations
@@ -51,6 +60,7 @@ from src.skills.loader import (
     list_dispatchable_skills,
     load_skill,
     register_custom_skill,
+    register_generic_task,
 )
 from src.state import SwarmGraphState
 from src.tools.url import normalize_url, validate_website
@@ -134,10 +144,11 @@ your decision. The allowed values for "action" are:
                  Usually the right first step, but optional: if the
                  user already described the target in detail, or if
                  recon has already run, you can skip ahead.
-- "attack"     — run one or more attack workflows in parallel. You
-                 must also supply the configs to run, either by name
-                 ("configs") or as freshly-invented ones
-                 ("custom_configs"), or both.
+- "attack"     — fan out one or more executor agents in parallel. You
+                 must also supply WHAT each executor should run via
+                 one or more of the three lanes below: "configs",
+                 "custom_configs", "tasks". You can mix lanes in a
+                 single turn — they all dispatch to the same executor.
 - "web_search" — look up an external fact (CVE details, bypass
                  technique, tool syntax). Also supply "search_query".
 - "report"     — finalize the run. Aggregate every finding into a
@@ -156,17 +167,44 @@ pointless; if it's a pure static site, most of these don't fit.
 Pre-registered skills:
 __SKILLS_MENU__
 
-# Custom configs
+# Custom configs (for action="attack")
 
-If recon reveals a stack or attack surface that none of the above cover
-well (niche CMS plugin, unusual API pattern, chained findings from prior
-turns), add an entry to "custom_configs" instead:
+If recon reveals a stack or attack surface that none of the pre-built
+skills cover well (niche CMS plugin, unusual API pattern, chained
+findings from prior turns) AND you can write a focused multi-step
+methodology for it, add an entry to "custom_configs":
 
 - "config_name": unique short identifier (e.g. "graphql-introspection-abuse").
-- "system_prompt": detailed instructions telling that agent what to probe,
-  which tools to run, and what payloads to try.
+- "system_prompt": detailed instructions telling that executor what to
+  probe, which tools to run, and what payloads to try.
 
-Custom configs run with the same shell tool as the pre-registered ones.
+Custom configs run with the same shell tool as the pre-registered skills.
+Reach for this when you'd otherwise be writing a small how-to-test
+playbook — i.e. when you have a clear methodology in mind.
+
+# Tasks (for action="attack") — generic executor lane
+
+For one-off probes that don't need a full methodology — "go check this
+specific endpoint for IDOR", "follow up on the verbose error from
+recon by fuzzing the id parameter", "try the credentials we found
+against /admin" — use "tasks" instead. Each entry is just a free-form
+description; the executor wraps it in a comprehensive pentester prompt
+and runs it with bash. Reach for this when:
+
+- The task is narrow enough that one or two tool invocations should
+  settle it.
+- You don't have a methodology to dictate — you want the executor to
+  pick its own approach for the specific task you describe.
+- You're following up on a single finding with a single hypothesis.
+
+Each "tasks" entry is one of:
+- a string ("Probe parameter `id` on /api/v1/orders for IDOR..."), or
+- an object {"description": "..."}.
+
+Difference vs. custom_configs: custom_configs is a *playbook* you write,
+tasks is an *instruction* you delegate. If you find yourself writing a
+3+ step methodology, it's a custom_config. If it's "do this one thing",
+it's a task.
 
 # URL handling
 
@@ -197,6 +235,25 @@ After each worker, look at what came back:
                   another loud scan.
 - Same action     If you keep picking the same action and nothing is
   repeating?      changing, pick "report" instead.
+- Partial         A worker reporting "vulnerability suspected" or a
+  finding,        HIGH/MEDIUM finding whose evidence is only a
+  no impact?      differential signal (status shift, error leak, response
+                  shape change) WITHOUT concrete impact (flag captured,
+                  sensitive data leaked, auth bypassed, command executed,
+                  authenticated session obtained) is NOT done. Do not
+                  route to "report" yet. Re-dispatch the same skill via
+                  "configs" or write a focused "tasks" entry instructing
+                  the worker to push past the discovered door using a
+                  different angle than already tried (case variants,
+                  encoding, doubled keywords, comment splits — be
+                  explicit about what to try next based on what was
+                  already attempted). The `request-builder` skill is
+                  also a good fit when prior workers have already
+                  probed several inputs and you want a single fresh
+                  input proposed from the observed input/output
+                  pattern. Only route to "report" once you have either
+                  (a) the expected flag/impact, or (b) genuine
+                  confirmation that all promising leads were exhausted.
 
 # Output contract
 
@@ -210,18 +267,22 @@ End EVERY turn with a fenced JSON block of this exact shape:
     {"config_name": "wp-plugin-cve-lookup",
      "system_prompt": "You test WordPress plugins for known CVEs..."}
   ],
+  "tasks": [
+    "Probe parameter `id` on /api/v1/orders for IDOR by fetching id=1..5 from an authenticated session and checking whether responses leak other users' orders."
+  ],
   "mode": "analyze",
   "target_url": "http://example.com",
   "target_scope": "example.com",
-  "reasoning": "Recon surfaced PHP + MySQL with a login form at /admin. Attacking the obvious injection and reflection surfaces before expanding scope."
+  "reasoning": "Recon surfaced PHP + MySQL with a login form at /admin and a numeric id param on /api/v1/orders. Firing the standard SQLi/XSS skills, a custom WP-plugin lookup, and a targeted IDOR probe in parallel."
 }
 ```
 
 Rules:
 
 - "action" must be one of: attack, recon, web_search, report.
-- When action=="attack", at least one of "configs" or "custom_configs"
-  must be non-empty. If you have nothing worth running, pick "report".
+- When action=="attack", at least one of "configs", "custom_configs",
+  or "tasks" must be non-empty. If you have nothing worth running,
+  pick "report".
 - "mode" is "analyze" (default) or "full". "full" lets configs that
   define an exploit phase run it after analyze.
 - "search_query" is required iff action=="web_search".
@@ -352,11 +413,19 @@ def _final_text(messages: list) -> str:
 
 
 def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
-    """Register custom skills inline, then build the pending_dispatch list.
+    """Register custom skills + tasks inline, then build pending_dispatch.
 
-    Skips unknown named skills and malformed ``custom_configs`` entries
-    with a warning. Returns the list of dispatch items (possibly empty —
-    the caller is responsible for falling back to "report" in that case).
+    Three lanes are folded into one fan-out list, in this order:
+
+    1. ``configs``        — pre-built skills resolved by name.
+    2. ``custom_configs`` — planner-written one-off skills (full prompt).
+    3. ``tasks``          — generic-executor task descriptions.
+
+    All three end up as cached ``AgentConfig`` entries the executor node
+    can resolve via ``load_skill``. Unknown named skills and malformed
+    custom/task entries are skipped with a warning. Returns the list
+    of dispatch items — possibly empty, in which case the caller is
+    responsible for falling back to "report".
     """
     mode = decision.get("mode") or state.get("mode") or "analyze"
 
@@ -387,8 +456,33 @@ def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
         register_custom_skill(name, prompt)
         custom_names.append(name)
 
-    # Step 2: union the named skills with the freshly-registered customs,
-    # resolve each through the loader, and stage them for fan-out.
+    # Step 2: register free-form generic-executor tasks. Each task entry
+    # may be a bare string or an object {"description": "..."}; either
+    # way we synthesise a one-shot AgentConfig under config_name="task-N".
+    task_names: list[str] = []
+    raw_tasks = decision.get("tasks") or []
+    if not isinstance(raw_tasks, list):
+        raw_tasks = []
+    for j, entry in enumerate(raw_tasks):
+        if isinstance(entry, dict):
+            description = str(
+                entry.get("description") or entry.get("task") or ""
+            ).strip()
+        elif isinstance(entry, str):
+            description = entry.strip()
+        else:
+            logger.warning(
+                "planner: dropping task entry of unsupported type %r", entry
+            )
+            continue
+        if not description:
+            logger.warning("planner: dropping empty task entry %r", entry)
+            continue
+        cfg = register_generic_task(str(j), description)
+        task_names.append(cfg.config_name)
+
+    # Step 3: union all three lanes, resolve each through the loader,
+    # and stage them for fan-out.
     raw_named = decision.get("configs") or []
     if not isinstance(raw_named, list):
         raw_named = []
@@ -396,7 +490,7 @@ def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
 
     pending: list[dict] = []
     seen: set[str] = set()
-    for i, name in enumerate(named + custom_names):
+    for i, name in enumerate(named + custom_names + task_names):
         if name in seen:
             continue
         seen.add(name)
@@ -404,7 +498,7 @@ def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
         if cfg is None:
             logger.warning(
                 "planner: unknown skill %r (no SKILL.md and not registered "
-                "as custom) — skipping",
+                "as custom or task) — skipping",
                 name,
             )
             continue

@@ -6,7 +6,7 @@ metadata:
   methodology: custom
   config_name: chain-ssrf-to-rce
   tools:
-    - run_command
+    - bash
   max_tool_calls: 60
   max_iterations: 35
 ---

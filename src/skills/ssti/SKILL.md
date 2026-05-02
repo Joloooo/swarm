@@ -5,7 +5,7 @@ metadata:
   agent_id: vulntype-ssti
   methodology: vulntype
   config_name: ssti
-  tools: [run_command]
+  tools: [bash]
   max_tool_calls: 40
   max_iterations: 25
 ---

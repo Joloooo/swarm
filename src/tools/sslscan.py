@@ -11,7 +11,7 @@ import shlex
 
 from langchain_core.tools import tool
 
-from src.tools.terminal import shell
+from src.tools.shell import bash_exec
 
 
 _DEFAULT_TIMEOUT = 240
@@ -43,6 +43,6 @@ async def sslscan_full(
         sslscan stdout, head+tail truncated if very long.
     """
     cmd = f"sslscan {shlex.quote(host)}:{int(port)}"
-    return await shell(
+    return await bash_exec(
         cmd, agent_id=agent_id, reasoning=reasoning, timeout=_DEFAULT_TIMEOUT
     )

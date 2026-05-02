@@ -7,7 +7,7 @@ from typing import Literal
 
 from langchain_core.tools import tool
 
-from src.tools.terminal import shell
+from src.tools.shell import bash_exec
 
 
 _DEFAULT_TIMEOUT = 300
@@ -57,17 +57,21 @@ async def gobuster_dir(
         gobuster stdout (each found path on its own line).
     """
     list_path = _WORDLIST_PRESETS.get(wordlist, wordlist)
+    # gobuster sets a default `-b 404` blacklist that conflicts with
+    # an explicit `-s` whitelist (it refuses to run with both). Pass an
+    # empty `-b` to override the default and let the whitelist govern.
     parts = [
         "gobuster", "dir",
         "-u", shlex.quote(url),
         "-w", shlex.quote(list_path),
         "-t", str(int(threads)),
         "-s", shlex.quote(status_codes),
+        "-b", "''",
         "--no-error",
     ]
     if extensions:
         parts.extend(["-x", shlex.quote(extensions)])
     cmd = " ".join(parts)
-    return await shell(
+    return await bash_exec(
         cmd, agent_id=agent_id, reasoning=reasoning, timeout=_DEFAULT_TIMEOUT
     )

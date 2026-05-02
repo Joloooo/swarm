@@ -5,7 +5,7 @@ metadata:
   agent_id: owasp-input-validation
   methodology: owasp
   config_name: input-validation
-  tools: [run_command]
+  tools: [bash]
   max_tool_calls: 50
   max_iterations: 30
 ---

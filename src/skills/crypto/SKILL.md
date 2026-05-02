@@ -5,7 +5,7 @@ metadata:
   agent_id: owasp-crypto
   methodology: owasp
   config_name: crypto
-  tools: [run_command, nmap_specific_ports, nmap_ssl_enum, sslscan_full, testssl_full]
+  tools: [bash, nmap_specific_ports, nmap_ssl_enum, sslscan_full, testssl_full]
   max_tool_calls: 25
   max_iterations: 15
 ---
@@ -31,7 +31,7 @@ to find weaknesses in how the target handles encryption, TLS, and sensitive data
 - `sslscan_full(host)` for fast cipher/cert enumeration (typed wrapper).
 - `testssl_full(host)` for the deep CVE-aware audit (Heartbleed, BEAST,
   POODLE, ROBOT, HSTS, OCSP). Slower; run after sslscan flags something.
-- `run_command` for `curl -v` to check HSTS, Secure cookie flags, mixed content.
+- `bash` for `curl -v` to check HSTS, Secure cookie flags, mixed content.
 
 ## Rules
 - Focus on what's observable from the outside (black-box).

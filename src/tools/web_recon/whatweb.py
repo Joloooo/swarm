@@ -6,7 +6,7 @@ import shlex
 
 from langchain_core.tools import tool
 
-from src.tools.terminal import shell
+from src.tools.shell import bash_exec
 
 
 _DEFAULT_TIMEOUT = 90
@@ -38,6 +38,6 @@ async def whatweb(
         whatweb's one-line-per-host fingerprint output.
     """
     cmd = f"whatweb -a {int(aggression)} {shlex.quote(url)}"
-    return await shell(
+    return await bash_exec(
         cmd, agent_id=agent_id, reasoning=reasoning, timeout=_DEFAULT_TIMEOUT
     )

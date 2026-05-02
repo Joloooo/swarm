@@ -11,7 +11,7 @@ import shlex
 
 from langchain_core.tools import tool
 
-from src.tools.terminal import shell
+from src.tools.shell import bash_exec
 
 
 # testssl.sh can run 3–5 min on a single host with default test set.
@@ -46,6 +46,6 @@ async def testssl_full(
         testssl.sh stdout, head+tail truncated if very long.
     """
     cmd = f"testssl.sh --quiet --color 0 {shlex.quote(host)}:{int(port)}"
-    return await shell(
+    return await bash_exec(
         cmd, agent_id=agent_id, reasoning=reasoning, timeout=_DEFAULT_TIMEOUT
     )

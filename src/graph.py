@@ -25,9 +25,9 @@ Flow::
                           │                                   │
             ┌─────────────┼────────────────┬───────────┐      │
             ↓             ↓                ↓           ↓      │
-          recon    pentest_workflow    web_search    report   │
-            │      (×N parallel, via                  │       │
-            │       Send() fan-out)                   │       │
+          recon       executor        web_search    report    │
+            │       (×N parallel, via                 │       │
+            │        Send() fan-out)                  │       │
             └─────── all workers return ──────────────┘       │
                           │                                   │
                           └───────────────────────────────────┘
@@ -114,8 +114,8 @@ from langgraph.graph import END, START, StateGraph  # noqa: E402
 
 from src.edges.routing import route_after_planner  # noqa: E402
 from src.nodes import (  # noqa: E402
+    executor_node,
     initialize_node,
-    pentest_workflow_node,
     planner_node,
     recon_node,
     report_node,
@@ -135,12 +135,12 @@ def build_graph():
     # JSONL run logging, crash-to-AIMessage, SWARM_VERBOSE streaming).
     # Adding a new node? Subclass BaseNode, export a singleton from
     # `src.nodes`, register it here. No wrapper required.
-    graph.add_node("initialize",       initialize_node)
-    graph.add_node("planner",          planner_node)
-    graph.add_node("recon",            recon_node)
-    graph.add_node("pentest_workflow", pentest_workflow_node)
-    graph.add_node("web_search",       web_search_node)
-    graph.add_node("report",           report_node)
+    graph.add_node("initialize", initialize_node)
+    graph.add_node("planner",    planner_node)
+    graph.add_node("recon",      recon_node)
+    graph.add_node("executor",   executor_node)
+    graph.add_node("web_search", web_search_node)
+    graph.add_node("report",     report_node)
 
     # Edges
     graph.add_edge(START, "initialize")
@@ -148,7 +148,7 @@ def build_graph():
 
     # Supervisor is the only decision-maker. `route_after_planner` returns
     # either a node name (recon / web_search / report) OR a list of Send()
-    # calls that fan out to parallel pentest_workflow runs for "attack".
+    # calls that fan out to parallel executor runs for "attack".
     # END is a valid destination too — see `_TERMINATE` in
     # src/edges/routing.py for the report-bypass note.
     graph.add_conditional_edges(
@@ -156,7 +156,7 @@ def build_graph():
         route_after_planner,
         [
             "recon",
-            "pentest_workflow",
+            "executor",
             "web_search",
             "report",
             END,
@@ -166,7 +166,7 @@ def build_graph():
     #this is like loop every loop combinations recon is allowed to go to planner basically every node is only allowed to talk to planner
     # Workers always return to the supervisor so it can reassess.
     graph.add_edge("recon", "planner")
-    graph.add_edge("pentest_workflow", "planner")
+    graph.add_edge("executor", "planner")
     graph.add_edge("web_search", "planner")
 
     graph.add_edge("report", END)

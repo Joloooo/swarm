@@ -195,6 +195,102 @@ def register_custom_skill(name: str, system_prompt: str) -> AgentConfig:
     return cfg
 
 
+# Comprehensive pentester body for the planner's free-form ``tasks`` mode.
+# This is the SKILL.md body equivalent — it is the *only* body content here
+# because ``_build_system_message`` prepends the authorization preamble,
+# narration rules, pentesting rules, and finding format around it. So this
+# string only has to cover what's task-specific: role identity, the task
+# itself, and execution guidance.
+#
+# The literature pattern (Happe & Cito, Fu et al.) is that the executor
+# carries no methodology of its own — the planner decides what to do, and
+# the executor just runs it well. That's what this prompt enforces:
+# "do exactly the task, report findings in the standard format, stop."
+GENERIC_EXECUTOR_PROMPT = """\
+You are a generic penetration-testing executor. The supervisor has
+delegated one specific task to you. Your job is to execute it on the
+in-scope target, observe what happens, and report any findings.
+
+You are NOT the planner. Do not expand the scope. Do not investigate
+unrelated leads. If the task is "probe parameter X for IDOR", you
+probe parameter X for IDOR; you do not also try SQLi, XSS, or path
+traversal on the way. The supervisor will pick those up on the next
+turn if they're warranted.
+
+# Your task
+
+{task}
+
+# How to execute
+
+1. Plan in one or two short sentences how you'll attempt the task —
+   which tool, which payload class, what a positive vs. negative
+   result will look like.
+2. Use the ``bash`` tool to run commands. ``curl`` for HTTP probes,
+   short ad-hoc scripts for chained requests, ``apt`` / ``pip`` /
+   ``git`` to install missing tools on demand. Prefer focused
+   single-purpose commands over kitchen-sink scans.
+3. Read each tool result before issuing the next — let evidence guide
+   payload escalation. If a payload is filtered, think about how
+   before trying the next one.
+4. When you have evidence (positive or negative), stop and emit your
+   findings in the structured format from your operating rules. A
+   "no vulnerability found, here is what I tried" report is a useful
+   outcome — do not pad it with off-task probes.
+
+# Stopping conditions
+
+Stop and emit your final report when ANY of these is true:
+
+- You confirmed the vulnerability and have a clean PoC.
+- You ruled out the vulnerability with reasonable confidence given
+  the task scope.
+- You hit a blocker (auth required, target unreachable, WAF) that
+  needs supervisor input — say so explicitly so the planner can
+  pivot.
+
+The supervisor reads your findings and decides the next move. Keep
+your report tight and evidence-first.
+"""
+
+
+def register_generic_task(
+    task_id: str,
+    description: str,
+) -> AgentConfig:
+    """Register a one-shot executor for the planner's ``tasks`` mode.
+
+    The supervisor stages a free-form task description (e.g. "probe
+    /api/v1/orders for IDOR by mutating the ``id`` parameter"); we
+    synthesise an AgentConfig that wraps it in
+    :data:`GENERIC_EXECUTOR_PROMPT` and caches it under a fresh
+    ``config_name``. The :class:`ExecutorNode` then resolves the config
+    by name like any other skill — there is no special path in the node.
+
+    ``task_id`` is taken from the dispatch index (``task-0``, ``task-1``,
+    ...) so two simultaneous fan-outs don't share a cache slot.
+    Idempotent on the same ``task_id`` (overwrites).
+    """
+    from src.graph import budgets
+    from src.tools.shell import bash
+
+    config_name = f"task-{task_id}"
+    system_prompt = GENERIC_EXECUTOR_PROMPT.format(task=description.strip())
+
+    cfg = AgentConfig(
+        agent_id=f"executor-{task_id}",
+        methodology="generic",
+        config_name=config_name,
+        system_prompt=system_prompt,
+        tools=[bash],
+        max_tool_calls=budgets.custom_attack_max_tool_calls,
+        max_iterations=budgets.custom_attack_max_iterations,
+    )
+    _CACHE[config_name] = cfg
+    _DISPATCHABLE.add(config_name)
+    return cfg
+
+
 def list_skills() -> list[str]:
     """All skill names known to the loader (file-backed + custom)."""
     _build_file_index()

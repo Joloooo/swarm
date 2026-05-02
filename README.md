@@ -9,7 +9,7 @@ The core idea: instead of running one methodology at a time, SwarmAttacker deplo
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (package manager)
 - tmux (for agent session isolation) — install with `brew install tmux`
-- Pentesting tools your agents will call: `nmap`, `gobuster`, `sqlmap`, `curl` — install with `brew install nmap gobuster sqlmap`
+- Pentesting tools your agents will call: `nmap`, `gobuster`, `sqlmap`, `whatweb`, `nikto`, `curl` — install with `brew install nmap gobuster sqlmap whatweb nikto`
 - An LLM backend, **one of**:
   - **ChatGPT Plus/Pro subscription** (recommended, free with subscription — see [LLM Provider: Codex](#llm-provider-codex-chatgpt-subscription) below)
   - Anthropic API key
@@ -20,7 +20,7 @@ The core idea: instead of running one methodology at a time, SwarmAttacker deplo
 
 ```bash
 uv sync                  # install Python deps + create .venv
-./scripts/setup.sh       # install pentesting tools (tmux, nmap, gobuster, sqlmap)
+./scripts/setup.sh       # install pentesting tools (tmux, nmap, gobuster, sqlmap, whatweb, nikto)
 cp .env.example .env     # create .env (can stay empty if using Codex auth)
 codex                    # one-time ChatGPT login (saves tokens to ~/.codex/auth.json)
 ```
@@ -108,6 +108,44 @@ uses subprocess calls that LangGraph's blockbuster detector flags
 (they're already wrapped in `asyncio.to_thread` and don't actually
 block the event loop).
 
+## Testing
+
+The suite runs in under a second and can be re-run as often as you like:
+
+```bash
+uv run pytest                       # full suite
+uv run pytest -v                    # verbose, shows each test name
+uv run pytest tests/test_skill_loader.py   # one file
+```
+
+Tests live in `tests/` and mirror the `src/` layout. Currently only Tier 1
+(unit, no LLM, no network) tests exist:
+
+| File | What it pins down |
+|---|---|
+| `tests/test_skill_loader.py` | Every `SKILL.md` parses; every tool name in any frontmatter resolves via the registry; the planner's dispatch menu is correct |
+| `tests/test_tool_registry.py` | Every registry entry is a real `BaseTool`; `tool.name` matches its registry key (otherwise the model emits unroutable tool calls) |
+| `tests/test_finding_parsers.py` | Markdown `**FINDING:**` and JSON `{"findings": [...]}` extraction across the formats and edge cases the agent actually emits |
+| `tests/test_planner_decision_parser.py` | Fenced / bare / multiple / malformed JSON decision blocks from the planner |
+
+### Test-on-failure policy
+
+This project does **not** add tests preemptively. A new test only gets
+written after a real failure has been observed and the fix is in. Every
+encountered failure is logged in [`tests/FAILURES.md`](tests/FAILURES.md)
+even when no test is added — that file doubles as a thesis artefact (a
+real, dated record of agent failure modes encountered during
+development). The full policy lives in the project root `CLAUDE.md` /
+`AGENTS.md` under "Testing Policy".
+
+Test tiers, in order of cost (always pick the cheapest one that would
+catch the failure):
+
+1. **Unit** — pure functions only (parsers, loaders, registries). What's in `tests/` today.
+2. **Node** — inject a `FakeListChatModel` into `BaseNode.run_skill_agent(llm=...)`. No real API call. Tests orchestration: did the node load the right skill, set the right state flags, propagate findings back?
+3. **Tool smoke** — runs the actual binary (nmap, gobuster, ...) against a local target. Marked `@pytest.mark.tools`.
+4. **Live LLM** — real model, real local target. Marked `@pytest.mark.live`, skipped by default.
+
 ## Architecture
 
 ```
@@ -115,7 +153,7 @@ START → initialize → planner ←──────────────�
                       │                                  │
          ┌────────────┼────────────┬─────────────┐       │
          ↓            ↓            ↓             ↓       │
-       recon   pentest_workflow  web_search    END *     │
+       recon       executor     web_search    END *      │
                  (×N parallel,                           │
                  Send() fan-out)                         │
                       │                                  │
@@ -131,23 +169,27 @@ artifacts (`summary.md`, `nodes.jsonl`, `final_state.json`,
 Supervisor-shaped graph: the `planner` node is the single decision-maker.
 Every worker edges back to it, and on each turn the planner emits a JSON
 directive picking the next action — `recon`, `attack` (with the exact
-list of attack configs to fan out), `web_search`, or `report`.
+list of executor dispatches to fan out), `web_search`, or `report`.
 
 **Nodes** (`src/nodes/`):
 - `initialize` — seeds stealth defaults and cleans leftover tmux state
 - `planner` — supervisor LLM; decides the next action and, for `attack`,
-  the list of configs (named or custom) to run in parallel
+  the list of executor dispatches (pre-built skills, custom_configs,
+  or generic tasks) to run in parallel
 - `recon` — reconnaissance agent (port scan, directory discovery,
   fingerprinting)
-- `pentest_workflow` — executes a two-phase attack workflow
-  (analyze → optionally exploit) for a single config_name
+- `executor` — runs ONE dispatch from the planner. Resolves the
+  dispatch's `config_name` to an `AgentConfig` (skill, custom_config,
+  or synthesised generic-task) and runs it. The Planner+Executor
+  split (Happe & Cito 2025; Fu et al. 2025) — the executor owns no
+  decision logic, only execution
 - `web_search` — looks up external facts on the planner's request
 - `report` — aggregates all findings into a final report
 
 **Edges** (`src/edges/`):
 - `route_after_planner` — reads the planner's decision. Returns a node
   name (recon / web_search / report) or a list of `Send()` calls (for
-  `attack`) that fan out to parallel `pentest_workflow` runs
+  `attack`) that fan out to parallel `executor` runs
 
 **Key subsystems:**
 - `agents/` — config-driven agent pattern. One function, different configs. 13 configs across 3 methodologies (OWASP, vuln-type, custom chains)
@@ -194,7 +236,10 @@ SwarmAttacker/
 │   ├── loop/                   # Loop detection
 │   ├── experimental/           # Shelved scaffolds (rag/, stealth/, experience/)
 │   └── llm/                    # Provider-agnostic LLM interface
-└── tests/
+└── tests/                      # See "Testing" section above
+    ├── conftest.py             # Shared fixtures (and import-order warm-up)
+    ├── FAILURES.md             # Dated log of every failure encountered
+    └── test_*.py               # Tier 1 unit tests
 ```
 
 ## Configuration

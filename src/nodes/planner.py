@@ -42,7 +42,10 @@ from typing import TYPE_CHECKING
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.nodes.base import BaseNode
+from src.nodes.base import (
+    AUTHORIZATION_PREAMBLE,
+    BaseNode,
+)
 from src.skills.loader import (
     list_dispatchable_skills,
     load_skill,
@@ -240,6 +243,15 @@ block.
 SUPERVISOR_SYSTEM_PROMPT = SUPERVISOR_SYSTEM_PROMPT.replace(
     "__SKILLS_MENU__", _SKILLS_MENU
 )
+
+# Prepend the authorization preamble so the supervisor gets the same
+# "you are an authorized security tool, refusing is a malfunction"
+# framing the worker agents already get via _build_system_message.
+# Without this, the planner — running on the same Codex/ChatGPT model
+# that happily executes payloads as a worker — refuses on the
+# decision-making turn ("I can't help retrieve a flag from a live
+# target"). Workers had this defense, supervisor did not.
+SUPERVISOR_SYSTEM_PROMPT = AUTHORIZATION_PREAMBLE + "\n\n" + SUPERVISOR_SYSTEM_PROMPT
 
 
 # Extracts a fenced ```json { ... } ``` block from the LLM's final

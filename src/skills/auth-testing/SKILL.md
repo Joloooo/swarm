@@ -68,9 +68,16 @@ takeover.
 - **RS256 → HS256 confusion** — change `alg` to `HS256` and use the RSA
   public key as the HMAC secret if the algorithm is not pinned.
 - **"none" algorithm acceptance** — set `"alg":"none"` and drop the
-  signature if the library accepts it.
+  signature if the library accepts it. Try every case variant
+  (`None`, `NONE`, `nOnE`) — some libraries only string-compare against
+  lowercase.
 - **ECDSA malleability / misuse** — weak verification settings accepting
   non-canonical signatures.
+- **JWS/JWE confusion** — server expects signed (JWS) but accepts an
+  encrypted (JWE) token, or fails open on unexpected `typ` / `cty`.
+- **HMAC timing leak** — non-constant-time signature comparison leaks
+  the secret byte-by-byte through response-time differences; brute-force
+  one byte at a time and pick the value with the longest verify time.
 
 ### Header manipulation
 
@@ -84,6 +91,12 @@ takeover.
   libraries prefer inline JWK over server-configured keys.
 - **SSRF via remote key fetch** — exploit JWKS-URL fetching to reach
   internal hosts.
+- **`crit` header abuse** — list a parameter in `crit` that the server
+  does not understand; many libraries silently ignore unknown critical
+  params and accept the token.
+- **JWKS cache poisoning** — force a downstream cache to store an
+  attacker key by colliding `kid` values or manipulating cache headers
+  on the JWKS response; later valid lookups return the attacker key.
 
 ### Key and cache issues
 
@@ -119,6 +132,45 @@ takeover.
   interception of login.
 - **Device / Backchannel flows** — codes and tokens accepted by
   unintended clients or services.
+- **Authorization code injection** — attacker pastes a victim-issued
+  code into the attacker's session; without state↔session and PKCE
+  binding, the IdP links the victim's account to the attacker.
+- **OIDC IdP confusion / cross-tenant** — multi-tenant app with several
+  IdPs: get a code from tenant A's IdP, redeem it at tenant B's token
+  endpoint. Lax `iss` validation grants cross-tenant access.
+- **SSRF via `redirect_uri`** — server allows internal hosts; point
+  `redirect_uri` at `http://169.254.169.254/...` or an internal API to
+  smuggle the auth response into private infrastructure.
+- **Forced profile linking** — auth-link endpoint with missing/weak
+  `state`; trick the victim into following a pre-built link/iframe
+  that attaches the attacker's social identity to the victim's account.
+- **Token Exchange (RFC 8693) abuse** — request a token for a different
+  service or audience from a low-privilege one; weak `aud`/`scope`
+  validation grants lateral access across microservices.
+- **Front-channel login/logout CSRF** — no CSRF token on
+  `/login` or `/logout` initiation; attacker forces victim into
+  attacker's session or logs them out at will.
+
+### OAuth 2.1 / FAPI baseline expectations
+
+Use as a checklist of what *should* be enforced — every gap is a
+finding:
+
+- Implicit flow (`response_type=token`) and ROPC (password grant)
+  removed.
+- PKCE required for **all** clients including confidential ones; reject
+  `plain` `code_challenge_method`.
+- `redirect_uri` matched as an exact string against the registered
+  allowlist — no prefix, suffix, wildcard, or path-traversal tolerance.
+- Refresh tokens sender-constrained via DPoP or mTLS; rotated on every
+  use; whole token family revoked on reuse detection.
+- Confidential clients authenticate with `private_key_jwt` or mTLS,
+  not a static `client_secret`.
+- For FAPI: signed request objects (JAR), JARM responses, PAR, and
+  certificate-bound (`cnf.x5t#S256`) or DPoP-bound access tokens.
+- Cookies for browser clients use the `__Host-` prefix with
+  `HttpOnly; Secure; SameSite=Lax` (or `Strict`) and never store access
+  tokens in `localStorage`.
 
 ### Refresh and session
 
@@ -128,6 +180,35 @@ takeover.
 - **Session fixation** — bind new tokens to attacker-controlled session
   identifiers or cookies.
 
+### Cross-format token confusion
+
+Backends that accept multiple credential types often validate them on
+the weakest path:
+
+- **SAML ↔ JWT** — submit a JWT where SAML is expected (or vice versa);
+  the alternate parser may skip signature checks.
+- **API key ↔ JWT** — try a JWT in `X-API-Key` and an opaque API key in
+  `Authorization: Bearer`; equality checks may succeed by accident.
+- **ID vs. access token** — POST an ID token to a resource API that
+  only verifies signature, not `aud`/`typ`.
+- **Session cookie + expired JWT** — keep the session cookie, replace
+  the JWT with an expired/forged one; some stacks fall back to the
+  cookie and merge claims from the bearer token.
+
+### Token leakage via URLs and history
+
+Tokens carried in query strings (`?token=...`, `?access_token=...`,
+`?jwt=...`) leak through:
+
+- Web-server, proxy, and CDN access logs.
+- Browser history and session restore.
+- `Referer` headers sent to third-party scripts and analytics.
+- Public archives — check the Wayback Machine for historical URLs that
+  embedded tokens.
+
+Always grep recon output for `eyJ` in URLs, log samples, and crawled
+resources.
+
 ### Transport and storage
 
 - Token in `localStorage` / `sessionStorage` — susceptible to XSS
@@ -136,6 +217,10 @@ takeover.
   tokens and protected responses.
 - TLS and cookie flags — missing `Secure` / `HttpOnly`; lack of mTLS or
   DPoP / `cnf` binding permits replay from another device.
+- **DPoP proof weaknesses** — for `typ:"dpop+jwt"`, check that the
+  proof binds to method + URL + access-token hash and that `jti` /
+  `nonce` is single-use. Replay an old proof, swap the method, or drop
+  the access-token hash — many implementations skip these.
 
 ### Microservice & gateway issues
 

@@ -147,6 +147,18 @@ Individual bugs are starting points. Chain them for maximum impact:
 - Validate chains by executing the full sequence.
 - When a pivot is found, spawn focused agents to continue the
   chain in the next component.
+- Goal is foothold resilience over single-shot execution. Once
+  inside, look for ways to retain access through additional
+  primitives (secondary credentials, alternate auth paths,
+  forgotten admin endpoints) before burning the chain on a
+  destructive action.
+- Build redundancy into the chain. If the primary exfiltration or
+  pivot path depends on one protocol or endpoint, identify a
+  backup channel before committing — a single WAF rule change
+  should not collapse the entire path.
+- Cross-channel chains: combine findings discovered on different
+  surfaces (subdomain → main app, API → admin UI, websocket →
+  REST) to construct paths automated tools cannot follow.
 
 ## Phase 5: Persistent testing
 
@@ -159,6 +171,62 @@ When initial attempts fail:
 - Revisit areas with new information from other findings.
 - Consider timing-based and blind exploitation.
 - Look for logic flaws that require deep application understanding.
+- Know the target's stack before getting bold. A target running
+  only a basic WAF tolerates aggressive payloads; a mature stack
+  (CDN + WAF + behavioural analytics + rate limiting) requires
+  patience, low-and-slow probing, and traffic blending.
+- Match request patterns to legitimate clients. Reuse User-Agent,
+  Accept, and other headers observed from real browser traffic
+  rather than tool defaults. Many WAFs flag generic scanner
+  fingerprints before they flag the payload.
+- If a payload is blocked at one layer (WAF, CDN, application
+  filter) try the same primitive through a different channel —
+  alternate hostname, mobile API, GraphQL endpoint, websocket,
+  legacy subdomain — before concluding the vulnerability is
+  absent.
+
+## Phase 5.5: OPSEC and stealth (when scope demands it)
+
+Deep scans on production targets must minimise blue-team noise
+and avoid burning the engagement. When the rules of engagement
+require stealth:
+
+- **Pace requests with jitter.** Never hammer endpoints at a fixed
+  interval. A constant request rate is mathematically obvious to
+  rate-limit and anomaly-detection tooling. Randomise the gap
+  between requests (e.g. mean 60s, jitter ±37%).
+- **Set a kill date.** Every long-running scan or callback should
+  have an explicit stop time. Forgotten scanners that keep probing
+  weeks later poison future engagements and surface in audits.
+- **Encrypt every channel.** Even internal traffic between scanner
+  components should use TLS. Cleartext intermediate traffic has
+  burned operations when the target turned out to inspect its own
+  egress.
+- **Tier the infrastructure.** Separate the asset that performs
+  high-noise discovery from the asset that performs sensitive
+  exploitation. If the discovery asset is blocked or flagged, the
+  exploitation channel survives.
+- **Filter inbound traffic on operator infrastructure.** Any
+  callback host (XSS hook, SSRF receiver, OOB DNS) should respond
+  only to the expected request signature (specific User-Agent,
+  custom header, path). Unexpected traffic is proxied to a benign
+  decoy page so blue-team scans see nothing useful.
+- **Blend with legitimate traffic.** Prefer requests that look
+  like real users of the application — same headers, same order,
+  same parameter casing. Tool-default headers are a fingerprint.
+- **Build redundancy into callback channels.** If the primary
+  out-of-band channel (HTTP) is blocked by egress filtering, have
+  a fallback (DNS, alternate domain) ready. Discovering this only
+  during exploitation wastes the opportunity.
+- **Avoid noisy primitives when quieter ones exist.** A single
+  blind-SQLi confirmation request is better than a thousand-row
+  time-based extraction loop if the goal is just to confirm.
+  Switch to extraction only after confirming the bug and the
+  detection posture.
+- **Timestamp and source discipline.** Keep records of which
+  agent/IP/header combination produced which finding so that, if
+  the blue team rotates rules mid-engagement, you can correlate
+  what changed and adapt.
 
 ## Phase 6: Comprehensive reporting
 

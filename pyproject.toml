@@ -23,6 +23,24 @@ dependencies = [
     "langgraph-cli[inmem]>=0.2",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# By default skip the heavy tiers. Run them explicitly with:
+#   uv run pytest -m tools     # tier 3: shell out to real binaries
+#   uv run pytest -m live      # tier 4: hit a real LLM (costs tokens)
+addopts = "-m 'not tools and not live'"
+markers = [
+    "tools: tier-3 smoke tests that shell out to external binaries (nmap, ssh, ...)",
+    "live: tier-4 tests that hit a real LLM API — opt-in only",
+]
+
 [project.scripts]
 swarmattacker = "src.cli:main"
 

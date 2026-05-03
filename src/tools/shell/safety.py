@@ -7,7 +7,7 @@ agent is *supposed* to attack. So the checks fall into two categories:
 
 1. **Attacker-host safety** — block writes to paths on this machine
    that the agent has no business touching (``~/.ssh``, ``~/.aws``,
-   the project's own ``configs/``, ``logs/``, ``.venv/``, ``/etc``).
+   the project's own ``logs/``, ``.venv/``, ``/etc``).
    This is the equivalent of Claude Code's path hard-blocks, scoped to
    what makes sense for SwarmAttacker.
 
@@ -158,7 +158,7 @@ _FORBIDDEN_WRITE_PREFIXES: list[Path] = [
 
 # Project paths we also protect when running from inside the SwarmAttacker
 # checkout. Resolved lazily so tests can override CWD.
-_PROJECT_PROTECTED_DIRS = (".venv", "configs", ".git")
+_PROJECT_PROTECTED_DIRS = (".venv", ".git")
 
 # Commands that write to a path argument. Maps command name → which
 # positional argument (1-indexed) is the destination, or "redirect_only"

@@ -1,5 +1,0 @@
-# Ablation experiment: disable skill loading (knowledge layer 2)
-# Tests whether detailed technique docs improve agent effectiveness
-
-knowledge:
-  skill_loading: false

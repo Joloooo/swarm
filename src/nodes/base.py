@@ -493,15 +493,13 @@ demonstrated that no further variation will surface it.
 def _build_system_message(
     config: AgentConfig,
     target_url: str,
-    runtime_config: dict | None = None,
     phase1_findings: list[Finding] | None = None,
     expected_flag: str | None = None,
 ) -> str:
     """Assemble the full system prompt from config + knowledge layers.
 
-    Respects ablation toggles from runtime_config. When phase1_findings
-    is provided, injects analysis results into the prompt so the exploit
-    phase knows what to target.
+    When phase1_findings is provided, injects analysis results into the
+    prompt so the exploit phase knows what to target.
 
     When ``config.skip_base_prompt`` is True the assembly is reduced to
     the SKILL.md body alone — no identity framing, no authorization
@@ -514,8 +512,6 @@ def _build_system_message(
     explicit flag-extraction success criterion. In real-pentest runs
     the field is empty and the addendum is not added.
     """
-    from src.config import is_enabled
-
     # Minimal-framing path: the SKILL.md body is the entire system
     # prompt. Phase 1 findings and the benchmark-flag addendum still
     # get appended because they are observed evidence / explicit success
@@ -539,7 +535,6 @@ def _build_system_message(
             )
         return "\n\n".join(parts)
 
-    rc = runtime_config or {}
     parts = []
 
     # Base identity (always present)
@@ -551,11 +546,9 @@ def _build_system_message(
         f"Target: {target_url}\n"
     )
 
-    # Knowledge layer 1: base rules (toggleable). get_base_prompt lives
-    # in this same module — formerly in src/knowledge/prompts/base_rules.py.
-    if is_enabled(rc, "knowledge", "base_rules") if rc else True:
-        stealth_level = rc.get("stealth", {}).get("initial_level", 0) if rc else 0
-        parts.append(get_base_prompt(stealth_level))
+    # Knowledge layer 1: base rules. get_base_prompt lives in this same
+    # module — formerly in src/knowledge/prompts/base_rules.py.
+    parts.append(get_base_prompt(0))
 
     # Phase 1 findings injection (for exploit phase)
     if phase1_findings:
@@ -577,13 +570,12 @@ def _build_system_message(
         parts.append(config.system_prompt)
 
     # Knowledge layer 3: RAG hint (actual retrieval happens at query time)
-    if is_enabled(rc, "knowledge", "rag") if rc else True:
-        parts.append(
-            "\n--- Dynamic Knowledge ---\n"
-            "If you need specific CVE details, bypass techniques, or tool syntax "
-            "that you're unsure about, describe what you need and the system will "
-            "provide relevant knowledge snippets.\n"
-        )
+    parts.append(
+        "\n--- Dynamic Knowledge ---\n"
+        "If you need specific CVE details, bypass techniques, or tool syntax "
+        "that you're unsure about, describe what you need and the system will "
+        "provide relevant knowledge snippets.\n"
+    )
 
     # Benchmark-mode addendum: only fires when the runner populates
     # state["expected_flag"]. Real pentest runs leave it empty and this
@@ -995,7 +987,6 @@ class BaseNode(ABC):
         config: AgentConfig,
         state: dict,
         llm: BaseChatModel | None = None,
-        runtime_config: dict | None = None,
     ) -> dict:
         """Run a ``create_agent`` loop with the given skill config.
 
@@ -1025,7 +1016,7 @@ class BaseNode(ABC):
         phase1_findings = state.get("phase1_findings")
         expected_flag = state.get("expected_flag") or ""
         system_msg = _build_system_message(
-            config, target_url, runtime_config, phase1_findings,
+            config, target_url, phase1_findings,
             expected_flag=expected_flag,
         )
 

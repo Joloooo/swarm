@@ -199,12 +199,11 @@ list of executor dispatches to fan out), `web_search`, or `report`.
   - `llm/codex.py` — self-contained LangChain chat model for the ChatGPT subscription / Codex backend. Handles OAuth token loading + refresh, Responses API SSE streaming, tool calls, all without any third-party library
 
 **Experimental subsystems (off by default):** `src/experimental/` holds research
-scaffolds that aren't part of the active agent loop. Each one is gated behind
-a config flag in `configs/default.yaml` and stays here as evidence of design
-exploration. Currently shelved:
-- `experimental/rag/` — knowledge vector store (FAISS), `knowledge.rag: false`
-- `experimental/stealth/` — WAF/IDS detection (no evasion behavior), `stealth.enabled: false`
-- `experimental/experience/` — cross-run guide store, `experience.enabled: false`
+scaffolds that aren't part of the active agent loop. They are kept as evidence
+of design exploration; none are registered in the graph. Currently shelved:
+- `experimental/rag/` — knowledge vector store (FAISS)
+- `experimental/stealth/` — WAF/IDS detection (no evasion behavior)
+- `experimental/experience/` — cross-run guide store
 
 ## Project structure
 
@@ -212,9 +211,6 @@ exploration. Currently shelved:
 SwarmAttacker/
 ├── pyproject.toml              # Project config (uv + hatchling)
 ├── langgraph.json              # LangGraph Studio entry point
-├── configs/
-│   ├── default.yaml            # Base runtime config with all toggles
-│   └── experiments/            # Ablation experiment overlays
 ├── benchmarks/
 │   ├── targets.yaml            # Benchmark target definitions (DVWA, Juice Shop, etc.)
 │   ├── runner.py               # Benchmark runner
@@ -222,15 +218,11 @@ SwarmAttacker/
 │   ├── multimodel.py           # Multi-model comparison
 │   └── metrics.py              # Metric computation
 ├── src/                        # Main Python package
-│   ├── graph.py                # LangGraph graph (pure wiring)
+│   ├── graph.py                # LangGraph graph (pure wiring) + runtime config
 │   ├── state.py                # Shared state schema + reducers
-│   ├── config.py               # YAML config loader with ablation toggles
 │   ├── cli.py                  # CLI entry point
 │   ├── nodes/                  # Graph nodes (one file per node)
 │   ├── edges/                  # Routing logic
-│   ├── agents/                 # Config-driven agent system
-│   │   ├── base.py             # AgentConfig, WorkflowConfig, make_agent_node
-│   │   └── configs/            # 13 agent configs (owasp/, vulntype/, custom/)
 │   ├── knowledge/              # Prompt rules + skill docs
 │   ├── tools/                  # tmux-based command execution
 │   ├── loop/                   # Loop detection
@@ -244,12 +236,9 @@ SwarmAttacker/
 
 ## Configuration
 
-Runtime behavior is controlled by `configs/default.yaml`. Each setting can be overridden per-experiment via files in `configs/experiments/`.
-
-Key toggles:
-- `knowledge.base_rules` / `skill_loading` — enable/disable each active knowledge layer
-- `knowledge.rag` / `stealth.enabled` / `experience.enabled` — flip on to revive shelved subsystems in `src/experimental/`
-- `agents.methodologies.owasp` / `vulntype` / `custom` — enable/disable agent groups
+Runtime behavior is controlled by the `config` singleton in `src/graph.py`
+(budgets, verbosity). All settings are overridable via `SWARM_*` environment
+variables — see the `_env_*` helpers and `describe_config()` for the full list.
 
 ## Dependencies
 
@@ -261,4 +250,4 @@ Key toggles:
 | `langchain-openai` | OpenAI / OpenRouter model integration |
 | `pydantic` | Data validation (used by LangChain internals) |
 | `libtmux` | tmux session management for agent command isolation |
-| `pyyaml` | YAML config file loading |
+| `pyyaml` | SKILL.md frontmatter + benchmark targets parsing |

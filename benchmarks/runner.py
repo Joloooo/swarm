@@ -2,8 +2,7 @@
 
 Usage:
     python -m benchmarks.runner --target dvwa
-    python -m benchmarks.runner --target dvwa --experiment no_rag
-    python -m benchmarks.runner --all-targets --all-experiments
+    python -m benchmarks.runner --all-targets
 """
 
 from __future__ import annotations
@@ -17,7 +16,6 @@ from pathlib import Path
 
 import yaml
 
-from src.config import load_config
 from src.graph import build_graph
 from benchmarks.metrics import compute_metrics, BenchmarkMetrics
 
@@ -110,15 +108,6 @@ async def run_all(
     if not experiments:
         experiments = ["default"]
 
-    # Discover experiment configs
-    exp_dir = Path(__file__).parent.parent / "configs" / "experiments"
-    available_experiments = ["default"]
-    if exp_dir.exists():
-        available_experiments.extend(p.stem for p in exp_dir.glob("*.yaml"))
-
-    if "all" in experiments:
-        experiments = available_experiments
-
     all_metrics = []
 
     for target_name, target_info in targets.items():
@@ -144,8 +133,7 @@ def main():
     parser = argparse.ArgumentParser(description="SwarmAttacker Benchmark Runner")
     parser.add_argument("--target", help="Single target name (from targets.yaml)")
     parser.add_argument("--all-targets", action="store_true", help="Run all targets")
-    parser.add_argument("--experiment", help="Experiment config name (e.g., 'no_rag')")
-    parser.add_argument("--all-experiments", action="store_true", help="Run all experiments")
+    parser.add_argument("--experiment", help="Run label (recorded on metrics)")
     parser.add_argument("--url", help="Direct URL (skip targets.yaml)")
     args = parser.parse_args()
 
@@ -159,9 +147,7 @@ def main():
     elif args.target:
         target_names = [args.target]
 
-    if args.all_experiments:
-        experiments = ["all"]
-    elif args.experiment:
+    if args.experiment:
         experiments = [args.experiment]
 
     results = asyncio.run(run_all(target_names, experiments))

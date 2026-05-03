@@ -379,6 +379,39 @@ class _Live:
             head = _paint("▸ planner ", _DIM, _BLUE)
             _emit(f"{_now()}  {head} (no decision yet, {_fmt_ms(duration_ms)})")
 
+    def _emit_multiline(
+        self,
+        prefix: str,
+        text: str,
+        *,
+        color: str = "",
+        indent_cols: int = 12,
+    ) -> None:
+        """Emit ``text`` under the timestamp column, full-width, no clipping.
+
+        First line gets ``prefix`` (e.g. ``"💭 [agent] "`` or ``"↳ "``);
+        subsequent paragraph lines get a hanging indent that aligns with
+        the start of the prefixed text so multi-line LLM narratives stay
+        visually grouped. Color is applied to the *body text only* — the
+        prefix stays neutral so the marker is obvious even on dim
+        terminals.
+
+        ``indent_cols`` matches the width of the ``HH:MM:SS  `` column
+        so the body sits under the timestamp gutter.
+        """
+        indent = " " * indent_cols
+        # Hanging indent for continuation lines: the prefix is visual
+        # (emoji + brackets); approximate its display width with len().
+        # Two-space pad keeps the wrapper readable even when the prefix
+        # is short ("↳ ").
+        hang = " " * max(len(prefix), 2)
+        lines = [ln for ln in text.splitlines() if ln.strip()] or [text]
+        first, rest = lines[0], lines[1:]
+        _emit(f"{indent}{prefix}{_paint(first, color) if color else first}")
+        for cont in rest:
+            painted = _paint(cont, color) if color else cont
+            _emit(f"{indent}{hang}{painted}")
+
     def _emit_worker_thoughts(self, new_messages: list[Any]) -> None:
         """Render worker AIMessages between tool calls as 💭 lines.
 
@@ -386,6 +419,11 @@ class _Live:
         emits after seeing a tool result and before deciding the next
         action. Without this stream, compact mode shows commands but
         not why each was chosen or what the LLM made of the result.
+
+        Emits the *full* content of each message (no clipping) in
+        bold so the LLM's voice is the most-readable thing on screen
+        — bash commands and tool mechanics fade into the dim
+        background, the operator's eye lands on what the model said.
 
         Skips:
           - non-AIMessage entries (ToolMessages — already shown via
@@ -399,7 +437,6 @@ class _Live:
         # module-load time.
         from langchain_core.messages import AIMessage
 
-        indent = " " * 12  # align under the HH:MM:SS column
         for msg in new_messages:
             if not isinstance(msg, AIMessage):
                 continue
@@ -420,12 +457,10 @@ class _Live:
             ):
                 continue
             agent = kw.get("agent_id") or ""
-            first = _first_nonempty(content)
-            if not first:
-                continue
             agent_part = f"[{agent}] " if agent else ""
-            line = _paint(f"💭 {agent_part}{_clip(first, 130)}", _DIM)
-            _emit(f"{indent}{line}")
+            self._emit_multiline(
+                f"💭 {agent_part}", stripped, color=_BOLD,
+            )
 
     # -------- shell tool ----------
 
@@ -446,16 +481,20 @@ class _Live:
             if reasoning:
                 _emit(f"{tag}   reasoning: {reasoning}")
             return
-        # compact — show the command + the LLM's stated reasoning underneath.
+        # compact — bash command (mechanics) is dim; the LLM's reasoning
+        # underneath is bold so it stands out, since *why* the LLM ran the
+        # command is the higher-signal information for the operator.
         head = _paint("$ ", _DIM, _WHITE)
         ag = _paint(_agent_tag(agent), _CYAN)
-        _emit(f"{_now()}  {head}{ag} {_clip(cmd, _MAX_CMD)}")
+        cmd_text = _paint(_clip(cmd, _MAX_CMD), _DIM)
+        _emit(f"{_now()}  {head}{ag} {cmd_text}")
         if reasoning and reasoning.strip():
             # Indent under the timestamp column so the reasoning visually
-            # belongs to its parent command.
-            indent = " " * 12
-            line = _paint(f"↳ {_clip(reasoning.strip(), 220)}", _DIM)
-            _emit(f"{indent}{line}")
+            # belongs to its parent command. Full text — no clipping —
+            # so the operator can read the LLM's complete hypothesis.
+            self._emit_multiline(
+                "↳ ", reasoning.strip(), color=_BOLD,
+            )
 
     def shell_output(
         self,
@@ -488,10 +527,17 @@ class _Live:
         size = _fmt_bytes(n_bytes)
         dur = _fmt_ms(duration_ms)
         synopsis = _summarize_output(tail, exit_code)
-        synopsis_part = f"  {synopsis}" if synopsis else ""
-        if not ok:
-            synopsis_part = "  " + _paint(synopsis, _RED) if synopsis else ""
-        _emit(f"{_now()}  {mark}{ag} {ec}{size}  ({dur}){synopsis_part}")
+        # Synopsis is tool-output mechanics — dim by default so the
+        # operator's eye lands on LLM reasoning instead. Errors stay
+        # red because real failures are something the user needs to notice.
+        if not synopsis:
+            synopsis_part = ""
+        elif not ok:
+            synopsis_part = "  " + _paint(synopsis, _RED)
+        else:
+            synopsis_part = "  " + _paint(synopsis, _DIM)
+        meta = _paint(f"{ec}{size}  ({dur})", _DIM)
+        _emit(f"{_now()}  {mark}{ag} {meta}{synopsis_part}")
 
     # -------- findings & warnings ----------
 

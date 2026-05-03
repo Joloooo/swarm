@@ -20,17 +20,20 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_tavily import TavilySearch
 from pydantic import BaseModel, Field
 
-from src.graph import budgets
+from src.graph import config
 from src.llm.provider import LLMConfig, get_llm
 from src.nodes.base import BaseNode
 from src.state import SwarmGraphState
 from src.tools.crawler import crawl_many
 
 # How much crawled HTML/text to include per source in the LLM context.
-# Tavily snippets are ~300 chars; adding ~3k chars of real page content
-# gives the model enough to ground the answer without blowing the
-# context window when Tavily returns 10 URLs. Centralized in src/graph.py.
-_MAX_CRAWLED_CHARS = budgets.web_search_max_crawled_chars
+# Tavily snippets are only ~300 chars (intro/definition); adding ~8K chars
+# of real crawled page content captures the actual bypass technique on
+# typical security references (PortSwigger / OWASP / exploit-db articles
+# usually describe specific techniques 5K-8K chars in). 10 sources × 8K
+# chars = ~80K tokens, comfortably within modern model context windows.
+# Tunable per-run via SWARM_WEB_MAX_CHARS — see src/graph.py budgets.
+_MAX_CRAWLED_CHARS = config.budgets.web_search_max_crawled_chars
 
 
 class WebSearchAnalysis(BaseModel):
@@ -134,14 +137,55 @@ class WebSearchNode(BaseNode):
             )
 
             # Step 4: Structured LLM analysis.
+            #
+            # ``with_structured_output`` returns None when the underlying
+            # provider can't conform to the schema — most commonly Codex
+            # (consumer ChatGPT subscription) which doesn't reliably emit
+            # structured output. We fall back gracefully by stitching the
+            # Tavily snippets into a plain answer so the planner still
+            # gets actionable bypass guidance from the search.
             llm = get_llm(LLMConfig())
             structured_llm = llm.with_structured_output(WebSearchAnalysis)
-            analysis: WebSearchAnalysis = await structured_llm.ainvoke(context)
-            self.log.info("LLM used %d sources", len(analysis.sources_used))
+            analysis: WebSearchAnalysis | None = await structured_llm.ainvoke(context)
+
+            if analysis is None or not getattr(analysis, "answer", None):
+                self.log.warning(
+                    "Structured output returned None or empty answer "
+                    "(likely Codex provider). Falling back to raw Tavily "
+                    "snippet stitch-up so the planner still gets guidance."
+                )
+                # Use every Tavily result as a cited source, and stitch
+                # snippets into a single answer block. Less polished than
+                # the LLM-synthesized version but factually grounded in
+                # what the search returned.
+                sources_list = [
+                    {
+                        "url": r.get("url"),
+                        "title": r.get("title"),
+                        "content": (r.get("content") or "")[:300],
+                        "score": r.get("score"),
+                    }
+                    for r in raw_results
+                    if r.get("url")
+                ]
+                snippets = "\n\n".join(
+                    f"[{i}] {s['title']}\n{s['content']}"
+                    for i, s in enumerate(sources_list)
+                )
+                body = (
+                    "[Web Search] (synthesis unavailable from LLM, raw "
+                    f"Tavily snippets follow)\n\nQuery: {query}\n\n"
+                    f"{snippets}\n\nSources:\n" + "\n".join(
+                        f"- {s['title']} — {s['url']}" for s in sources_list
+                    )
+                )
+                return {"messages": [AIMessage(content=body)]}
+
+            self.log.info("LLM used %d sources", len(analysis.sources_used or []))
 
             # Step 5: Keep only the cited sources.
             sources_list: list[dict[str, Any]] = []
-            for idx in analysis.sources_used:
+            for idx in analysis.sources_used or []:
                 if 0 <= idx < len(raw_results):
                     result = raw_results[idx]
                     sources_list.append(

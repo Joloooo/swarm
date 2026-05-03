@@ -8,8 +8,9 @@ fan out), web_search, or report — and the graph transitions accordingly.
 Every node is a :class:`~src.nodes.base.BaseNode` instance, and
 ``BaseNode.__call__`` itself owns the cross-cutting instrumentation
 (timing, boundary AIMessage, JSONL run logging, crash-to-AIMessage
-conversion, ``SWARM_VERBOSE`` streaming). The graph just wires
-instances in directly — no wrapper, no per-node boilerplate.
+conversion, live stderr streaming via :data:`src.observability.LIVE`).
+The graph just wires instances in directly — no wrapper, no
+per-node boilerplate.
 
 Boundary messages are tagged with ``additional_kwargs={"node": name}``
 so downstream consumers that scan message history can filter them out
@@ -38,25 +39,44 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, fields
+import sys
+from types import SimpleNamespace
+
+# Load environment variables from .env BEFORE any module that reads them.
+# This is the universal entry point — every CLI command, the benchmark
+# runner, and the LangGraph Studio bootstrap all import src.graph, so a
+# single dotenv load here covers all entry points. Keys read from .env:
+# ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, TAVILY_API_KEY,
+# LANGSMITH_API_KEY. Without this, langchain_tavily.TavilySearch fails
+# at runtime even when the key IS in .env (only the shell-exported keys
+# would otherwise reach the process).
+try:
+    from dotenv import load_dotenv as _load_dotenv
+
+    _load_dotenv()
+except ImportError:
+    pass
 
 
 # ============================================================================
-# Centralized budgets — every cap, timeout, and iteration count.
+# Centralized runtime config — budgets + verbosity in one nested object.
 #
 # This block exists HERE (top of graph.py, BEFORE any other imports) so that
-# transitive imports — planner.py, tools/*, llm/* — can turn around and
-# `from src.graph import budgets` without hitting an import cycle. Python
-# hands them whatever's been bound in this module's namespace at the time
-# of the partial import; as long as `budgets` is bound before the
-# `from src.nodes import (...)` block below, the partial-import works.
+# transitive imports — planner.py, tools/*, llm/*, observability/* — can
+# turn around and `from src.graph import config` without hitting an import
+# cycle. Python hands them whatever's been bound in this module's namespace
+# at the time of the partial import; as long as `config` is bound before
+# the `from src.nodes import (...)` block below, the partial-import works.
 #
-# DO NOT MOVE THIS BLOCK BELOW THE NODE/STATE/EDGE IMPORTS or the cycle
-# returns and you'll get `ImportError: cannot import name 'budgets'`.
+# DO NOT MOVE THIS BLOCK BELOW THE NODE/STATE/EDGE IMPORTS.
 #
-# Override any field at runtime with the corresponding SWARM_* env var.
-# Useful for debug runs without code edits, e.g.
-#     SWARM_PLANNER_MAX_ITERS=200 uv run python -m benchmarks.xbow_runner ...
+# Everything is overridable via env vars, so debug runs need no code edit:
+#     SWARM_PLANNER_MAX_ITERS=200 SWARM_VERBOSITY=verbose uv run ...
+#
+# Shape mirrors the TS `NODE_CONFIG = { discover: { llms: {}, tools: {} } }`
+# pattern — one nested literal, attribute-style access:
+#     config.budgets.planner_max_iters
+#     config.verbosity.mode
 # ============================================================================
 
 
@@ -70,44 +90,87 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-@dataclass(frozen=True)
-class Budgets:
-    """Resource budgets for LLM-running nodes only.
+def _env_str(
+    name: str,
+    default: str,
+    *,
+    choices: tuple[str, ...] | None = None,
+) -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    if choices and raw not in choices:
+        return default
+    return raw
 
-    These bound *what an agent can do per invocation* — iterations,
-    tool calls, output tokens, context window. Infrastructure timeouts
-    (Docker build, HTTP request, tmux command, search-API parameters)
-    are NOT budgets and live as local constants in the file that uses
-    them. Don't add fields here unless they're directly bounding LLM
-    behavior in a node.
-    """
 
-    # --- Graph supervisor / planner ---
-    planner_max_iters:             int   = _env_int("SWARM_PLANNER_MAX_ITERS",        50)
-    # --- Worker agents (per invocation) ---
-    worker_max_iterations:         int   = _env_int("SWARM_WORKER_MAX_ITERATIONS",    30)
-    # --- Planner-invented "custom" attacks ---
-    custom_attack_max_tool_calls:  int   = _env_int("SWARM_CUSTOM_MAX_TOOL_CALLS",    40)
-    custom_attack_max_iterations:  int   = _env_int("SWARM_CUSTOM_MAX_ITERATIONS",    25)
-    # --- LLM (per-call output cap) ---
-    llm_max_tokens:                int   = _env_int("SWARM_LLM_MAX_TOKENS",         4096)
-    # --- Web search node (LLM context budget per source) ---
-    web_search_max_crawled_chars:  int   = _env_int("SWARM_WEB_MAX_CHARS",          3000)
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
-    def describe(self) -> str:
-        """One-block dump of every field — log at startup for run snapshots."""
-        return "Budgets:\n" + "\n".join(
-            f"  {f.name:<32s} = {getattr(self, f.name)}" for f in fields(self)
+
+def _stderr_is_tty() -> bool:
+    try:
+        return sys.stderr.isatty()
+    except Exception:
+        return False
+
+
+# The single runtime-config object. One literal, one place. Same shape
+# (and ergonomics) as a TS `export const NODE_CONFIG = { ... }`.
+config = SimpleNamespace(
+    budgets=SimpleNamespace(
+        # ── Graph supervisor / planner ──
+        planner_max_iters            = _env_int("SWARM_PLANNER_MAX_ITERS",        50),
+        # ── Worker agents (per invocation) ──
+        worker_max_iterations        = _env_int("SWARM_WORKER_MAX_ITERATIONS",    30),
+        # ── Planner-invented "custom" attacks ──
+        custom_attack_max_tool_calls = _env_int("SWARM_CUSTOM_MAX_TOOL_CALLS",    40),
+        custom_attack_max_iterations = _env_int("SWARM_CUSTOM_MAX_ITERATIONS",    25),
+        # ── LLM (per-call output cap) ──
+        llm_max_tokens               = _env_int("SWARM_LLM_MAX_TOKENS",         4096),
+        # ── Web search node (LLM context budget per source) ──
+        # 8000 chars ≈ first ~1300 words of each crawled page. Tuned so
+        # PortSwigger / OWASP / exploit-db articles include the actual
+        # bypass technique (typically ~5000-8000 chars in), not just the
+        # intro/definition. 10 sources × 8000 chars = ~80K tokens which
+        # comfortably fits any modern model's context. Lower this with
+        # SWARM_WEB_MAX_CHARS if synthesis quality degrades on very
+        # small-context fallback models.
+        web_search_max_crawled_chars = _env_int("SWARM_WEB_MAX_CHARS",          8000),
+    ),
+    verbosity=SimpleNamespace(
+        # silent  = only bench boundaries + final verdict on stderr
+        # compact = (default) one colored line per planner decision,
+        #           shell command, outcome, finding, warning
+        # verbose = today's full multi-line dump
+        mode      = _env_str("SWARM_VERBOSITY", "compact",
+                             choices=("silent", "compact", "verbose")),
+        color     = _env_bool("SWARM_COLOR",     _stderr_is_tty()),
+        show_http = _env_bool("SWARM_LIVE_HTTP", False),
+    ),
+)
+
+
+def describe_config() -> str:
+    """Pretty-print the active config — log at startup for run snapshots."""
+    return (
+        "Budgets:\n"
+        + "\n".join(
+            f"  {k:<32s} = {v}" for k, v in vars(config.budgets).items()
         )
-
-
-# Module-level singleton. Callers do `from src.graph import budgets`.
-budgets = Budgets()
+        + "\n\nVerbosity:\n"
+        + "\n".join(
+            f"  {k:<10s} = {v}" for k, v in vars(config.verbosity).items()
+        )
+    )
 
 
 # ============================================================================
-# Imports below this line MUST come AFTER the budgets block above so the
-# transitive `from src.graph import budgets` resolves correctly.
+# Imports below this line MUST come AFTER the config block above so the
+# transitive `from src.graph import config` resolves correctly.
 # ============================================================================
 
 from langgraph.graph import END, START, StateGraph  # noqa: E402

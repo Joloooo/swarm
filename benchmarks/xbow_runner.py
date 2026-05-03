@@ -25,15 +25,17 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage
 
-from src.graph import build_graph
+from src.graph import build_graph, config
 from src.observability import (
+    LIVE,
+    HttpxQuietFilter,
     make_run_id,
     run_dir,
     write_final_state,
@@ -109,7 +111,8 @@ def _run(
     """Run a subprocess with a hard timeout. On timeout the child is killed
     and a CalledProcessError-shaped TimeoutExpired propagates so the caller
     can decide whether to retry or move on."""
-    logger.info("$ %s  (cwd=%s, timeout=%s)", " ".join(cmd), cwd, timeout)
+    if config.verbosity.mode == "verbose":
+        logger.info("$ %s  (cwd=%s, timeout=%s)", " ".join(cmd), cwd, timeout)
     return subprocess.run(
         cmd, cwd=cwd, check=check,
         capture_output=capture, text=capture,
@@ -117,20 +120,83 @@ def _run(
     )
 
 
+def _docker_phase(
+    cmd: list[str],
+    cwd: Path,
+    *,
+    bench_id: str,
+    phase: str,
+    timeout: float | None,
+    check: bool = True,
+) -> subprocess.CompletedProcess:
+    """Run a docker/make subprocess that produces verbose lifecycle output.
+
+    Always captures stdout+stderr. In ``verbose`` mode the captured stream
+    is replayed verbatim to stderr (preserving today's behavior). In
+    ``compact``/``silent`` mode the stream is swallowed and a single
+    one-line ``▸ docker <bench> <phase> (Xs)`` summary is emitted via
+    :data:`LIVE`. Errors always surface regardless of mode.
+
+    Raises :class:`subprocess.CalledProcessError` on non-zero exit when
+    ``check`` is True, mirroring ``subprocess.run(check=True)``.
+    """
+    started = time.time()
+    proc = subprocess.run(
+        cmd, cwd=cwd, check=False,
+        capture_output=True, text=True, timeout=timeout,
+    )
+    duration = time.time() - started
+
+    if config.verbosity.mode == "verbose":
+        if proc.stdout:
+            sys.stderr.write(proc.stdout)
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)
+        sys.stderr.flush()
+
+    if proc.returncode != 0:
+        last = ""
+        for stream in (proc.stderr, proc.stdout):
+            if stream and stream.strip():
+                last = stream.strip().splitlines()[-1]
+                break
+        LIVE.runner_message(
+            f"{bench_id} {phase} failed (rc={proc.returncode}): {last}",
+            level="error",
+        )
+        if check:
+            raise subprocess.CalledProcessError(
+                proc.returncode, cmd, proc.stdout, proc.stderr,
+            )
+        return proc
+
+    LIVE.docker_phase(bench_id, phase, duration)
+    return proc
+
+
 def make_build(benchmark_id: str) -> None:
-    _run(["make", f"BENCHMARK={benchmark_id}", "build"],
-         cwd=XBOW_ROOT, timeout=BUILD_TIMEOUT_S)
+    _docker_phase(
+        ["make", f"BENCHMARK={benchmark_id}", "build"],
+        cwd=XBOW_ROOT, bench_id=benchmark_id,
+        phase="build", timeout=BUILD_TIMEOUT_S,
+    )
 
 
 def make_run(benchmark_id: str) -> None:
-    _run(["make", f"BENCHMARK={benchmark_id}", "run"],
-         cwd=XBOW_ROOT, timeout=UP_TIMEOUT_S)
+    _docker_phase(
+        ["make", f"BENCHMARK={benchmark_id}", "run"],
+        cwd=XBOW_ROOT, bench_id=benchmark_id,
+        phase="up", timeout=UP_TIMEOUT_S,
+    )
 
 
 def docker_down(benchmark_id: str) -> None:
     bench_dir = XBOW_ROOT / "benchmarks" / benchmark_id
-    _run(["docker", "compose", "down", "--remove-orphans"],
-         cwd=bench_dir, timeout=DOWN_TIMEOUT_S, check=False)
+    _docker_phase(
+        ["docker", "compose", "down", "--remove-orphans"],
+        cwd=bench_dir, bench_id=benchmark_id,
+        phase="down", timeout=DOWN_TIMEOUT_S, check=False,
+    )
 
 
 def discover_target_url(benchmark_id: str) -> str:
@@ -187,6 +253,8 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
             make_build(benchmark_id)
         make_run(benchmark_id)
         result["target_url"] = discover_target_url(benchmark_id)
+        # Show the start-of-run boundary now that target_url is known.
+        LIVE.bench_start(benchmark_id, result["target_url"], flag)
         logger.info("[%s] target=%s expected_flag=%s run_dir=%s",
                     benchmark_id, result["target_url"], flag, rdir)
 
@@ -208,12 +276,24 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
                 "findings": [],
                 "agent_results": [],
                 "active_agents": [],
+                # Benchmark-mode signal — workers and the planner read this
+                # to know the run has an explicit flag-extraction success
+                # criterion. Empty string in non-benchmark contexts.
+                "expected_flag": flag or "",
             }),
             timeout=RUN_TIMEOUT_S,
         )
 
-        haystack = json.dumps(agent_state, default=str)
-        result["flag_found"] = flag in haystack
+        # Search only worker output for the flag — NOT the full state.
+        # The graph state now contains an `expected_flag` field (so the
+        # planner and workers can read it for benchmark-mode prompts);
+        # if we serialized the full state, that field would self-match
+        # and report every run as a successful flag capture.
+        flag_search_state = {
+            k: v for k, v in agent_state.items() if k != "expected_flag"
+        }
+        haystack = json.dumps(flag_search_state, default=str)
+        result["flag_found"] = bool(flag) and flag in haystack
         result["findings_count"] = len(agent_state.get("findings") or [])
 
     except asyncio.TimeoutError:
@@ -317,12 +397,12 @@ def load_list_file(path: Path) -> list[str]:
 async def main_async(args) -> int:
     ok, docker_error = docker_is_available()
     if not ok:
-        print(
+        LIVE.runner_message(
             "Docker is not available, so XBOW benchmarks cannot start.\n"
             f"{docker_error}\n\n"
             "Start Docker Desktop, wait until `docker info` succeeds, then rerun:\n"
             "  bash benchmarks/run_xbow_daily.sh --resume --retry-errors",
-            flush=True,
+            level="error",
         )
         return 3
 
@@ -333,7 +413,7 @@ async def main_async(args) -> int:
     elif args.bench:
         ids = [args.bench]
     else:
-        print("specify --bench <id> or --daily", flush=True)
+        LIVE.runner_message("specify --bench <id> or --daily", level="error")
         return 2
 
     if args.resume:
@@ -341,42 +421,38 @@ async def main_async(args) -> int:
         original_count = len(ids)
         ids = [bid for bid in ids if bid not in done]
         skipped = original_count - len(ids)
-        print(
+        LIVE.runner_message(
             f"resume enabled: skipping {skipped} recorded benchmark(s), "
-            f"{len(ids)} remaining",
-            flush=True,
+            f"{len(ids)} remaining"
         )
 
-    print(f"running {len(ids)} benchmark(s)", flush=True)
+    LIVE.runner_message(f"running {len(ids)} benchmark(s)")
     summary = {"pass": 0, "fail": 0, "error": 0}
 
     for bid in ids:
-        print(f"\n=== {bid} ===", flush=True)
         r = await run_one(bid, skip_build=args.skip_build)
         path = write_jsonl(r)
 
         if r["error"]:
-            verdict = f"⚠ ERROR: {r['error']}"
             summary["error"] += 1
         elif r["flag_found"]:
-            verdict = "✓ FLAG FOUND"
             summary["pass"] += 1
         else:
-            verdict = "✗ no flag"
             summary["fail"] += 1
 
-        print(
-            f"  {verdict}  ({r['duration_s']}s, "
-            f"{r['findings_count']} findings)\n"
-            f"     summary  → {r['run_dir']}/summary.md\n"
-            f"     jsonl    → {path}",
-            flush=True,
+        LIVE.bench_end(
+            bid,
+            ok=bool(r["flag_found"]),
+            duration_s=float(r["duration_s"] or 0.0),
+            findings_n=int(r["findings_count"] or 0),
+            summary_path=f"{r['run_dir']}/summary.md",
+            error=r["error"],
         )
+        LIVE.runner_message(f"           jsonl   → {path}")
 
-    print(
-        f"\nSummary: {summary['pass']} pass, {summary['fail']} fail, "
-        f"{summary['error']} error / {len(ids)} total",
-        flush=True,
+    LIVE.runner_message(
+        f"Summary: {summary['pass']} pass, {summary['fail']} fail, "
+        f"{summary['error']} error / {len(ids)} total"
     )
     return 0
 
@@ -395,22 +471,45 @@ def main() -> None:
                     help="skip benchmark IDs already present in results/xbow_*.jsonl")
     ap.add_argument("--retry-errors", action="store_true",
                     help="with --resume, retry IDs whose previous row had an error")
-    ap.add_argument("--verbose", "-v", action="store_true",
-                    help="stream every tool call, output, and node "
-                         "transition live to stderr (recommended for "
-                         "debugging a single benchmark)")
+    verbosity = ap.add_mutually_exclusive_group()
+    verbosity.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="stream every tool call, output, and node transition "
+             "live to stderr (the old SWARM_VERBOSE=1 behavior)",
+    )
+    verbosity.add_argument(
+        "--silent", action="store_true",
+        help="only show benchmark boundaries and the final verdict; "
+             "useful for overnight sweeps",
+    )
     args = ap.parse_args()
 
+    # Mutate the live config singleton based on CLI flags. The renderer
+    # reads config.verbosity.mode lazily on every call, so flipping the
+    # field here is sufficient — no env-var dance required.
     if args.verbose:
-        # Picked up by src.tools.terminal._verbose_print and
-        # BaseNode.__call__ — they read it at log-event time, so
-        # setting it here before graph.ainvoke() is enough.
-        os.environ["SWARM_VERBOSE"] = "1"
+        config.verbosity.mode = "verbose"
+    elif args.silent:
+        config.verbosity.mode = "silent"
 
+    # In compact/silent mode the LIVE renderer is the primary stream, so
+    # raise the global level to WARNING — INFO lines like
+    # ``node.planner: Supervisor turn 1 → ...`` and
+    # ``src.llm.provider: LLM provider initialized ...`` would just
+    # duplicate what LIVE already shows in colored form. WARNING and
+    # above (refusals, retries, real errors) still flow through.
+    log_level = logging.INFO if config.verbosity.mode == "verbose" else logging.WARNING
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Silence httpx INFO ("HTTP Request: POST chatgpt.com/...") unless the
+    # operator explicitly opted in via SWARM_LIVE_HTTP=1. Disk logs are
+    # unaffected; we don't write a separate httpx log file.
+    if not config.verbosity.show_http:
+        for log_name in ("httpx", "httpcore", "openai", "anthropic"):
+            logging.getLogger(log_name).addFilter(HttpxQuietFilter())
+
     raise SystemExit(asyncio.run(main_async(args)))
 
 

@@ -15,7 +15,7 @@ from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 
-from src.graph import budgets
+from src.graph import config
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class LLMConfig:
     provider: Provider = Provider.CODEX
     model: str = "gpt-5.4-mini"
     temperature: float = 0.0
-    max_tokens: int = field(default_factory=lambda: budgets.llm_max_tokens)
+    max_tokens: int = field(default_factory=lambda: config.budgets.llm_max_tokens)
     # Provider-specific kwargs (e.g. base_url for OpenRouter)
     extra: dict[str, Any] | None = None
 

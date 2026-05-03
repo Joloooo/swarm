@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import os
 import re
 import threading
 from pathlib import Path
@@ -41,16 +40,24 @@ def make_run_id(
     benchmark_id: str | None = None,
     target_url: str | None = None,
 ) -> str:
-    """Build a run_id that ties timestamp + target identity.
+    """Build a run_id that ties target identity to a readable timestamp.
 
-    Format:  ``<slug>-<YYYYMMDDTHHMMSS>-<pid>``
+    Format:  ``<slug>__<YYYY-MM-DD>_<HHhMMmSSs>``
+
+    Example: ``XBEN-006-24__2026-05-03_21h18m10s``
 
     The slug embeds whichever of these is most identifying, in order:
         1. benchmark_id (XBEN-019-24)
         2. target host (target-localhost-32768)
         3. ``studio`` fallback for langgraph dev runs
+
+    The pid suffix (used in earlier versions to disambiguate concurrent
+    runs of the same benchmark) is dropped — colliding runs of the same
+    bench id are pathological enough that letting them share a directory
+    is acceptable, and the readable timestamp is the user-visible win.
     """
-    ts = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
+    now = dt.datetime.now()
+    ts = now.strftime("%Y-%m-%d_%Hh%Mm%Ss")
     if benchmark_id:
         slug = _slug(benchmark_id)
     elif target_url:
@@ -60,7 +67,7 @@ def make_run_id(
         slug = _slug(f"target-{host}{port}")
     else:
         slug = "studio"
-    return f"{slug}-{ts}-{os.getpid()}"
+    return f"{slug}__{ts}"
 
 
 def run_dir(run_id: str) -> Path:
@@ -309,4 +316,4 @@ def write_summary(
 # does a lazy ``from src.graph import config``; either order works
 # (live.py defers config access to call time), but bottom keeps the
 # disk-logging surface above the renderer surface for readers.
-from src.live import LIVE, HttpxQuietFilter  # noqa: E402
+from src.live import LIVE, HttpxQuietFilter, LiveLogHandler  # noqa: E402

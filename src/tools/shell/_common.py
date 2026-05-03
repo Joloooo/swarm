@@ -90,28 +90,45 @@ def workspace_for(agent_id: str) -> Path:
 
 def _init_log_file() -> Path:
     """Pick a log file path, falling back to /tmp if the preferred dir is unwritable."""
+    ts = datetime.now().strftime("%Y-%m-%d_%Hh%Mm%Ss")
     preferred = Path(os.getenv("SWARM_LOG_DIR", "logs"))
     for base in (preferred, Path("/tmp/swarmattacker-logs")):
         try:
             base.mkdir(parents=True, exist_ok=True)
-            return base / f"run-{datetime.now():%Y%m%d-%H%M%S}-{os.getpid()}.jsonl"
+            return base / f"run-{ts}.jsonl"
         except Exception:
             continue
     # Last resort: a flat file in /tmp with a unique name.
-    return Path(f"/tmp/swarmattacker-run-{os.getpid()}.jsonl")
+    return Path(f"/tmp/swarmattacker-run-{ts}.jsonl")
 
 
 _LOG_FILE: Path = _init_log_file()
 _LOG_LOCK = threading.Lock()
 
-# Tell the user where the log lives — printed to stderr so it always shows,
-# even if stdout is being captured by another process (langgraph dev, pytest).
-print(
-    f"[swarmattacker] terminal event log → {_LOG_FILE.resolve()}\n"
-    f"[swarmattacker] live-tail with:  tail -f {_LOG_FILE} | jq",
-    file=sys.stderr,
-    flush=True,
-)
+
+def _verbose_mode_at_import() -> bool:
+    """Best-effort check of config.verbosity.mode at module-load time.
+
+    Returns False if config isn't loaded yet (the conservative default —
+    suppress the chatty banner when in doubt).
+    """
+    try:
+        from src.graph import config
+        return config.verbosity.mode == "verbose"
+    except Exception:
+        return False
+
+
+# Tell the user where the temp log lives. Only useful in verbose mode —
+# in compact/silent mode the runner immediately redirects this, so the
+# temp path is misleading. Skip the banner there.
+if _verbose_mode_at_import():
+    print(
+        f"[swarmattacker] terminal event log → {_LOG_FILE.resolve()}\n"
+        f"[swarmattacker] live-tail with:  tail -f {_LOG_FILE} | jq",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def set_log_file(path: Path) -> Path:
@@ -128,11 +145,21 @@ def set_log_file(path: Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     _LOG_FILE = path
-    print(
-        f"[swarmattacker] terminal event log → {_LOG_FILE.resolve()}",
-        file=sys.stderr,
-        flush=True,
-    )
+    # Only announce the redirect in verbose mode. In compact/silent the
+    # path is also visible at the end of the run via ``summary →`` and
+    # ``terminal_events.jsonl`` lives next to it, so the up-front line
+    # is just noise.
+    try:
+        from src.graph import config
+        is_verbose = config.verbosity.mode == "verbose"
+    except Exception:
+        is_verbose = False
+    if is_verbose:
+        print(
+            f"[swarmattacker] terminal event log → {_LOG_FILE.resolve()}",
+            file=sys.stderr,
+            flush=True,
+        )
     return _LOG_FILE
 
 

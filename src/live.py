@@ -24,6 +24,7 @@ imported from ``observability/__init__.py`` without triggering the
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sys
 import time
@@ -318,15 +319,14 @@ class _Live:
             self._render_planner_messages(new_messages, duration_ms)
             return
 
-        # Worker / lifecycle node — a one-line lifecycle marker.
-        # Filter out boundary ✅/❌ messages we ourselves inject.
-        msg_summary = self._compact_worker_synopsis(new_messages)
+        # Worker / lifecycle node — structured summary line first.
         head = _paint(f"▸ {name:<8s}", _DIM, _BLUE)
-        suffix = f"  ({_fmt_ms(duration_ms)})"
         body = f"{summary}" if summary else "ok"
-        if msg_summary:
-            body = f"{body}  {_paint(msg_summary, _DIM)}"
-        _emit(f"{_now()}  {head} {body}{suffix}")
+        _emit(f"{_now()}  {head} {body}  ({_fmt_ms(duration_ms)})")
+        # Then a 💭 line per non-trivial worker AIMessage so the LLM's
+        # narrative between tool calls is visible. Without this the user
+        # only sees commands, not reasoning between them.
+        self._emit_worker_thoughts(new_messages)
 
     def _render_planner_messages(
         self,
@@ -379,22 +379,53 @@ class _Live:
             head = _paint("▸ planner ", _DIM, _BLUE)
             _emit(f"{_now()}  {head} (no decision yet, {_fmt_ms(duration_ms)})")
 
-    def _compact_worker_synopsis(self, new_messages: list[Any]) -> str:
-        """Pull a *very* short hint out of a worker's trailing AIMessage —
-        useful when the supervisor returns from recon/executor/web_search.
-        We don't want a multi-line dump; just a sentence-fragment hint.
+    def _emit_worker_thoughts(self, new_messages: list[Any]) -> None:
+        """Render worker AIMessages between tool calls as 💭 lines.
+
+        These are the LLM's narrative reasoning — the analysis it
+        emits after seeing a tool result and before deciding the next
+        action. Without this stream, compact mode shows commands but
+        not why each was chosen or what the LLM made of the result.
+
+        Skips:
+          - non-AIMessage entries (ToolMessages — already shown via
+            ``LIVE.shell_output``);
+          - empty content (tool-call-only AIMessages);
+          - boundary ``✅``/``❌`` messages we ourselves inject;
+          - finding markdown blocks (already rendered via
+            ``LIVE.finding`` from base.py with severity coloring).
         """
-        for msg in reversed(new_messages):
+        # Lazy import — keeps live.py importable without langchain at
+        # module-load time.
+        from langchain_core.messages import AIMessage
+
+        indent = " " * 12  # align under the HH:MM:SS column
+        for msg in new_messages:
+            if not isinstance(msg, AIMessage):
+                continue
             content = getattr(msg, "content", None)
-            if not isinstance(content, str) or not content:
+            if not isinstance(content, str) or not content.strip():
                 continue
             kw = getattr(msg, "additional_kwargs", None) or {}
             if kw.get("node") and (
                 content.startswith("✅ [") or content.startswith("❌ [")
             ):
                 continue
-            return _clip(_first_nonempty(content), 90)
-        return ""
+            stripped = content.strip()
+            # Findings get their own ▣ line via base.py — don't re-show.
+            if (
+                stripped.startswith("**FINDING:**")
+                or stripped.startswith("## FINDING")
+                or stripped.startswith("## Finding")
+            ):
+                continue
+            agent = kw.get("agent_id") or ""
+            first = _first_nonempty(content)
+            if not first:
+                continue
+            agent_part = f"[{agent}] " if agent else ""
+            line = _paint(f"💭 {agent_part}{_clip(first, 130)}", _DIM)
+            _emit(f"{indent}{line}")
 
     # -------- shell tool ----------
 
@@ -415,10 +446,16 @@ class _Live:
             if reasoning:
                 _emit(f"{tag}   reasoning: {reasoning}")
             return
-        # compact
+        # compact — show the command + the LLM's stated reasoning underneath.
         head = _paint("$ ", _DIM, _WHITE)
         ag = _paint(_agent_tag(agent), _CYAN)
         _emit(f"{_now()}  {head}{ag} {_clip(cmd, _MAX_CMD)}")
+        if reasoning and reasoning.strip():
+            # Indent under the timestamp column so the reasoning visually
+            # belongs to its parent command.
+            indent = " " * 12
+            line = _paint(f"↳ {_clip(reasoning.strip(), 220)}", _DIM)
+            _emit(f"{indent}{line}")
 
     def shell_output(
         self,
@@ -539,7 +576,7 @@ def _fmt_bytes(n: int | str) -> str:
 LIVE = _Live()
 
 
-# ─────────────────────────── httpx log filter ────────────────────────────
+# ─────────────────────── stdlib logging integration ───────────────────────
 
 
 class HttpxQuietFilter:
@@ -561,3 +598,46 @@ class HttpxQuietFilter:
             return True
         # Hide httpx INFO; let WARNING+ through so real errors still surface.
         return record.levelno >= 30  # WARNING and above
+
+
+class LiveLogHandler(logging.Handler):
+    """Stdlib logging handler that reformats records through :data:`LIVE`.
+
+    Installed in compact/silent mode so warnings and errors appear in the
+    same colored ``⚠`` / red format as the rest of the live stream
+    instead of the raw ``2026-05-03 21:19:11,401 WARNING node.recon: …``
+    timestamped lines that ``logging.basicConfig`` produces. Records
+    below WARNING are dropped (their content is already surfaced by
+    LIVE itself in compact mode); errors are routed through
+    ``LIVE.runner_message`` with ``level="error"``.
+
+    Verbose mode does NOT install this — the runner keeps
+    ``logging.basicConfig`` so the full timestamped log stream is
+    available for deep debugging.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = record.getMessage()
+        except Exception:  # noqa: BLE001 — never let a log call crash a run
+            try:
+                msg = self.format(record)
+            except Exception:
+                return
+        # Tag the source if it's a recognizable node logger so the user
+        # can tell whether a warning came from the planner, a worker,
+        # the LLM provider, etc.
+        prefix = ""
+        if record.name.startswith("node."):
+            prefix = f"[{record.name[5:]}] "
+        elif record.name.startswith("src."):
+            prefix = f"[{record.name[4:]}] "
+        text = f"{prefix}{msg}".strip()
+        if record.levelno >= logging.ERROR:
+            # Errors go through the same ⚠ path as warnings so they get
+            # the timestamp + colored prefix; the "error:" prefix keeps
+            # them distinguishable in the stream.
+            LIVE.warning(f"error: {text}")
+        elif record.levelno >= logging.WARNING:
+            LIVE.warning(text)
+        # INFO/DEBUG: dropped intentionally.

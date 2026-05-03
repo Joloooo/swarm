@@ -40,6 +40,12 @@ attack surfaces.
 - Map authentication and critical user flows.
 - Identify exposed endpoints and entry points.
 - Skip deep content discovery — test what's immediately accessible.
+- Fingerprint stack fast — Wappalyzer-style header/cookie/JS-object
+  inspection. Note framework, server, CDN, WAF in one pass.
+- Pull any public API contract (Swagger, OpenAPI, GraphQL
+  introspection, `?wsdl`) before fuzzing — schema beats blind guess.
+- Grep all reachable JS files for endpoints, tokens, and secrets
+  before brute-forcing paths.
 
 ## Phase 2: High-impact targets (priority order)
 
@@ -58,12 +64,38 @@ Test in this order — the first ones yield the most impact per minute:
 6. **Exposed secrets** — hardcoded credentials, API keys, config
    files (dispatch `information-disclosure`).
 
+### Quick-win patterns inside each priority
+
+- **Auth**: try `alg:none` and HS256/RS256 confusion on any JWT
+  before deeper analysis. Check `redirect_uri` validation on OAuth
+  flows. Probe username enumeration via response-time and error-text
+  deltas.
+- **Access control**: flip numeric IDs first, then swap UUIDs, then
+  try parameter pollution (`id=victim&id=attacker`) and method
+  swap (GET to PUT/DELETE) on the same path.
+- **RCE**: SSTI probes (`{{7*7}}`, `${7*7}`) on any reflected input;
+  classic command-injection separators on filename, hostname, or
+  shell-adjacent params.
+- **SQLi**: hit auth, search, and filter params first — these are
+  the highest hit-rate surfaces.
+- **SSRF**: redirect-style params (`url`, `next`, `redirect_uri`,
+  `webhook`, `callback`) and any feature that fetches a remote
+  resource on the user's behalf.
+- **Secrets**: scan client-side JS, source maps, `.git/`,
+  `/.env`, and verbose error pages before deeper enumeration.
+
 ### What to skip for quick scans
 - Exhaustive subdomain enumeration.
 - Full directory brute-forcing.
 - Low-severity information disclosure without an exploit chain.
 - Theoretical issues without a working PoC.
 - Extensive fuzzing — use targeted payloads only.
+- Deep WAF-bypass research — note its presence and pivot to a
+  different vector instead of grinding obfuscation.
+- Infrastructure-only checks (TLS ciphers, cookie flag audits,
+  cache-header reviews) unless they enable an exploit chain.
+- Long-tail input classes (XPath, LDAP, SOAP, SMTP injection)
+  unless the fingerprint clearly points to that surface.
 
 ## Phase 3: Validation
 
@@ -94,3 +126,12 @@ Think like a time-boxed bug-bounty hunter going for quick wins.
 Prioritize breadth over depth on critical areas. If something looks
 exploitable, validate quickly and move on. Don't get stuck — if an
 attack vector isn't yielding results quickly, pivot.
+
+## Time budget heuristic
+
+- Hard-cap each priority bucket. If bucket 1 (auth) yields nothing
+  in ~15 minutes, move to bucket 2 — do not regrind.
+- Re-enter a bucket only when a later finding gives new signal
+  (e.g., a leaked token revives auth testing).
+- Stop fingerprinting once you have a working exploit class —
+  further recon is overhead.

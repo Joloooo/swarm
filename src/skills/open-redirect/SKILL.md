@@ -52,6 +52,12 @@ matched against an exact allowlist per scheme, host, and path.
 - Payment gateways, email links, invite / verification.
 - Unsubscribe, language / locale switches.
 - Generic redirector endpoints (`/out`, `/r`, `/redirect`).
+- URL shorteners and "share" handlers — they redirect by design and
+  often skip protocol/scheme checks.
+- Framework-specific redirect surfaces — Next.js Server Actions and
+  route handlers (`/api/*?redirect=`), SvelteKit `hooks.server.ts`
+  callback params, Remix loader/action `redirectTo`, Astro API
+  routes, Spring `?url=`, Laravel `redirect()`, Express `res.redirect`.
 
 ## Reconnaissance
 
@@ -90,12 +96,22 @@ matched against an exact allowlist per scheme, host, and path.
   (full-width dot), trailing dot.
 
 ### Encoding bypasses
-- Double encoding: `%2f%2fevil.com`, `%252f%252fevil.com`.
+- Double encoding: `%2f%2fevil.com`, `%252f%252fevil.com`. The edge
+  decodes once, the origin decodes again — the validator sees one
+  string and the redirect emits another.
 - Mixed case and scheme smuggling: `hTtPs://evil.com`,
-  `http:evil.com`.
+  `http:evil.com`, `https;/evil.com` (semicolon instead of `://`
+  parses as host on lenient validators).
 - IP variants — decimal `2130706433`, octal `0177.0.0.1`, hex
   `0x7f.1`, IPv6 `[::ffff:127.0.0.1]`.
 - User-controlled path bases: `/out?url=/\evil.com`.
+- Multi-slash forms: `////evil.com`, `\/\/evil.com/`,
+  `/\/evil.com` — string checks on `//` miss these.
+- Domain-suffix concatenation (no separator):
+  `https://trustedevil.com`, `https://trustedcom.evil.com` — flags
+  validators using bare substring `contains("trusted.com")`.
+- Data and inline-payload schemes for XSS chain:
+  `data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==`.
 
 ## Vulnerability classes
 
@@ -132,9 +148,18 @@ got it right):
 - `location.href` / `assign` / `replace` using user input.
 - Meta refresh: `content=0;url=USER_INPUT`.
 - SPA routers: `router.push(searchParams.get('next'))`.
+- Mobile deep links — `intent://` URLs on Android, custom URI schemes,
+  and iOS Universal Link fallbacks can escalate an open redirect into
+  app-link hijack when the app trusts the redirected target.
 
 ### Reverse proxies and gateways
 - `Host` / `X-Forwarded-*` may change absolute-URL construction.
+- Header-driven redirects: `X-Original-URL`, `X-Rewrite-URL`,
+  `X-Forwarded-Proto` — try injecting an external host and watch for
+  it in the `Location` response.
+- Differential parsing across layers: edge accepts `https;/evil.com`
+  or single-encoded `%2f`, origin normalizes differently. Probe both
+  directly when you can reach the origin.
 - CDNs that follow redirects for link checking can leak tokens when
   chained.
 

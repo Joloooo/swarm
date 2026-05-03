@@ -138,6 +138,21 @@ class SwarmGraphState(TypedDict, total=False):
     # Query string the planner asked the web_search node to run. Set
     # only when next_action == "web_search"; read by web_search_node.
     search_query: str
+    # Counter for the planner's `_maybe_force_recovery` safety net —
+    # how many times it has overridden a `report` decision with a
+    # forced `web_search` this run. Capped at 1 to prevent loops.
+    # See `_maybe_force_recovery` in src/nodes/planner.py for the rule.
+    forced_recoveries: int
+    # Optional benchmark-mode field. When set (by the xbow_runner or any
+    # other benchmark driver), the planner and workers know the run has
+    # an explicit success criterion — extracting a string matching this
+    # value. Real pentest runs leave this empty, and the benchmark-only
+    # behavior (flag-pattern detection in workers, flag-aware forcing in
+    # the planner) does not fire. Read by:
+    #   - src.nodes.base._build_system_message (worker prompt addendum)
+    #   - src.nodes.planner.PlannerNode.execute (planner prompt addendum
+    #     and the `_maybe_force_recovery` safety net)
+    expected_flag: str
 
 
 class AgentState(TypedDict, total=False):

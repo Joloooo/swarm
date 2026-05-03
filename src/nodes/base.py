@@ -153,6 +153,23 @@ One to two sentences is the target. Reasoning that only describes what
 the command does — without referencing evidence or hypothesis — should
 be treated as a bug in your own reasoning and rewritten before emitting
 the tool call.
+
+## When alternatives mattered, name them
+
+When your decision is non-obvious — i.e. multiple plausible tools,
+skills, or payload categories could fit and you actively rejected some
+in favor of this one — include a brief "instead of X because Y" clause
+in the same reasoning field. Example: *"Sending curl with a
+duplicate-key body instead of an array body, because earlier probes
+showed array bodies trigger 500 (parser rejection) while object bodies
+are routed normally."*
+
+This is NOT required for every tool call — only at decision points
+where alternatives genuinely mattered. Routine probes with one obvious
+move keep the simple two-sentence reasoning. The point is to surface
+counterfactual reasoning at strategic forks (which skill, which payload
+category, which endpoint to attack first) so debug analysis can see
+why this path was taken and not the others.
 """
 
 

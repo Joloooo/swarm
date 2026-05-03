@@ -36,6 +36,7 @@ from src.graph import build_graph, config
 from src.observability import (
     LIVE,
     HttpxQuietFilter,
+    LiveLogHandler,
     make_run_id,
     run_dir,
     write_final_state,
@@ -492,17 +493,25 @@ def main() -> None:
     elif args.silent:
         config.verbosity.mode = "silent"
 
-    # In compact/silent mode the LIVE renderer is the primary stream, so
-    # raise the global level to WARNING — INFO lines like
-    # ``node.planner: Supervisor turn 1 → ...`` and
-    # ``src.llm.provider: LLM provider initialized ...`` would just
-    # duplicate what LIVE already shows in colored form. WARNING and
-    # above (refusals, retries, real errors) still flow through.
-    log_level = logging.INFO if config.verbosity.mode == "verbose" else logging.WARNING
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    # Logging setup splits by mode:
+    # - verbose: full timestamped basicConfig stream (today's behavior)
+    # - compact/silent: route WARNING+ records through LIVE so they
+    #   render as colored ⚠/error lines aligned with the rest of the
+    #   live stream, instead of raw "2026-05-03 21:19:11 WARNING …"
+    #   lines that visually clash.
+    if config.verbosity.mode == "verbose":
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+    else:
+        root = logging.getLogger()
+        root.setLevel(logging.WARNING)
+        # Wipe any pre-existing handler (e.g. from langchain / dotenv
+        # imports) so output isn't duplicated.
+        for h in list(root.handlers):
+            root.removeHandler(h)
+        root.addHandler(LiveLogHandler())
     # Silence httpx INFO ("HTTP Request: POST chatgpt.com/...") unless the
     # operator explicitly opted in via SWARM_LIVE_HTTP=1. Disk logs are
     # unaffected; we don't write a separate httpx log file.

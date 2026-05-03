@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -152,47 +153,98 @@ def _get_or_create_pane(agent_id: str) -> str:
 def _run_in_pane(pane_id: str, command: str, timeout: int = 120) -> str:
     """Send a command to a tmux pane and capture the output.
 
-    Uses a marker-based approach: sends the command, then a unique
-    echo marker, and reads pane output until the marker appears.
+    Uses a **dual-sentinel** marker approach: prints a unique start
+    marker BEFORE the command, the command itself, then a unique end
+    marker AFTER. Each marker is sent as its own ``send-keys`` call so
+    the shell receives them as three sequential commands.
+
+    Why two markers, and why bare-line matching?
+    -------------------------------------------
+    The previous single-marker version returned as soon as the marker
+    *substring* appeared in the pane scrollback. But ``tmux send-keys``
+    types the ``echo MARKER`` line straight into the pane TTY, which
+    the terminal locally echoes into the visible buffer the instant we
+    type it — i.e. before the command has even started running. The
+    substring check therefore matched the typed text and returned
+    blank output for any command that didn't finish printing its
+    output before the next ``capture-pane`` poll. SSH (banner takes
+    seconds), gobuster (slow startup), sqlmap (network) all hit this.
+    See ``tests/FAILURES.md`` 2026-05-02 for the full bug.
+
+    The fix:
+    - Both markers must appear on a line by *themselves* to count
+      (``re.MULTILINE`` ``^MARKER$``). That only happens when the
+      shell actually runs ``echo MARKER`` — typed text always has a
+      shell prompt prefix or appears mid-line.
+    - A ``start`` sentinel before the command + an ``end`` sentinel
+      after gives us two robust delimiters. Output between the
+      bare-line start and bare-line end is what the command actually
+      produced, regardless of how long the typed command line was or
+      whether it line-wrapped in the pane.
+    - For interactive commands (``ssh``, ``msfconsole``) that take
+      over the TTY, the start marker is printed by the local shell
+      before the cmd runs and the end marker is printed by whatever
+      shell is in foreground when the queued ``echo END`` finally
+      reaches it (typically the remote bash, after the ssh banner).
+
     The 120s default is an infra timeout (how long tmux waits for the
-    command to print its marker), not an agent budget.
+    end marker to print), not an agent budget.
     """
-    marker = f"__SWARM_DONE_{int(time.time() * 1000)}__"
+    ts = int(time.time() * 1000)
+    start_marker = f"__SWARM_START_{ts}__"
+    end_marker = f"__SWARM_DONE_{ts}__"
+    start_re = re.compile(rf"^{re.escape(start_marker)}\s*$", re.MULTILINE)
+    end_re = re.compile(rf"^{re.escape(end_marker)}\s*$", re.MULTILINE)
 
-    # Send command and marker as two separate send-keys so the marker
-    # always runs, even if the command has weird escape/quoting issues.
-    subprocess.run(
-        ["tmux", "send-keys", "-t", pane_id, command, "Enter"],
-        check=True,
-    )
-    subprocess.run(
-        ["tmux", "send-keys", "-t", pane_id, f"echo {marker}", "Enter"],
-        check=True,
-    )
+    # Send three keystroke streams: start sentinel, command, end
+    # sentinel. Each ``send-keys`` queues a complete ``...\n`` into
+    # the pane TTY; the shell processes them one command at a time.
+    for keystroke in (f"echo {start_marker}", command, f"echo {end_marker}"):
+        subprocess.run(
+            ["tmux", "send-keys", "-t", pane_id, keystroke, "Enter"],
+            check=True,
+        )
 
-    # Poll pane output until marker appears or timeout
-    start = time.time()
+    # Poll pane output until the bare-line end marker appears or we
+    # time out.
+    poll_start = time.time()
     output = ""
-    while time.time() - start < timeout:
+    while time.time() - poll_start < timeout:
         result = subprocess.run(
             ["tmux", "capture-pane", "-t", pane_id, "-p", "-S", "-500"],
             capture_output=True,
             text=True,
         )
         output = result.stdout
-        if marker in output:
-            # Extract everything between the command and the marker
-            lines = output.split("\n")
-            capture = []
-            found_cmd = False
-            for line in lines:
-                if marker in line:
-                    break
-                if found_cmd:
-                    capture.append(line)
-                if command[:40] in line:  # match on first 40 chars of command
-                    found_cmd = True
-            return "\n".join(capture).strip()
+        end_match = end_re.search(output)
+        if end_match:
+            # Slice off everything from the bare-line end marker
+            # onwards, then locate the bare-line start marker (use
+            # the LAST one — re-runs in the same pane could leave
+            # stale start lines from prior calls).
+            before = output[: end_match.start()]
+            start_matches = list(start_re.finditer(before))
+            if start_matches:
+                last_start = start_matches[-1]
+                # Skip past the start marker's whole line.
+                nl = before.find("\n", last_start.end())
+                captured = before[nl + 1:] if nl >= 0 else ""
+            else:
+                # No bare-line start marker found (e.g. it scrolled
+                # off the buffer). Fall back to the entire pre-end
+                # window — better some output than none.
+                captured = before
+
+            # Drop any line that mentions either marker. This catches
+            # the typed ``echo START`` / ``echo END`` lines that the
+            # shell echoes back as ``prompt$ echo MARKER``, plus any
+            # locally-echoed typed text from the moment between
+            # send-keys and the foreground process actually reading.
+            lines = [
+                ln for ln in captured.split("\n")
+                if start_marker not in ln and end_marker not in ln
+            ]
+            return "\n".join(lines).strip()
         time.sleep(0.5)
 
     return f"[TIMEOUT after {timeout}s] Last output:\n{output[-2000:]}"

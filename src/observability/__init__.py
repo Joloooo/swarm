@@ -303,4 +303,10 @@ def write_summary(
     return path
 
 
-
+# Re-export the live renderer so callers can do
+# ``from src.observability import LIVE`` without reaching into a sub-module.
+# Imported at the bottom because ``live.py`` does a lazy ``from src.graph
+# import config``; importing it here at module top-level would be fine
+# either way (live.py defers config access to call time), but bottom keeps
+# the disk-logging surface above the renderer surface for readers.
+from src.observability.live import LIVE, HttpxQuietFilter  # noqa: E402

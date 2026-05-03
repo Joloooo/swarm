@@ -141,38 +141,39 @@ def get_log_file() -> Path:
 
 
 def _verbose_print(event: str, *, agent: str | None, payload: dict) -> None:
-    """Live-stream a human-readable view of a tool event to stderr.
+    """Stream a human-readable view of a tool event to stderr.
 
-    Active only when ``SWARM_VERBOSE=1`` is in the environment (set by
-    the benchmark runner's ``--verbose`` flag). Designed for
-    "I want to watch the agent think" debug sessions: one tool call per
-    stanza, full output not truncated.
+    Routes through :data:`src.observability.LIVE` so the active
+    verbosity mode (``silent`` / ``compact`` / ``verbose``) decides what
+    actually shows up. The live config lives at ``config.verbosity.mode``
+    in ``src/graph.py``.
+
+    The renderer is imported lazily to keep this module dependency-light
+    and to avoid the
+    ``graph → nodes → base → observability → graph`` import cycle.
     """
-    if not os.getenv("SWARM_VERBOSE"):
-        return
     if event not in ("command", "output", "bash_command", "bash_output"):
         return
-    ts = datetime.now().strftime("%H:%M:%S")
-    tag = f"[{agent or '?'} @ {ts}]"
+    try:
+        from src.observability import LIVE  # lazy — avoid import cycle
+    except Exception:
+        return
     if event in ("command", "bash_command"):
-        cmd = payload.get("cmd", "")
-        reason = payload.get("reasoning", "")
         backend = "bash" if event == "bash_command" else "tmux"
-        print(f"\n{tag} ({backend}) $ {cmd}", file=sys.stderr, flush=True)
-        if reason:
-            print(f"{tag}   reasoning: {reason}", file=sys.stderr, flush=True)
-    elif event in ("output", "bash_output"):
-        dur_ms = payload.get("duration_ms", "?")
-        nbytes = payload.get("bytes", "?")
-        exit_code = payload.get("exit_code")
-        tail = payload.get("tail", "") or ""
-        suffix = f", exit={exit_code}" if exit_code is not None else ""
-        print(
-            f"{tag} ↳ output ({dur_ms} ms, {nbytes} bytes{suffix}):",
-            file=sys.stderr, flush=True,
+        LIVE.shell_command(
+            agent=agent,
+            backend=backend,
+            cmd=str(payload.get("cmd", "")),
+            reasoning=str(payload.get("reasoning", "") or ""),
         )
-        for line in str(tail).splitlines() or [""]:
-            print(f"{tag}   {line}", file=sys.stderr, flush=True)
+    else:
+        LIVE.shell_output(
+            agent=agent,
+            exit_code=payload.get("exit_code"),
+            duration_ms=payload.get("duration_ms", "?"),
+            n_bytes=payload.get("bytes", "?"),
+            tail=str(payload.get("tail", "") or ""),
+        )
 
 
 def log_event(event: str, *, agent: str | None = None, **payload: Any) -> None:

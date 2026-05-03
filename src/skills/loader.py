@@ -178,7 +178,7 @@ def register_custom_skill(name: str, system_prompt: str) -> AgentConfig:
     planner needs typed tools it should pick a pre-built skill.
     Idempotent on the same name (overwrites).
     """
-    from src.graph import budgets
+    from src.graph import config
     from src.tools.shell import bash
 
     cfg = AgentConfig(
@@ -187,8 +187,8 @@ def register_custom_skill(name: str, system_prompt: str) -> AgentConfig:
         config_name=name,
         system_prompt=system_prompt,
         tools=[bash],
-        max_tool_calls=budgets.custom_attack_max_tool_calls,
-        max_iterations=budgets.custom_attack_max_iterations,
+        max_tool_calls=config.budgets.custom_attack_max_tool_calls,
+        max_iterations=config.budgets.custom_attack_max_iterations,
     )
     _CACHE[name] = cfg
     _DISPATCHABLE.add(name)
@@ -271,7 +271,7 @@ def register_generic_task(
     ...) so two simultaneous fan-outs don't share a cache slot.
     Idempotent on the same ``task_id`` (overwrites).
     """
-    from src.graph import budgets
+    from src.graph import config as runtime_config
     from src.tools.shell import bash
 
     config_name = f"task-{task_id}"
@@ -283,8 +283,8 @@ def register_generic_task(
         config_name=config_name,
         system_prompt=system_prompt,
         tools=[bash],
-        max_tool_calls=budgets.custom_attack_max_tool_calls,
-        max_iterations=budgets.custom_attack_max_iterations,
+        max_tool_calls=runtime_config.budgets.custom_attack_max_tool_calls,
+        max_iterations=runtime_config.budgets.custom_attack_max_iterations,
     )
     _CACHE[config_name] = cfg
     _DISPATCHABLE.add(config_name)

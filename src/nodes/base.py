@@ -12,10 +12,12 @@ crashes and surfaces them as a visible ``❌`` AIMessage, appends a
 boundary ``✅ [name] Xms — summary`` AIMessage so LangGraph Studio
 chat shows continuous progress, writes one JSONL line per call to
 ``logs/run-<run_id>/nodes.jsonl`` for thesis-grade post-run analysis,
-and (when ``SWARM_VERBOSE=1``) streams a live transition + new
-AIMessages summary to stderr. None of that needs per-subclass code —
-subclasses only override :meth:`execute`. The graph wires nodes
-directly: ``graph.add_node("planner", PlannerNode())``.
+and streams a colored, mode-aware view to stderr via
+:data:`src.observability.LIVE` (the ``compact``/``verbose``/``silent``
+mode lives in ``config.verbosity.mode`` in ``src/graph.py``). None of
+that needs per-subclass code — subclasses only override
+:meth:`execute`. The graph wires nodes directly:
+``graph.add_node("planner", PlannerNode())``.
 
 Also exports ``AgentConfig`` and the skill-agent helper functions that
 ``run_skill_agent`` uses internally. These were ported verbatim from the
@@ -38,9 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -51,7 +51,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
-from src.observability import append_node_event, make_run_id
+from src.observability import LIVE, append_node_event, make_run_id
 from src.state import AgentResult, Finding, Severity
 
 
@@ -178,26 +178,138 @@ PENTESTING_RULES = """\
 - Document every finding with: vulnerability type, affected URL/parameter,
   payload used, evidence (response excerpt), and severity.
 
-### Iteration discipline (do not stop at partial success)
-- A response that *changed* but did not *deliver the goal* means you
-  found the door but have not walked through it. Keep iterating.
-- Signals of partial success that look like dead ends but are not: a
-  status code shifted (200 → 500, 404 → 403), an error message leaked,
-  a body shape changed, an unexpected redirect appeared, a timing
-  difference emerged. Treat any of these as confirmation that your
-  input reached the vulnerable code path — now find the variant that
-  produces the goal.
-- When the obvious payload fails, vary it systematically before giving
-  up: case changes (`OR` → `Or`/`oR`), encoding (URL, double-URL, hex,
-  unicode, base64), doubled keywords that survive a single strip
-  (`OOORR` → `OR`), comment splits (`O/**/R`), whitespace tricks
-  (`%09`, `%0a`, `/**/`), alternate syntaxes for the same operation
-  (`UNION SELECT` vs `UNION ALL SELECT`, `'1'='1` vs `1=1`).
-- Reporting a HIGH or MEDIUM finding without extracted impact — a flag
-  captured, sensitive data leaked, an authenticated session obtained,
-  a command executed, an authorization check bypassed — is incomplete
-  work. The planner will send you back. Push past the door before you
-  return.
+### Demonstrated, not suspected (the standard for "complete")
+- A finding is COMPLETE only when its evidence shows the vulnerability
+  is actually exploitable, with concrete output in the response. A
+  finding that says "the response changed" or "the parser broke"
+  without showing the resulting data or behavior is SUSPECTED, not
+  demonstrated. Suspected findings are incomplete work — the planner
+  will send you back.
+- What "demonstrated" means by vulnerability class:
+    - Data-read (SQLi, IDOR, LFI, path traversal, unauth API access):
+      at least ONE actual record/file/row/document returned in a
+      response body. One row is enough — you do not need to dump the
+      whole table; you just need to prove extraction works end-to-end.
+    - Code execution (RCE, SSTI, deserialization, command injection):
+      OUTPUT of an attacker-controlled command, expression, or
+      computation actually appearing in a response (`id` output, a
+      math result that proves evaluation, a reflected hostname).
+    - Auth bypass / privilege escalation: a privileged action actually
+      performed — a private record fetched, an admin endpoint reached
+      with a non-admin session, a role change observable in a
+      follow-up probe.
+    - XSS (reflected or stored): the payload appearing unescaped in a
+      response such that a browser would execute it. A 200 response
+      that strips your tags is NOT demonstrated XSS.
+    - SSRF: confirmation that a request was actually made to the
+      attacker-supplied URL (echo from the receiver, distinctive
+      response, or response-shape change tied to the URL contents).
+- Signals that look like dead ends but are not: a status code shifted
+  (200 → 500, 404 → 403), an error message leaked, a body shape
+  changed, an unexpected redirect appeared, a timing difference
+  emerged. Treat any of these as confirmation that your input reached
+  the vulnerable code path — now find the variant that produces actual
+  exploit output.
+- This standard is not benchmark-specific. It is what a real pentest
+  reviewer requires before accepting a finding as confirmed. Findings
+  that have not reached this bar should be downgraded to INFO with a
+  note that exploitability has not yet been demonstrated, OR pushed
+  further until they do reach it.
+- Push past the door before you return. If your bypass changed the
+  response from forbidden to empty, you bypassed the gate but the
+  underlying query had no matching data — try combining the bypass
+  with an injection that forces matches (e.g. a tautology), so the
+  response actually contains data you can prove was extracted.
+
+### Diversity over depth: brainstorm before iterating
+- When your probes return the same response repeatedly (uniform 500s,
+  identical "blocked" messages, identical empty results), your input
+  contains SOMETHING the server recognizes and rejects. Generating 30
+  variants of the same idea will not break that pattern.
+- Before iterating further, stop and brainstorm. Ask: *what are all
+  the CATEGORIES of variation that could matter for THIS input type?*
+  The categories depend on what you are sending — a text field, a
+  numeric ID, a filename, a header, a JSON body, and a cookie all
+  have different variation spaces. Examples of category types you
+  might generate:
+    - shape and format (string vs array vs object, integer vs string,
+      escaped vs raw)
+    - case (upper, lower, mixed, title)
+    - encoding (URL, double-URL, hex, base64, unicode, HTML entity)
+    - character substitution (homoglyphs, lookalike Unicode, alternate
+      operators or tokens with the same semantics)
+    - structural splits (whitespace tricks, comments inserted inside
+      tokens, padding, alternative separators)
+    - obfuscation that survives a single transformation (doubled
+      tokens, nested encoding, recursive escapes)
+    - boundary values (empty, very long, leading/trailing whitespace,
+      negative, zero, off-by-one, special characters, null bytes)
+- Pick AT LEAST 5 categories that plausibly apply to your specific
+  target. The categories you list above are starting examples — the
+  right set depends on the protocol, parser, and filter you are
+  hitting. Generate them yourself from what you have observed.
+- For each chosen category, generate 4-6 distinct variants. A category
+  sampled with one example tells you nothing — you need enough samples
+  to see whether any survive the filter.
+- Fire all variants in ONE batched command (a bash for-loop, parallel
+  curl, scripted batch). A single LLM turn should produce 20+ probe
+  results, not 1-3. The cost of an extra payload is milliseconds; the
+  cost of an extra LLM turn is seconds.
+- Do NOT generate 30 variants of one category — that is depth without
+  breadth, and it is the single most common failure mode of stuck
+  agents. The server probably recognizes the pattern in your category;
+  switching to a category it does not recognize is what breaks through.
+- Only after sampling across multiple categories should you conclude
+  the input is well-defended.
+
+### Transformation hypothesis (when payloads fail uniformly)
+- A payload may fail because it is wrong for the SINK (the SQL/HTML/
+  shell/etc. parser at the end of the request path) — OR because it
+  is being CHANGED before it reaches the sink. A good agent must test
+  both. Most stuck agents fail on the second possibility because they
+  only iterate on sink-grammar variants.
+- When normal payloads fail uniformly (every attempt returns the same
+  error or block), explicitly hypothesize what's between your input
+  and the sink:
+    1. Is there a blacklist filter that STRIPS forbidden tokens?
+       (one-pass? recursive? case-sensitive? regex-based?)
+    2. Is there an allowlist that REJECTS non-matching values?
+    3. Is the input being normalized before validation
+       (lowercased, trimmed, decoded, canonicalized)?
+    4. Is encoding being applied or unwrapped at the wrong stage,
+       so the validator sees one value and the sink sees another?
+    5. Is there a length limit that truncates your payload before
+       the sink sees the dangerous tail?
+    6. Is the parser type-coercing your input so the sink sees a
+       different type than you sent?
+- For each hypothesis, design probes that EXPLOIT the transformation
+  rather than fighting it. The general rule: build inputs that are
+  HARMLESS-LOOKING before the transformation but DANGEROUS after it.
+  Examples of how the same trick generalizes across vulnerability
+  classes:
+    - One-pass keyword stripping: nest the forbidden token inside
+      itself so it survives one strip — the substring removed is
+      surrounded by characters that recombine into the token.
+    - Case-sensitive blacklist: every case permutation of the blocked
+      token is a candidate.
+    - Encoding-decoding asymmetry: encode parts that get decoded
+      AFTER the validator runs, so the validator sees a benign value.
+    - Length truncation: pad with junk so what survives the cut is
+      your real payload.
+    - Type coercion: if a string is checked but the sink takes a
+      number (or vice versa), send the alternate type with the same
+      apparent value.
+- Differential probing: build PAIRS of inputs that differ in exactly
+  one property (one with the forbidden token, one without; one with
+  case A, one with case B; one with encoding X, one with encoding Y),
+  fire both, and read the difference in the response. The smallest
+  difference that produces a behavior change is your strongest signal
+  about which transformation is actually applied.
+- The principle in one line: a payload may fail because it is wrong
+  for the sink, OR because it is changed before reaching the sink.
+  Test both — it generalizes to every vulnerability class (SQL, XSS,
+  command injection, path traversal, SSRF, file upload, header
+  injection, deserialization, template injection).
 
 ### Severity Classification
 - CRITICAL: Remote code execution, full database dump, admin access
@@ -257,6 +369,49 @@ Only `Title:` and `Severity:` are required; the rest are optional but
 strongly preferred. JSON output of the form
 ``{"findings": [{"title": "...", "severity": "...", ...}]}`` is also
 accepted as a fallback.
+
+### Picking the right Category — mechanism, not symptom
+
+The `Category` field drives downstream decisions: which skills the
+planner re-dispatches, which web-search query is built, which knowledge
+base is consulted. Getting it right is critical. The rule:
+
+**Pick the category of the underlying SINK MECHANISM, not the surface
+symptom you observed first.** When a vulnerability spans multiple
+layers (e.g. an authorization gate that wraps a SQL query, or a file
+upload that goes through deserialization, or a redirect that triggers
+a template engine), categorize by the MECHANISM that, if successfully
+exploited, demonstrates impact — not by the gate or wrapper that
+blocked your first probe.
+
+Concrete heuristics for choosing the mechanism:
+- The response contains a database error, a SQL syntax message, or
+  the input causes HTTP 500 specifically when you add quotes/semicolons
+  → category is `sqli`, even if the parameter is also auth-gated or
+  wrapped in JSON validation.
+- The response reflects attacker-controlled markup or executes script
+  → `xss`, even if the input was first stored via a normal form.
+- The response contains output of a shell command, file path
+  enumeration, or system error from the OS → `lfi` / command-injection,
+  even if the param is user-profile-related.
+- The response contains data belonging to another user/account
+  reachable by changing an ID-like value → `idor`, even if there was
+  also a parser inconsistency along the way.
+- A request triggers a server-initiated network call to your URL →
+  `ssrf`, regardless of how the input was framed (PDF generator,
+  webhook, image fetcher, etc.).
+- Template syntax `{{...}}` or `${...}` evaluates server-side →
+  `ssti`, even if the surface looks like reflective XSS.
+- An access-control check is bypassed AND the resulting response
+  shows previously-restricted data → `auth`. If the bypass instead
+  reveals SQL behavior, the category is `sqli` (the auth gate is
+  the surface; the SQL injection is the mechanism).
+
+If you genuinely cannot tell which mechanism is the underlying one,
+report multiple findings (one per mechanism) rather than a single
+`logic` or `info` finding that hides the underlying class. A finding
+labeled `auth` or `logic` will not trigger the right follow-up
+research; a finding labeled with the actual sink mechanism will.
 """
 
 
@@ -322,11 +477,25 @@ def _looks_like_refusal(text: str) -> bool:
 # ────────────────────────────────────────────────────────────────────────────
 
 
+_BENCHMARK_FLAG_ADDENDUM = """\
+## Benchmark mode active
+
+This run has an explicit success criterion: any response containing a
+string matching the pattern `FLAG{...}` is the goal. Scan every
+response body and tool output for this pattern. The moment you see a
+string that matches, extract it verbatim and include it in your
+finding's Evidence field. Do not stop iterating until the flag is
+extracted, the iteration budget is exhausted, or you have genuinely
+demonstrated that no further variation will surface it.
+"""
+
+
 def _build_system_message(
     config: AgentConfig,
     target_url: str,
     runtime_config: dict | None = None,
     phase1_findings: list[Finding] | None = None,
+    expected_flag: str | None = None,
 ) -> str:
     """Assemble the full system prompt from config + knowledge layers.
 
@@ -339,16 +508,24 @@ def _build_system_message(
     preamble, no RAG hint. Used by skills whose value depends on
     minimal framing (e.g. the request-builder skill, which performs
     pure technical Q&A and would be poisoned by pentest vocabulary).
+
+    When ``expected_flag`` is non-empty, a small benchmark-mode
+    addendum is appended telling the worker that the run has an
+    explicit flag-extraction success criterion. In real-pentest runs
+    the field is empty and the addendum is not added.
     """
     from src.config import is_enabled
 
     # Minimal-framing path: the SKILL.md body is the entire system
-    # prompt. Phase 1 findings still get appended because they're
-    # observed evidence the agent needs to reason over, not framing.
+    # prompt. Phase 1 findings and the benchmark-flag addendum still
+    # get appended because they are observed evidence / explicit success
+    # criteria the agent needs to reason over, not framing.
     if config.skip_base_prompt:
         parts = []
         if config.system_prompt:
             parts.append(config.system_prompt)
+        if expected_flag:
+            parts.append(_BENCHMARK_FLAG_ADDENDUM)
         if phase1_findings:
             findings_text = "\n".join(
                 f"- [{f.severity.value.upper()}] {f.title}"
@@ -407,6 +584,12 @@ def _build_system_message(
             "that you're unsure about, describe what you need and the system will "
             "provide relevant knowledge snippets.\n"
         )
+
+    # Benchmark-mode addendum: only fires when the runner populates
+    # state["expected_flag"]. Real pentest runs leave it empty and this
+    # block is skipped, so the assistant's behavior is unchanged.
+    if expected_flag:
+        parts.append(_BENCHMARK_FLAG_ADDENDUM)
 
     return "\n\n".join(parts)
 
@@ -583,8 +766,11 @@ class BaseNode(ABC):
             3. On crash, return a ``❌ [name] crashed`` AIMessage and
                log the JSONL row with ``error`` set, instead of
                propagating the exception and killing the graph.
-            4. With ``SWARM_VERBOSE=1``, stream the node transition and
-               every new AIMessage to stderr.
+            4. Stream a colored, mode-aware view of the node transition
+               to stderr via :data:`src.observability.LIVE`. The
+               ``compact`` / ``verbose`` / ``silent`` mode lives in
+               ``config.verbosity.mode`` (see ``src/graph.py``); the
+               renderer reads it on every call.
 
         ``run_id`` is read from state. If absent (e.g. Studio runs that
         bypass the runner), one is derived on the fly from target_url.
@@ -627,34 +813,24 @@ class BaseNode(ABC):
             "summary": summary,
             "result": result,
         })
-        if os.getenv("SWARM_VERBOSE"):
-            ts_short = time.strftime("%H:%M:%S")
-            print(
-                f"\n─── [{ts_short}] node `{name}` finished in {dt_ms} ms ───\n"
-                f"    {summary}",
-                file=sys.stderr, flush=True,
+        # Live terminal view — silent/compact/verbose decided by the
+        # renderer from config.verbosity.mode. In compact mode the
+        # planner's JSON is parsed into a one-line "→ recon ..." trace;
+        # in verbose mode the full multi-line dump is reproduced; in
+        # silent mode this is a no-op. Findings (if any) get their own
+        # colored line so they stand out in the stream.
+        new_msgs = list(result.get("messages") or [])
+        LIVE.node_finished(name, dt_ms, summary, new_msgs)
+        for f in result.get("findings") or []:
+            sev = getattr(f, "severity", None)
+            sev_str = getattr(sev, "value", None) or str(sev or "info")
+            LIVE.finding(
+                severity=sev_str,
+                title=getattr(f, "title", "") or "",
+                agent=getattr(f, "agent_id", None),
+                url=getattr(f, "url", None) or None,
+                payload=getattr(f, "evidence", None) or None,
             )
-            # Print any new AI messages this node added so the full
-            # reasoning stream lives in the same terminal.
-            for msg in result.get("messages") or []:
-                content = getattr(msg, "content", None)
-                if not content:
-                    continue
-                # Filter out the ✅ boundary messages we ourselves emit
-                # (added below) so we don't log them twice.
-                kw = getattr(msg, "additional_kwargs", None) or {}
-                if kw.get("node") and isinstance(content, str) and (
-                    content.startswith("✅ [") or content.startswith("❌ [")
-                ):
-                    continue
-                role = type(msg).__name__
-                text = content if isinstance(content, str) else str(content)
-                print(
-                    f"    └── {role}:",
-                    file=sys.stderr, flush=True,
-                )
-                for line in text.splitlines() or [""]:
-                    print(f"        {line}", file=sys.stderr, flush=True)
         msgs = list(result.get("messages") or [])
         msgs.append(
             AIMessage(
@@ -842,10 +1018,15 @@ class BaseNode(ABC):
 
         target_url = state.get("target_url", "")
 
-        # Build system message with all knowledge layers
+        # Build system message with all knowledge layers. The
+        # benchmark-mode addendum only fires when state.expected_flag
+        # is populated (the xbow_runner sets it; real pentest runs
+        # leave it empty).
         phase1_findings = state.get("phase1_findings")
+        expected_flag = state.get("expected_flag") or ""
         system_msg = _build_system_message(
             config, target_url, runtime_config, phase1_findings,
+            expected_flag=expected_flag,
         )
 
         # Create the agent with iteration limit

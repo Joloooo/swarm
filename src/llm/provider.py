@@ -29,12 +29,58 @@ class Provider(str, Enum):
 
 @dataclass
 class LLMConfig:
-    """Configuration for an LLM instance."""
+    """Configuration for an LLM instance.
+
+    The ``reasoning_*`` fields are Codex-specific (consumed by
+    ``src.llm.codex.ChatCodex``) and silently ignored by other providers.
+    Defaults are sourced from ``config.budgets.reasoning_*`` (see
+    ``src/graph.py``) so a run can dial reasoning depth via env var
+    without code edits — e.g. ``SWARM_REASONING_EFFORT=high`` for a
+    cheaper run during development.
+    """
 
     provider: Provider = Provider.CODEX
-    model: str = "gpt-5.4-mini"
+    # GPT-5.5 — the May-2026 default per the official Codex CLI
+    # (BestPractice-Agents/openai-codex/codex-rs/models-manager/models.json).
+    # Other valid Codex slugs: "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex",
+    # "gpt-5.2", "codex-auto-review".
+    model: str = "gpt-5.5"
     temperature: float = 0.0
     max_tokens: int = field(default_factory=lambda: config.budgets.llm_max_tokens)
+    # ── Codex-only reasoning controls ─────────────────────────────────
+    # Effort: how hard the model thinks before responding. Higher levels
+    # produce longer (and more expensive) internal chain-of-thought.
+    #
+    # Valid values (lowercase, exact strings — anything else is rejected
+    # by the upstream API):
+    #     "none"     — disable reasoning entirely (not all models accept this)
+    #     "minimal"  — internal-only level, rarely useful in practice
+    #     "low"      — fast, cheap, light reasoning
+    #     "medium"   — balanced (gpt-5.5 default upstream)
+    #     "high"     — deeper reasoning, more tokens, slower
+    #     "xhigh"    — "extra-high" / maximum reasoning depth (the
+    #                  highest level the API exposes; what this codebase
+    #                  defaults to so benchmark debugging gets the
+    #                  fullest chain-of-thought visible in nodes.jsonl)
+    #
+    # Source of truth: ReasoningEffort enum in
+    # codex-rs/protocol/src/openai_models.rs.
+    reasoning_effort: str | None = field(
+        default_factory=lambda: getattr(config.budgets, "reasoning_effort", "xhigh")
+    )
+    # Summary: whether human-readable chain-of-thought is streamed back.
+    #
+    # Valid values (lowercase, exact strings):
+    #     "auto"     — server-chosen length (default in upstream Codex)
+    #     "concise"  — short summary per reasoning block
+    #     "detailed" — fuller summary, more tokens, more debug power
+    #     "none"     — do NOT return summaries (omits the field on the wire)
+    #
+    # Source of truth: ReasoningSummary enum in
+    # codex-rs/protocol/src/config_types.rs.
+    reasoning_summary: str | None = field(
+        default_factory=lambda: getattr(config.budgets, "reasoning_summary", "detailed")
+    )
     # Provider-specific kwargs (e.g. base_url for OpenRouter)
     extra: dict[str, Any] | None = None
 
@@ -149,6 +195,8 @@ def get_llm(config: LLMConfig | None = None) -> BaseChatModel:
             model=config.model,
             temperature=config.temperature,
             max_tokens=config.max_tokens,
+            reasoning_effort=config.reasoning_effort,
+            reasoning_summary=config.reasoning_summary,
         )
 
     raise ValueError(f"Unknown provider: {config.provider}")

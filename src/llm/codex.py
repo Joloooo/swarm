@@ -167,6 +167,27 @@ def _parse_sse_lines(lines: Iterator[str]) -> Iterator[dict[str, Any]]:
                 pass
 
 
+def _build_reasoning_block(
+    effort: str | None, summary: str | None
+) -> dict[str, str] | None:
+    """Build the ``reasoning`` JSON sub-object for a Codex request.
+
+    Mirrors the upstream Codex CLI logic
+    (``codex-rs/core/src/client.rs::create_reasoning_param``). When the
+    summary is ``"none"``, the wire field is omitted entirely (matches the
+    Rust ``ReasoningSummaryConfig::None`` → ``None`` branch). Returns
+    ``None`` when neither effort nor a real summary is set, so the whole
+    ``reasoning`` key is dropped from the body.
+    """
+    block: dict[str, str] = {}
+    if effort:
+        block["effort"] = effort
+    # "none" disables summaries — omit the field rather than sending it.
+    if summary and summary != "none":
+        block["summary"] = summary
+    return block or None
+
+
 def stream_codex(
     tokens: CodexTokens,
     *,
@@ -177,16 +198,32 @@ def stream_codex(
     tool_choice: str | None = None,
     temperature: float | None = None,
     max_output_tokens: int | None = None,
+    reasoning_effort: str | None = None,
+    reasoning_summary: str | None = None,
     timeout: float = 120.0,
 ) -> Iterator[dict[str, Any]]:
-    """Stream SSE events from the Codex Responses API."""
+    """Stream SSE events from the Codex Responses API.
+
+    ``reasoning_effort`` valid values: "none" | "minimal" | "low" |
+    "medium" | "high" | "xhigh" (lowercase, exact).
+    ``reasoning_summary`` valid values: "auto" | "concise" | "detailed" |
+    "none" (lowercase, exact). When ``"none"`` the field is dropped.
+    """
     body: dict[str, Any] = {
         "model": model,
         "input": input_items,
         "store": False,
         "stream": True,
+        # "reasoning.encrypted_content" is the opaque blob used for
+        # multi-turn chaining of internal reasoning. Human-readable
+        # summaries are NOT requested via this array — they come back
+        # automatically when ``reasoning.summary`` is set in the body
+        # (see ``_build_reasoning_block``).
         "include": ["reasoning.encrypted_content"],
     }
+    reasoning_block = _build_reasoning_block(reasoning_effort, reasoning_summary)
+    if reasoning_block:
+        body["reasoning"] = reasoning_block
     if instructions:
         body["instructions"] = instructions
     if tools:
@@ -208,7 +245,11 @@ def stream_codex(
 
     # Some parameters are silently unsupported by certain models.
     # Retry once with the offending parameter removed on 400.
-    removable_keys = ["temperature", "max_output_tokens", "tool_choice"]
+    # ``reasoning`` is included so older models that don't support it
+    # gracefully fall back instead of erroring.
+    removable_keys = [
+        "temperature", "max_output_tokens", "tool_choice", "reasoning",
+    ]
 
     with httpx.Client(timeout=timeout) as client:
         while True:
@@ -250,9 +291,14 @@ async def astream_codex(
     tool_choice: str | None = None,
     temperature: float | None = None,
     max_output_tokens: int | None = None,
+    reasoning_effort: str | None = None,
+    reasoning_summary: str | None = None,
     timeout: float = 120.0,
 ) -> Any:
-    """Async stream SSE events from the Codex Responses API."""
+    """Async stream SSE events from the Codex Responses API.
+
+    Reasoning controls — see ``stream_codex`` docstring for valid values.
+    """
     body: dict[str, Any] = {
         "model": model,
         "input": input_items,
@@ -260,6 +306,9 @@ async def astream_codex(
         "stream": True,
         "include": ["reasoning.encrypted_content"],
     }
+    reasoning_block = _build_reasoning_block(reasoning_effort, reasoning_summary)
+    if reasoning_block:
+        body["reasoning"] = reasoning_block
     if instructions:
         body["instructions"] = instructions
     if tools:
@@ -279,7 +328,9 @@ async def astream_codex(
     if tokens.account_id:
         headers["ChatGPT-Account-Id"] = tokens.account_id
 
-    removable_keys = ["temperature", "max_output_tokens", "tool_choice"]
+    removable_keys = [
+        "temperature", "max_output_tokens", "tool_choice", "reasoning",
+    ]
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         while True:
@@ -357,18 +408,62 @@ def _extract_text_delta(event: dict) -> str | None:
     return None
 
 
+# SSE event types that carry the model's HUMAN-READABLE chain-of-thought.
+# Source of truth: the upstream Codex CLI parser at
+# codex-rs/codex-api/src/sse/responses.rs (lines 325-423). Three event
+# types are relevant:
+#
+#   response.reasoning_summary_text.delta   — the user-visible summary
+#       text we want. Streamed as deltas; .delta has the chunk and
+#       .summary_index correlates chunks to summary blocks.
+#   response.reasoning_summary_part.added   — boundary marker between
+#       summary blocks. We insert a "\n\n" separator so multiple
+#       summary blocks in one response stay readable.
+#   response.reasoning_text.delta           — the OPAQUE internal
+#       reasoning stream. Useful only for stateful chaining via the
+#       encrypted_content blob; not human-readable. We DROP this — the
+#       summary stream above gives us debug visibility without spending
+#       tokens parsing the raw reasoning.
+_REASONING_SUMMARY_DELTA = "response.reasoning_summary_text.delta"
+_REASONING_SUMMARY_PART_ADDED = "response.reasoning_summary_part.added"
+
+
+def _extract_reasoning_delta(event: dict) -> str | None:
+    """Return the reasoning-summary delta text, or a separator on a part
+    boundary, or None if this event doesn't carry reasoning."""
+    etype = str(event.get("type", ""))
+    if etype == _REASONING_SUMMARY_DELTA:
+        delta = event.get("delta")
+        if isinstance(delta, str):
+            return delta
+    elif etype == _REASONING_SUMMARY_PART_ADDED:
+        # New summary block starting — return a separator so concatenated
+        # output stays readable across multiple blocks.
+        return "\n\n"
+    return None
+
+
 def parse_stream_to_response(events: Iterator[dict]) -> CodexResponse:
     """Consume an SSE event stream and build a CodexResponse."""
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     metadata: dict[str, Any] = {}
     usage: dict[str, int] | None = None
 
     for event in events:
-        # Accumulate text deltas
+        # Accumulate visible text deltas
         delta = _extract_text_delta(event)
         if delta:
             text_parts.append(delta)
+
+        # Accumulate reasoning-summary deltas (the model's chain-of-thought
+        # made visible — gpt-5.x's reasoning is the load-bearing step;
+        # logging it gives us debug visibility into WHY each tool call
+        # was chosen, not just what was emitted).
+        rdelta = _extract_reasoning_delta(event)
+        if rdelta is not None:
+            reasoning_parts.append(rdelta)
 
         # Capture completed function calls
         etype = str(event.get("type", ""))
@@ -391,14 +486,22 @@ def parse_stream_to_response(events: Iterator[dict]) -> CodexResponse:
                 # Finish reason
                 if resp.get("status") in ("completed", "done"):
                     metadata["finish_reason"] = "tool_calls" if tool_calls else "stop"
-                # Usage
+                # Usage — including the separately-billed reasoning tokens.
+                # Path: usage.output_tokens_details.reasoning_tokens.
+                # See codex-rs/codex-api/src/sse/responses.rs:174-177.
                 u = resp.get("usage")
                 if isinstance(u, dict):
+                    details = u.get("output_tokens_details") or {}
                     usage = {
-                        "input_tokens": u.get("input_tokens", 0),
-                        "output_tokens": u.get("output_tokens", 0),
-                        "total_tokens": u.get("total_tokens", 0),
+                        "input_tokens":     u.get("input_tokens", 0),
+                        "output_tokens":    u.get("output_tokens", 0),
+                        "reasoning_tokens": details.get("reasoning_tokens", 0),
+                        "total_tokens":     u.get("total_tokens", 0),
                     }
+
+    reasoning_summary = "".join(reasoning_parts).strip() or None
+    if reasoning_summary:
+        metadata["reasoning_summary"] = reasoning_summary
 
     return CodexResponse(
         content="".join(text_parts),
@@ -409,8 +512,14 @@ def parse_stream_to_response(events: Iterator[dict]) -> CodexResponse:
 
 
 async def aparse_stream_to_response(events) -> CodexResponse:
-    """Async version: consume an async SSE event stream."""
+    """Async version: consume an async SSE event stream.
+
+    Mirrors :func:`parse_stream_to_response` — captures reasoning
+    summary text and reasoning_tokens usage in addition to the visible
+    response. See that function's docstring for details.
+    """
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     metadata: dict[str, Any] = {}
     usage: dict[str, int] | None = None
@@ -419,6 +528,10 @@ async def aparse_stream_to_response(events) -> CodexResponse:
         delta = _extract_text_delta(event)
         if delta:
             text_parts.append(delta)
+
+        rdelta = _extract_reasoning_delta(event)
+        if rdelta is not None:
+            reasoning_parts.append(rdelta)
 
         etype = str(event.get("type", ""))
         if etype == "response.output_item.done":
@@ -440,11 +553,17 @@ async def aparse_stream_to_response(events) -> CodexResponse:
                     metadata["finish_reason"] = "tool_calls" if tool_calls else "stop"
                 u = resp.get("usage")
                 if isinstance(u, dict):
+                    details = u.get("output_tokens_details") or {}
                     usage = {
-                        "input_tokens": u.get("input_tokens", 0),
-                        "output_tokens": u.get("output_tokens", 0),
-                        "total_tokens": u.get("total_tokens", 0),
+                        "input_tokens":     u.get("input_tokens", 0),
+                        "output_tokens":    u.get("output_tokens", 0),
+                        "reasoning_tokens": details.get("reasoning_tokens", 0),
+                        "total_tokens":     u.get("total_tokens", 0),
                     }
+
+    reasoning_summary = "".join(reasoning_parts).strip() or None
+    if reasoning_summary:
+        metadata["reasoning_summary"] = reasoning_summary
 
     return CodexResponse(
         content="".join(text_parts),
@@ -548,16 +667,47 @@ def _convert_tools_to_responses_format(tools: list[dict]) -> list[dict]:
     return converted
 
 
+def _build_additional_kwargs(resp: CodexResponse) -> dict[str, Any]:
+    """Promote reasoning summary + reasoning-token count onto the AIMessage.
+
+    These flow into ``additional_kwargs`` so they're automatically
+    serialized into the per-node JSONL audit log (BaseNode.__call__
+    dumps every message including additional_kwargs). That gives us
+    end-to-end visibility into the model's chain-of-thought without
+    extra state plumbing or a dedicated reasoning_log field.
+
+    Returns an empty dict when neither piece of data is present, so the
+    AIMessage stays clean for non-reasoning models.
+    """
+    extras: dict[str, Any] = {}
+    summary = (resp.response_metadata or {}).get("reasoning_summary")
+    if summary:
+        extras["reasoning_summary"] = summary
+    if resp.usage and resp.usage.get("reasoning_tokens"):
+        extras["reasoning_tokens"] = resp.usage["reasoning_tokens"]
+    return extras
+
+
 class ChatCodex(BaseChatModel):
     """LangChain chat model that uses your ChatGPT subscription via the Codex backend.
 
     No API keys needed — uses OAuth tokens from the Codex CLI (~/.codex/auth.json).
     """
 
-    model: str = "gpt-5.4-mini"
+    model: str = "gpt-5.5"
     temperature: float | None = None
     max_tokens: int | None = None
     codex_home: str | None = None
+    # ── Reasoning controls (see LLMConfig for valid values) ──
+    # effort:  "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+    # summary: "auto" | "concise" | "detailed" | "none"
+    # Both default to None here — when None the request omits the
+    # corresponding wire field, letting the upstream API fall back to the
+    # model's own default. The user-facing knobs flow through LLMConfig
+    # → ChatCodex(reasoning_effort=..., reasoning_summary=...) populated
+    # by get_llm() in src/llm/provider.py.
+    reasoning_effort: str | None = None
+    reasoning_summary: str | None = None
 
     _tokens: CodexTokens | None = None
 
@@ -644,6 +794,13 @@ class ChatCodex(BaseChatModel):
             kwargs["tools"] = _convert_tools_to_responses_format(tools)
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
+        # Reasoning controls — flow through to stream_codex / astream_codex
+        # which build the wire-level ``reasoning`` block. None values are
+        # dropped at the wire-build stage so non-reasoning models still work.
+        if self.reasoning_effort:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        if self.reasoning_summary:
+            kwargs["reasoning_summary"] = self.reasoning_summary
         # Note: temperature and max_tokens are not always supported by the
         # Codex backend (depends on the model). We pass them through and
         # let the stream function handle 400 errors by retrying without them.
@@ -680,6 +837,7 @@ class ChatCodex(BaseChatModel):
             tool_calls=lc_tool_calls,
             response_metadata=resp.response_metadata,
             usage_metadata=resp.usage,
+            additional_kwargs=_build_additional_kwargs(resp),
         )
         return ChatResult(generations=[ChatGeneration(message=message)])
 
@@ -713,6 +871,7 @@ class ChatCodex(BaseChatModel):
             tool_calls=lc_tool_calls,
             response_metadata=resp.response_metadata,
             usage_metadata=resp.usage,
+            additional_kwargs=_build_additional_kwargs(resp),
         )
         return ChatResult(generations=[ChatGeneration(message=message)])
 

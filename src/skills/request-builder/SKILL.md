@@ -6,8 +6,8 @@ metadata:
   methodology: skill
   config_name: request-builder
   tools: [bash]
-  max_tool_calls: 8
-  max_iterations: 6
+  max_tool_calls: 12
+  max_iterations: 10
   skip_base_prompt: true
 ---
 

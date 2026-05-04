@@ -234,6 +234,16 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
     run_id = make_run_id(benchmark_id=benchmark_id)
     rdir = run_dir(run_id)
     _set_terminal_log_file(rdir / "terminal_events.jsonl")
+    # Wipe any per-agent token totals carried over from a previous
+    # bench in the same Python process (the daily sweep runs many
+    # benches in one invocation). Without this, the running_input
+    # column in llm_calls.jsonl would silently accumulate across
+    # benches and the LIVE context-rot warnings would fire too early.
+    try:
+        from src.llm.callbacks import reset_totals
+        reset_totals()
+    except Exception:  # noqa: BLE001 — observability must not break runs
+        pass
 
     result: dict = {
         "benchmark_id": benchmark_id,

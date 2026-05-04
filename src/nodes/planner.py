@@ -481,6 +481,35 @@ def _final_text(messages: list) -> str:
     return ""
 
 
+# Hints that an exception came from a transient transport / capacity issue
+# rather than a programming bug or a hard refusal. Used by
+# ``PlannerNode._invoke_with_transient_retry`` to decide whether to retry
+# vs let the error propagate. We match against the typed Codex exception
+# names AND the raw httpx wording — ChatCodex translates httpx errors to
+# ``CodexTransportError``, but a wrapped or recursed call could still
+# surface the original httpx text.
+_TRANSIENT_HINTS = (
+    "codextransporterror",
+    "codexratelimiterror",
+    "codexserveroverloadederror",
+    "peer closed connection",
+    "incomplete chunked read",
+    "incomplete read",
+    "remoteprotocolerror",
+    "readtimeout",
+    "connecttimeout",
+    "connectionreset",
+    "connection reset",
+)
+
+
+def _looks_transient(err: Exception) -> bool:
+    """Best-effort classifier for retryable supervisor failures."""
+    name = type(err).__name__.lower()
+    msg = str(err).lower()
+    return any(h in name or h in msg for h in _TRANSIENT_HINTS)
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Forcing function — `_maybe_force_recovery`
 #
@@ -573,6 +602,145 @@ def _finding_attr(finding, name: str, default: str = "") -> str:
     if isinstance(finding, dict):
         return str(finding.get(name) or default)
     return default
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Tool-output evidence digest for the supervisor
+#
+# The planner sees worker ``agent_results`` (findings, completed/refused) but
+# NOT the raw bash/HTTP outputs that produced them. That gap is the reason a
+# 500-on-quote SQL-shape signal can stay invisible to the planner across many
+# turns even when every worker bash trace already contains it. The aggregator
+# below mines the most-recent worker turn's ``ToolMessage`` blob for two
+# coarse but high-signal patterns — HTTP status histogram, bash exit-code
+# histogram — plus a heuristic SQLi flag (5xx with quote/comment/null bytes
+# in the same line). The digest is appended as a SYSTEM NOTE HumanMessage
+# right before the supervisor LLM call, alongside the existing loop-check
+# and expected-flag notes.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+_HTTP_STATUS_RE = re.compile(r"HTTP/[\d.]+\s+(\d{3})\b")
+# Also pick up inline patterns workers use when summarizing themselves:
+# ``status=500``, ``status: 500``, ``-> 500``, ``code=500``.
+_INLINE_STATUS_RE = re.compile(r"\b(?:status|code|->)\s*[:=]?\s*(\d{3})\b", re.I)
+_BASH_EXIT_RE = re.compile(r"\[exit=(\d+)\b")
+
+# SQL-shape characters/keywords that, when seen near a 5xx response, are the
+# canonical SQL-injection smoking gun. Lowercase compare. We deliberately
+# avoid bare ``"`` and ``'`` on their own — too noisy in mixed bash output —
+# and require them to appear inside a payload-like context (``--``, ``OR``,
+# ``UNION``, ``null``) or as part of a `payload="..."` annotation that
+# workers commonly emit when iterating.
+_SQLI_HINTS = ("'--", "\"--", "' or ", "\" or ", "union", " null,", "[]",
+               "payload=\"'", "payload='\"", "or 1=1", "1=1--")
+
+
+def _summarize_recent_evidence(messages: list) -> str | None:
+    """Build a one-page evidence digest from the most-recent worker turn.
+
+    Walks ``messages`` backward, collecting ``ToolMessage`` content until we
+    cross *two* node-boundary AIMessages (the ``✅``/``❌`` markers
+    ``BaseNode.__call__`` injects). That means we capture only the latest
+    worker's tool I/O, not the cumulative history — keeps the digest
+    relevant and the prompt size bounded.
+
+    Returns ``None`` when no useful signal is present. Otherwise a short
+    multi-line string suitable to wrap in a ``[SYSTEM NOTE]``.
+    """
+    # Lazy import — keeps the planner module dependency-light at top.
+    from collections import Counter
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    tool_blobs: list[str] = []
+    boundary_seen = 0
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            kw = getattr(msg, "additional_kwargs", None) or {}
+            content = getattr(msg, "content", None)
+            if (
+                kw.get("node")
+                and isinstance(content, str)
+                and (content.startswith("✅ [") or content.startswith("❌ ["))
+            ):
+                boundary_seen += 1
+                # Stop once we've crossed into the previous worker's slice.
+                if boundary_seen >= 2:
+                    break
+        elif isinstance(msg, ToolMessage):
+            content = (
+                msg.content if isinstance(msg.content, str) else str(msg.content)
+            )
+            tool_blobs.append(content)
+
+    if not tool_blobs:
+        return None
+
+    blob = "\n".join(tool_blobs)
+    http_codes: Counter = Counter()
+    exit_codes: Counter = Counter()
+    for m in _HTTP_STATUS_RE.finditer(blob):
+        http_codes[m.group(1)] += 1
+    for m in _INLINE_STATUS_RE.finditer(blob):
+        http_codes[m.group(1)] += 1
+    for m in _BASH_EXIT_RE.finditer(blob):
+        exit_codes[m.group(1)] += 1
+
+    # SQLi-on-5xx detection. Slide a 3-line window across the blob and flag
+    # any window that contains both a 5xx status and a SQL-shape hint —
+    # workers commonly emit ``=== payload "x' OR 1=1 ===`` on one line and
+    # ``HTTP/1.1 500 …`` on the next, so single-line scanning misses the
+    # canonical smoking gun.
+    sqli_examples: list[str] = []
+    lines = blob.splitlines()
+    seen = 0
+    # Anchor the scan on lines that themselves contain a 5xx code, then
+    # widen by ±2 lines for SQL-hint context. Anchoring prevents the same
+    # 5xx line from triggering three matches as a 3-line window slides
+    # past it.
+    for i, line in enumerate(lines):
+        if not re.search(r"\b5\d{2}\b", line):
+            continue
+        window = " ¦ ".join(lines[max(0, i - 2): i + 1])
+        low = window.lower()
+        if any(h in low for h in _SQLI_HINTS):
+            if seen < 3:
+                sqli_examples.append(window.strip()[:220])
+            seen += 1
+
+    if not http_codes and not exit_codes and not sqli_examples:
+        return None
+
+    lines = [
+        "[SYSTEM NOTE] Tool-output evidence digest from the most recent "
+        "worker turn (the planner does NOT see raw bash/HTTP traces — this "
+        "is a structured summary you should treat as ground truth):"
+    ]
+    if http_codes:
+        top = ", ".join(f"{c}×{n}" for c, n in http_codes.most_common(6))
+        lines.append(f"  • HTTP status histogram: {top}")
+    if exit_codes:
+        top = ", ".join(f"exit={c}×{n}" for c, n in exit_codes.most_common(4))
+        lines.append(f"  • bash exit codes: {top}")
+    if sqli_examples:
+        lines.append(
+            f"  • {seen} response window(s) showed HTTP 5xx adjacent to "
+            "inputs containing SQL-shape characters (comment markers, OR, "
+            "UNION, null, payload-quote annotations). This is the "
+            "canonical SQL-injection smoking gun. Examples:"
+        )
+        for ex in sqli_examples:
+            lines.append(f"      {ex}")
+        lines.append(
+            "  • Specialization rule: when this SQLi signal is present and "
+            "no finding has yet extracted impact, your next attack turn "
+            "MUST dispatch the named `sqli` skill against the offending "
+            "endpoint (use the `configs` lane, not `tasks`) before pivoting "
+            "to anything else. Two consecutive turns of this skill are "
+            "warranted before considering it exhausted."
+        )
+    # Only one line of header text is not worth surfacing on its own.
+    return "\n".join(lines) if len(lines) > 1 else None
 
 
 def _build_forced_search_query(finding, state: SwarmGraphState) -> str:
@@ -810,8 +978,87 @@ class PlannerNode(BaseNode):
             system_prompt=SUPERVISOR_SYSTEM_PROMPT,
         )
 
+    async def _invoke_with_transient_retry(
+        self,
+        payload: dict,
+        *,
+        run_id: str | None = None,
+    ) -> dict:
+        """Call the supervisor agent, retrying transient transport errors.
+
+        The Codex backend occasionally drops the connection mid-stream
+        ("peer closed connection without sending complete message body",
+        ``IncompleteRead``, ``ReadTimeout``, ...). The LLM layer
+        translates those into ``CodexTransportError`` and retries them
+        inside ``ChatCodex._agenerate``, but the planner's prior context
+        is large enough that the same call can still drop on a later
+        attempt — and any LangChain-level wrapping that bypasses
+        ChatCodex's own retry leaves us bare. So we retry once more
+        here at the planner level, with a short backoff. We deliberately
+        do NOT retry refusals (cyber_policy / invalid_prompt) — those
+        won't succeed without prompt changes.
+        """
+        # Lazy import to avoid pulling the LLM module at planner import
+        # time (which would dirty the partial-import dance with
+        # ``src.graph``).
+        from src.llm.codex import (
+            CodexAPIError,
+            CodexCyberPolicyError,
+            CodexInvalidPromptError,
+            CodexQuotaExceededError,
+            CodexContextWindowError,
+        )
+        import asyncio
+
+        non_retryable = (
+            CodexCyberPolicyError,
+            CodexInvalidPromptError,
+            CodexQuotaExceededError,
+            CodexContextWindowError,
+        )
+        # Token logging — every planner call goes through this path,
+        # so wiring the callback here means we never miss a planner LLM
+        # request in llm_calls.jsonl. The agent_id "_planner" is a
+        # convention recognized by post-run analysis scripts.
+        from src.llm.callbacks import make_call_config
+        call_config = make_call_config(
+            run_id=run_id,
+            agent_id="_planner",
+            node="planner",
+        )
+
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                return await self._agent.ainvoke(payload, config=call_config)
+            except non_retryable:
+                raise
+            except (CodexAPIError, Exception) as e:  # noqa: BLE001
+                # Only retry network-shaped errors. If this is something
+                # truly unexpected (Python error, programming bug), let
+                # it raise on the last attempt.
+                if attempt == max_attempts - 1:
+                    raise
+                if not _looks_transient(e):
+                    raise
+                delay = 2.0 * (attempt + 1)
+                self.log.warning(
+                    "Supervisor transient failure on attempt %d/%d "
+                    "(%s) — sleeping %.1fs and retrying: %s",
+                    attempt + 1, max_attempts, type(e).__name__, delay,
+                    str(e)[:200],
+                )
+                await asyncio.sleep(delay)
+        # Unreachable — the loop either returns or raises above.
+        raise RuntimeError("planner retry loop exited without result")
+
     async def execute(self, state: SwarmGraphState) -> dict:
         iters = state.get("planner_iters", 0) + 1
+
+        # Pull the run_id once so every LLM call below logs into the
+        # same llm_calls.jsonl. The state always carries run_id by the
+        # time the planner runs (initialize_node sets it on entry).
+        run_id = state.get("run_id")
 
         # Hard cap — force report rather than loop forever.
         if iters > MAX_PLANNER_ITERS:
@@ -866,6 +1113,22 @@ class PlannerNode(BaseNode):
                 HumanMessage(content=f"[SYSTEM NOTE] {warning}")
             )
 
+        # Tool-output evidence digest. The planner only sees worker
+        # ``agent_results`` (findings + completion status) — it does NOT see
+        # the raw HTTP responses or bash outputs that workers actually
+        # produced. So the canonical 500-on-quoted-input SQLi smoking gun
+        # stays invisible across turns even when every worker bash trace
+        # contains it. The digest below extracts a coarse but high-signal
+        # summary and surfaces it as a SYSTEM NOTE so the planner can
+        # specialize on the right skill instead of fanning out generically.
+        evidence = _summarize_recent_evidence(prior_messages)
+        if evidence:
+            self.log.info(
+                "evidence digest: %s",
+                evidence.replace("\n", " | ")[:400],
+            )
+            prior_messages.append(HumanMessage(content=evidence))
+
         # Benchmark-mode addendum. Only fires when the runner populated
         # state["expected_flag"] — real pentest runs leave it empty and
         # this note is not added, so behavior in non-benchmark contexts
@@ -889,7 +1152,10 @@ class PlannerNode(BaseNode):
             )))
 
         try:
-            result = await self._agent.ainvoke({"messages": prior_messages})
+            result = await self._invoke_with_transient_retry(
+                {"messages": prior_messages},
+                run_id=run_id,
+            )
         except Exception as e:
             self.log.exception("Supervisor planner failed: %s", e)
             return {
@@ -929,7 +1195,10 @@ class PlannerNode(BaseNode):
                 ),
             ]
             try:
-                retry_result = await self._agent.ainvoke({"messages": retry_messages})
+                retry_result = await self._invoke_with_transient_retry(
+                    {"messages": retry_messages},
+                    run_id=run_id,
+                )
             except Exception as e:
                 self.log.exception("Supervisor retry failed: %s", e)
                 return {
@@ -1015,8 +1284,9 @@ class PlannerNode(BaseNode):
                 ),
             ]
             try:
-                recovery_result = await self._agent.ainvoke(
-                    {"messages": recovery_messages}
+                recovery_result = await self._invoke_with_transient_retry(
+                    {"messages": recovery_messages},
+                    run_id=run_id,
                 )
                 recovery_out: list = recovery_result.get("messages", [])
                 recovery_new = recovery_out[len(recovery_messages):]

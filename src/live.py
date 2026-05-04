@@ -322,11 +322,66 @@ class _Live:
         # Worker / lifecycle node — structured summary line first.
         head = _paint(f"▸ {name:<8s}", _DIM, _BLUE)
         body = f"{summary}" if summary else "ok"
-        _emit(f"{_now()}  {head} {body}  ({_fmt_ms(duration_ms)})")
+        # Append a per-agent token totals chip so the user sees the
+        # cost of the worker turn inline. Pulls from the running
+        # totals maintained by TokenLoggingCallback. We aggregate
+        # across every active_agents entry mentioned in the summary
+        # — at worker exit there's typically one, sometimes more
+        # for fan-out skills like custom-attack.
+        tokens_chip = self._aggregate_token_chip(summary)
+        tail = f"  ({_fmt_ms(duration_ms)})"
+        if tokens_chip:
+            tail = f"  ({_fmt_ms(duration_ms)}, {tokens_chip})"
+        _emit(f"{_now()}  {head} {body}{tail}")
         # Then a 💭 line per non-trivial worker AIMessage so the LLM's
         # narrative between tool calls is visible. Without this the user
         # only sees commands, not reasoning between them.
         self._emit_worker_thoughts(new_messages)
+
+    def _aggregate_token_chip(self, summary: str) -> str:
+        """Pull running token totals for whichever agent_ids appear in
+        ``summary`` (the ``active: foo,bar`` part) and render a chip
+        like ``in=187k peak=22k think=8.5k``.
+
+        Empty string when no totals are recorded yet (e.g. a node that
+        does no LLM calls). Uses lazy import so live.py doesn't have a
+        compile-time dependency on llm/callbacks.py — that module
+        imports observability which re-exports this one.
+        """
+        try:
+            from src.llm.callbacks import TOKEN_TOTALS
+        except Exception:
+            return ""
+        # Pull active-agent ids out of the summary string. Format:
+        # ``... active: a,b,c ...``. If absent, fall back to all agents.
+        m = re.search(r"active:\s*([^\s]+)", summary or "")
+        if m:
+            agents = [s.strip() for s in m.group(1).split(",") if s.strip()]
+        else:
+            agents = list(TOKEN_TOTALS.keys())
+        if not agents:
+            return ""
+        in_sum = 0
+        out_sum = 0
+        think_sum = 0
+        peak = 0
+        for a in agents:
+            t = TOKEN_TOTALS.get(a)
+            if not t:
+                continue
+            in_sum += t.input_tokens
+            out_sum += t.output_tokens
+            think_sum += t.reasoning_tokens
+            if t.peak_input > peak:
+                peak = t.peak_input
+        if not in_sum and not out_sum:
+            return ""
+        return (
+            f"in={_fmt_tokens(in_sum)} "
+            f"out={_fmt_tokens(out_sum)} "
+            f"think={_fmt_tokens(think_sum)} "
+            f"peak={_fmt_tokens(peak)}"
+        )
 
     def _render_planner_messages(
         self,
@@ -578,6 +633,75 @@ class _Live:
         head = _paint("⚠ ", _BOLD, _YELLOW)
         _emit(f"{_now()}  {head}{_paint(text, _YELLOW)}")
 
+    # -------- LLM call observability ----------
+
+    # Context-rot threshold. Codex models advertise a 256k window, but
+    # quality on multi-turn tool-use trajectories degrades visibly past
+    # ~128k. The threshold is set to 100k so a warning fires *before*
+    # we hit the rot zone, giving the user time to abort or trim. Override
+    # with SWARM_LIVE_CONTEXT_WARN env var if a future model raises the
+    # bar.
+    _CONTEXT_WARN_INPUT_TOKENS = 100_000
+
+    def llm_call(
+        self,
+        *,
+        agent: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        reasoning_tokens: int,
+        duration_ms: int,
+        running_input: int,
+        peak_input: int,
+    ) -> None:
+        """Surface a per-LLM-call line and a context-rot warning when due.
+
+        Cadence:
+          - silent: no output ever.
+          - compact: only the context-rot warning (one line, once per
+            agent, when peak_input crosses _CONTEXT_WARN_INPUT_TOKENS).
+            Every individual call would drown the console.
+          - verbose: one dim line per call ``🧠 agent  model  in/out/think  ms``
+            so the user can watch tokens accumulate live.
+
+        The peak-input dedup state lives on the singleton so successive
+        calls from the same agent don't repeat the same warning.
+        """
+        mode = _mode()
+        if mode == "silent":
+            return
+
+        # Verbose: one dim line per call.
+        if mode == "verbose":
+            ag = _agent_tag(agent)
+            tokens_part = (
+                f"in={_fmt_tokens(input_tokens)} "
+                f"out={_fmt_tokens(output_tokens)} "
+                f"think={_fmt_tokens(reasoning_tokens)} "
+                f"running_in={_fmt_tokens(running_input)}"
+            )
+            head = _paint("🧠 ", _DIM, _CYAN)
+            body = _paint(
+                f"{model}  {tokens_part}  ({_fmt_ms(duration_ms)})", _DIM,
+            )
+            _emit(f"{_now()}  {head}{ag} {body}")
+
+        # Both compact and verbose: fire the context-rot warning when
+        # peak_input crosses the threshold for the first time per agent.
+        if peak_input >= self._CONTEXT_WARN_INPUT_TOKENS:
+            key = f"context-rot:{agent}"
+            if key not in self._seen_msg_hashes:
+                self._seen_msg_hashes.add(key)
+                self.warning(
+                    f"context-rot risk — agent {agent!r} just sent "
+                    f"{_fmt_tokens(peak_input)} input tokens in a single "
+                    f"call. Quality on Codex / o-series degrades visibly "
+                    f"past ~128k. Consider stopping and re-dispatching "
+                    f"a fresh worker.",
+                    kind="context-rot",
+                )
+
 
 _AGENT_TAG_WIDTH = 24  # fits owasp-input-validation (22) without truncation
 
@@ -616,6 +740,24 @@ def _fmt_bytes(n: int | str) -> str:
     if v < 1024 * 1024:
         return f"{v / 1024:.1f}KB"
     return f"{v / (1024 * 1024):.1f}MB"
+
+
+def _fmt_tokens(n: int) -> str:
+    """Format a token count as ``Xk`` or ``X.Xk`` past 1000.
+
+    Below 1000 we keep the raw integer because per-call output_tokens is
+    often in the low hundreds and the ``k`` suffix would round those
+    to ``0k`` and lose the signal.
+    """
+    try:
+        v = int(n)
+    except (TypeError, ValueError):
+        return str(n)
+    if v < 1_000:
+        return str(v)
+    if v < 10_000:
+        return f"{v / 1_000:.1f}k"
+    return f"{v // 1_000}k"
 
 
 # Module-level singleton. Importers do ``from src.observability.live import LIVE``.

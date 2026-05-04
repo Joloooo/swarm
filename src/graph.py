@@ -125,7 +125,7 @@ config = SimpleNamespace(
         # ── Graph supervisor / planner ──
         planner_max_iters            = _env_int("SWARM_PLANNER_MAX_ITERS",        50),
         # ── Worker agents (per invocation) ──
-        worker_max_iterations        = _env_int("SWARM_WORKER_MAX_ITERATIONS",    30),
+        worker_max_iterations        = _env_int("SWARM_WORKER_MAX_ITERATIONS",    60),
         # ── Planner-invented "custom" attacks ──
         custom_attack_max_tool_calls = _env_int("SWARM_CUSTOM_MAX_TOOL_CALLS",    40),
         custom_attack_max_iterations = _env_int("SWARM_CUSTOM_MAX_ITERATIONS",    25),

@@ -3,6 +3,9 @@
 For each run we write everything under ``logs/run-<run_id>/``:
 
     nodes.jsonl           one line per BaseNode.__call__ (full result)
+    state_diffs.jsonl     one line per node finish (state-shape before/after + delta)
+    llm_calls.jsonl       one line per LLM call end (token counts, written by callbacks.py)
+    llm_requests.jsonl    one line per LLM call start (full prompt sent, written by callbacks.py)
     final_state.json      graph.ainvoke() return value, in full
     summary.md            human-readable digest of the whole run
     terminal_events.jsonl tool-call log (redirected from src/tools/terminal.py)
@@ -27,6 +30,7 @@ from urllib.parse import urlparse
 LOGS_ROOT = Path(__file__).resolve().parents[1] / "logs"
 
 _NODES_LOCK = threading.Lock()  # parallel executor workers append concurrently
+_STATE_DIFFS_LOCK = threading.Lock()
 
 
 def _slug(s: str, *, max_len: int = 60) -> str:
@@ -87,6 +91,35 @@ def append_node_event(run_id: str, event: dict) -> None:
         path = run_dir(run_id) / "nodes.jsonl"
         line = json.dumps(event, default=str, ensure_ascii=False) + "\n"
         with _NODES_LOCK, path.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def append_state_diff_event(run_id: str, event: dict) -> None:
+    """Append one JSON line to ``state_diffs.jsonl``.
+
+    One row per ``BaseNode.__call__`` finish. The row records the
+    *shape* of the graph state before and after the node ran (counts
+    + character totals + role breakdown) plus the **full text** of
+    every newly added message and finding so the user can diff what
+    each node actually contributed.
+
+    The full-text inclusion is intentional and matches the user's
+    explicit request: "since this is being saved in file and not
+    shown actively in terminal it should be absolutely full logs
+    everything." Disk is cheap; thesis analysis needs the full
+    record.
+
+    Failures are swallowed — observability must never break a graph
+    run. Lock-guarded so parallel executor workers don't interleave
+    half-lines (the executor's custom-attack lane fans out 4-way and
+    each fan-out branch's BaseNode.__call__ writes here).
+    """
+    try:
+        path = run_dir(run_id) / "state_diffs.jsonl"
+        line = json.dumps(event, default=str, ensure_ascii=False) + "\n"
+        with _STATE_DIFFS_LOCK, path.open("a", encoding="utf-8") as f:
             f.write(line)
     except Exception:  # noqa: BLE001
         pass

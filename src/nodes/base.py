@@ -57,7 +57,12 @@ from src.llm.callbacks import (
     make_call_config,
 )
 from src.nodes.salvage import salvage_finding
-from src.observability import LIVE, append_node_event, make_run_id
+from src.observability import (
+    LIVE,
+    append_node_event,
+    append_state_diff_event,
+    make_run_id,
+)
 from src.state import AgentResult, Finding, Severity
 
 
@@ -927,6 +932,236 @@ def _summarize_node_result(name: str, result: dict) -> str:
     return ", ".join(parts) or "ok"
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# State-shape helpers — used by BaseNode.__call__ to build the
+# ``state_diffs.jsonl`` row that records how each node grew the graph
+# state. These are pure functions on dicts (no side effects) so they can
+# be unit-tested in isolation.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def _msg_chars(msg: Any) -> int:
+    """Best-effort character count for one message's ``content``.
+
+    Handles strings and multi-part list contents (rare in this codebase
+    but technically supported by LangChain). Falls back to ``str(msg)``
+    so this never raises and the size series stays well-formed even on
+    weird message shapes.
+    """
+    content = getattr(msg, "content", None)
+    if content is None and isinstance(msg, dict):
+        content = msg.get("content")
+    if content is None:
+        return 0
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        # Multi-part — sum each part's JSON size as a proxy.
+        try:
+            return sum(len(json.dumps(p, default=str, ensure_ascii=False))
+                       for p in content)
+        except Exception:  # noqa: BLE001
+            return sum(len(str(p)) for p in content)
+    return len(str(content))
+
+
+def _msg_role_label(msg: Any) -> str:
+    """Map a BaseMessage subclass name to a short role label."""
+    return {
+        "HumanMessage":  "human",
+        "AIMessage":     "assistant",
+        "SystemMessage": "system",
+        "ToolMessage":   "tool",
+    }.get(type(msg).__name__, type(msg).__name__.lower())
+
+
+def _state_shape(state: dict[str, Any] | None) -> dict[str, Any]:
+    """Return a *shape* snapshot of the relevant state fields.
+
+    Counts and character totals, plus a per-role breakdown of message
+    content size and a list of finding titles by severity. The result
+    is intentionally compact (no full text) — full text lives in the
+    ``delta.added_*`` blocks of the diff event so we don't double-count
+    bytes.
+
+    Robust to a ``None`` state (e.g. before-snapshot taken when
+    ``__call__`` is invoked with no arg) — returns zeroes.
+    """
+    s = state or {}
+    msgs = s.get("messages") or []
+    findings = s.get("findings") or []
+    agent_results = s.get("agent_results") or []
+    active = s.get("active_agents") or []
+
+    role_chars: dict[str, int] = {
+        "human": 0, "assistant": 0, "system": 0, "tool": 0,
+    }
+    role_counts: dict[str, int] = {
+        "human": 0, "assistant": 0, "system": 0, "tool": 0,
+    }
+    total_chars = 0
+    for m in msgs:
+        role = _msg_role_label(m)
+        chars = _msg_chars(m)
+        total_chars += chars
+        role_chars[role] = role_chars.get(role, 0) + chars
+        role_counts[role] = role_counts.get(role, 0) + 1
+
+    findings_by_sev: dict[str, int] = {}
+    for f in findings:
+        sev = getattr(f, "severity", None)
+        sev_str = getattr(sev, "value", None) or str(sev or "info")
+        findings_by_sev[sev_str] = findings_by_sev.get(sev_str, 0) + 1
+
+    return {
+        "messages_count":      len(msgs),
+        "messages_chars":      total_chars,
+        "messages_role_chars": role_chars,
+        "messages_role_counts": role_counts,
+        "findings_count":      len(findings),
+        "findings_by_severity": findings_by_sev,
+        "agent_results_count": len(agent_results),
+        "active_agents":       list(active),
+        "planner_iters":       s.get("planner_iters", 0) or 0,
+        "next_action":         s.get("next_action"),
+        "expected_flag_set":   bool(s.get("expected_flag")),
+        "phase1_findings_set": bool(s.get("phase1_findings")),
+        "waf_detected":        bool(s.get("waf_detected")),
+        "stealth_level":       s.get("stealth_level", 0) or 0,
+    }
+
+
+def _serialize_added_message(msg: Any) -> dict:
+    """Convert one *newly added* message to a JSON-safe full-text dict.
+
+    No truncation — the user explicitly asked for "absolutely full
+    logs everything" so per-node forensic replay is possible from
+    state_diffs.jsonl alone, without joining final_state.json.
+
+    Preserves tool_call linkage (assistant-side ``tool_calls`` and
+    tool-side ``tool_call_id``) so the conversation chain can be
+    walked from this file.
+    """
+    content = getattr(msg, "content", None)
+    if content is None and isinstance(msg, dict):
+        content = msg.get("content")
+    if isinstance(content, list):
+        try:
+            content_value: Any = [
+                p if isinstance(p, dict) else {"text": str(p)}
+                for p in content
+            ]
+        except Exception:  # noqa: BLE001
+            content_value = str(content)
+    else:
+        content_value = "" if content is None else str(content)
+
+    out: dict[str, Any] = {
+        "role":    _msg_role_label(msg),
+        "content": content_value,
+        "chars":   _msg_chars(msg),
+    }
+    tool_calls = getattr(msg, "tool_calls", None)
+    if tool_calls:
+        out["tool_calls"] = [
+            {
+                "name": tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None),
+                "args": tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None),
+                "id":   tc.get("id")   if isinstance(tc, dict) else getattr(tc, "id",   None),
+            }
+            for tc in tool_calls
+        ]
+    tool_call_id = getattr(msg, "tool_call_id", None)
+    if tool_call_id:
+        out["tool_call_id"] = tool_call_id
+    name = getattr(msg, "name", None)
+    if name:
+        out["name"] = name
+    additional = getattr(msg, "additional_kwargs", None)
+    if additional:
+        # Carry forward node tagging, refusal flags, salvage flag, etc.
+        # ``reasoning_summary`` (if present) lands here too — its full
+        # text in state_diffs.jsonl is exactly what the user wants for
+        # offline analysis of model decisions.
+        try:
+            out["additional_kwargs"] = dict(additional)
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+def _serialize_added_finding(f: Any) -> dict:
+    """Convert one *newly added* Finding to a JSON-safe full-content dict."""
+    sev = getattr(f, "severity", None)
+    sev_str = getattr(sev, "value", None) or str(sev or "info")
+    return {
+        "title":       getattr(f, "title", "") or "",
+        "severity":    sev_str,
+        "category":    getattr(f, "category", "") or "",
+        "description": getattr(f, "description", "") or "",
+        "evidence":    getattr(f, "evidence", "") or "",
+        "agent_id":    getattr(f, "agent_id", "") or "",
+        "url":         getattr(f, "url", "") or "",
+        "cwe":         getattr(f, "cwe", "") or "",
+        "reproduced":  bool(getattr(f, "reproduced", False)),
+    }
+
+
+def _serialize_added_agent_result(ar: Any) -> dict:
+    """Convert one *newly added* AgentResult to a JSON-safe dict."""
+    return {
+        "agent_id":     getattr(ar, "agent_id", None),
+        "methodology":  getattr(ar, "methodology", None),
+        "config_name":  getattr(ar, "config_name", None),
+        "phase":        getattr(ar, "phase", None),
+        "completed":    bool(getattr(ar, "completed", False)),
+        "error":        getattr(ar, "error", None),
+        "findings_count": len(getattr(ar, "findings", None) or []),
+    }
+
+
+def _state_diff(
+    *,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    duration_ms: int,
+    new_messages: list[Any],
+    new_findings: list[Any],
+    new_agent_results: list[Any],
+) -> dict[str, Any]:
+    """Build the ``delta`` block: counts + full text of newly added items.
+
+    The ``messages_added`` count compares the *post-execute* state's
+    message list length to the snapshot taken before. For nodes that
+    return new messages via the LangGraph ``add_messages`` reducer,
+    the post-execute state isn't directly visible to us — instead
+    we count the messages the node returned in its result dict, which
+    is exactly what flows into the reducer.
+    """
+    duration_s = duration_ms / 1000.0 if duration_ms else 0.0
+    chars_added = sum(_msg_chars(m) for m in new_messages)
+
+    role_added: dict[str, int] = {}
+    for m in new_messages:
+        role = _msg_role_label(m)
+        role_added[role] = role_added.get(role, 0) + 1
+
+    return {
+        "messages_added":             len(new_messages),
+        "messages_chars_added":       chars_added,
+        "messages_added_by_role":     role_added,
+        "messages_added_full":        [_serialize_added_message(m) for m in new_messages],
+
+        "findings_added":             len(new_findings),
+        "findings_added_full":        [_serialize_added_finding(f) for f in new_findings],
+
+        "agent_results_added":        len(new_agent_results),
+        "agent_results_added_full":   [_serialize_added_agent_result(a) for a in new_agent_results],
+
+        "growth_rate_chars_per_sec":  (chars_added / duration_s) if duration_s > 0 else 0.0,
+    }
+
+
 class BaseNode(ABC):
     """Abstract base for every SwarmAttacker LangGraph node.
 
@@ -980,6 +1215,10 @@ class BaseNode(ABC):
             target_url=(state or {}).get("target_url"),
         )
 
+        # Snapshot the state *shape* before execute() runs so we can
+        # diff post-hoc. Cheap (counts + char totals); never raises.
+        before_shape = _state_shape(state)
+
         t0 = time.perf_counter()
         try:
             result = await self.execute(state)
@@ -993,6 +1232,26 @@ class BaseNode(ABC):
                 "error": f"{type(e).__name__}: {e}",
                 "summary": "",
                 "result": None,
+            })
+            # Even on crash, record the (no-op) state diff so the
+            # state_diffs.jsonl row count matches the nodes.jsonl row
+            # count — makes joins / counts in jq one-liners reliable.
+            append_state_diff_event(run_id, {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "node": name,
+                "run_id": run_id,
+                "duration_ms": dt_ms,
+                "error": f"{type(e).__name__}: {e}",
+                "before": before_shape,
+                "after":  before_shape,  # crash → no state change
+                "delta":  _state_diff(
+                    before=before_shape,
+                    after=before_shape,
+                    duration_ms=dt_ms,
+                    new_messages=[],
+                    new_findings=[],
+                    new_agent_results=[],
+                ),
             })
             return {
                 "messages": [
@@ -1012,6 +1271,71 @@ class BaseNode(ABC):
             "duration_ms": dt_ms,
             "summary": summary,
             "result": result,
+        })
+
+        # State-diff event — full content of every newly added message,
+        # finding, and agent_result. The "after" shape projects what
+        # the LangGraph reducers will produce: messages and findings
+        # use additive reducers, so the post-reducer state is the
+        # before snapshot plus what this node returned.
+        new_messages_for_diff = list(result.get("messages") or [])
+        new_findings_for_diff = list(result.get("findings") or [])
+        new_agent_results_for_diff = list(result.get("agent_results") or [])
+        new_chars = sum(_msg_chars(m) for m in new_messages_for_diff)
+        after_role_chars = dict(before_shape.get("messages_role_chars") or {})
+        after_role_counts = dict(before_shape.get("messages_role_counts") or {})
+        for m in new_messages_for_diff:
+            r = _msg_role_label(m)
+            after_role_chars[r] = after_role_chars.get(r, 0) + _msg_chars(m)
+            after_role_counts[r] = after_role_counts.get(r, 0) + 1
+        after_shape = {
+            **before_shape,
+            "messages_count":      before_shape["messages_count"] + len(new_messages_for_diff),
+            "messages_chars":      before_shape["messages_chars"] + new_chars,
+            "messages_role_chars": after_role_chars,
+            "messages_role_counts": after_role_counts,
+            "findings_count":      before_shape["findings_count"] + len(new_findings_for_diff),
+            "agent_results_count": before_shape["agent_results_count"]
+                                    + len(new_agent_results_for_diff),
+            # Scalar fields the node may have rewritten (next_action,
+            # active_agents, planner_iters): the result dict is the
+            # source of truth for their post-reducer value.
+            "active_agents":       list(result.get("active_agents")
+                                        or before_shape.get("active_agents") or []),
+            "planner_iters":       result.get("planner_iters",
+                                              before_shape.get("planner_iters", 0)),
+            "next_action":         result.get("next_action",
+                                              before_shape.get("next_action")),
+            "waf_detected":        bool(result.get("waf_detected",
+                                                   before_shape.get("waf_detected", False))),
+            "stealth_level":       result.get("stealth_level",
+                                              before_shape.get("stealth_level", 0)),
+        }
+        # Findings-by-severity update: merge the new findings into the
+        # before-snapshot tally.
+        after_sev = dict(before_shape.get("findings_by_severity") or {})
+        for f in new_findings_for_diff:
+            sev = getattr(f, "severity", None)
+            sev_str = getattr(sev, "value", None) or str(sev or "info")
+            after_sev[sev_str] = after_sev.get(sev_str, 0) + 1
+        after_shape["findings_by_severity"] = after_sev
+
+        append_state_diff_event(run_id, {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "node": name,
+            "run_id": run_id,
+            "duration_ms": dt_ms,
+            "summary": summary,
+            "before": before_shape,
+            "after":  after_shape,
+            "delta":  _state_diff(
+                before=before_shape,
+                after=after_shape,
+                duration_ms=dt_ms,
+                new_messages=new_messages_for_diff,
+                new_findings=new_findings_for_diff,
+                new_agent_results=new_agent_results_for_diff,
+            ),
         })
         # Live terminal view — silent/compact/verbose decided by the
         # renderer from config.verbosity.mode. In compact mode the

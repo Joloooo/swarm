@@ -160,7 +160,20 @@ def _llm_log_path(run_id: str) -> "pathlib.Path":  # noqa: F821 — string annot
     return run_dir(run_id) / "llm_calls.jsonl"
 
 
+def _llm_requests_path(run_id: str) -> "pathlib.Path":  # noqa: F821
+    """Where ``llm_requests.jsonl`` for ``run_id`` lives.
+
+    Sister file to ``llm_calls.jsonl`` — that one captures the *end*
+    of each call (token counts, duration, errors). This one captures
+    the *start*: the full prompt that was actually shipped to the
+    model. Each row in either file shares the same ``lc_run_id`` so a
+    join is trivial.
+    """
+    return run_dir(run_id) / "llm_requests.jsonl"
+
+
 _LOG_LOCK = threading.Lock()
+_REQUEST_LOG_LOCK = threading.Lock()
 
 
 def _append_llm_event(run_id: str | None, event: dict) -> None:
@@ -179,6 +192,218 @@ def _append_llm_event(run_id: str | None, event: dict) -> None:
             f.write(line)
     except Exception:  # noqa: BLE001 — observability must not break runs
         pass
+
+
+def _append_request_event(run_id: str | None, event: dict) -> None:
+    """Append one JSON line to ``logs/run-<id>/llm_requests.jsonl``.
+
+    Same swallowed-failure / lock-guarded pattern as
+    :func:`_append_llm_event`. Separate lock so a slow request-log
+    write (full prompts can run 100+ KB) can't block the much
+    cheaper end-of-call write on llm_calls.jsonl.
+    """
+    if not run_id:
+        return
+    try:
+        path = _llm_requests_path(run_id)
+        line = json.dumps(event, default=str, ensure_ascii=False) + "\n"
+        with _REQUEST_LOG_LOCK, path.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:  # noqa: BLE001 — observability must not break runs
+        pass
+
+
+# ── Request-side serialization helpers ───────────────────────────────────
+
+
+def _serialize_message_for_request_log(msg: Any) -> dict:
+    """Convert one ``BaseMessage`` to a JSON-safe dict — full content.
+
+    No truncation, by design. The user explicitly asked for "absolutely
+    full logs everything" so they can replay exactly what was sent.
+    Tool calls (assistant-side) and ``tool_call_id`` (tool-side) are
+    preserved so the conversation can be reconstructed in either
+    direction.
+
+    Robust to non-message types (e.g. dicts produced by mocks): falls
+    back to ``str(msg)`` so the serializer never raises.
+    """
+    role = {
+        "HumanMessage":  "human",
+        "AIMessage":     "assistant",
+        "SystemMessage": "system",
+        "ToolMessage":   "tool",
+    }.get(type(msg).__name__, type(msg).__name__.lower())
+
+    content = getattr(msg, "content", None)
+    if content is None and isinstance(msg, dict):
+        content = msg.get("content")
+    if isinstance(content, list):
+        # Multi-part content (rare on the request side; common for
+        # vision/audio messages). Flatten to a list of part dicts.
+        parts = []
+        for p in content:
+            if isinstance(p, dict):
+                parts.append(p)
+            else:
+                parts.append({"text": str(p)})
+        content_value: Any = parts
+        chars = sum(len(json.dumps(p, default=str, ensure_ascii=False))
+                    for p in parts)
+    else:
+        content_value = "" if content is None else str(content)
+        chars = len(content_value)
+
+    out: dict[str, Any] = {
+        "role":  role,
+        "content": content_value,
+        "chars": chars,
+    }
+
+    # Assistant tool calls — present on AIMessage in the prompt history
+    # whenever a previous turn invoked a tool. Capture the structured
+    # tool_calls list verbatim (LangChain ToolCall TypedDicts) so the
+    # full request is reproducible.
+    tool_calls = getattr(msg, "tool_calls", None)
+    if tool_calls:
+        out["tool_calls"] = [
+            {
+                "name": tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None),
+                "args": tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None),
+                "id":   tc.get("id")   if isinstance(tc, dict) else getattr(tc, "id",   None),
+            }
+            for tc in tool_calls
+        ]
+
+    # ToolMessage carries the call_id binding it back to the
+    # assistant-side tool_calls entry; keep the linkage.
+    tool_call_id = getattr(msg, "tool_call_id", None)
+    if tool_call_id:
+        out["tool_call_id"] = tool_call_id
+
+    name = getattr(msg, "name", None)
+    if name:
+        out["name"] = name
+
+    return out
+
+
+def _serialize_tools_for_request_log(serialized: dict | None) -> list[dict]:
+    """Pull the tools advertised to the model out of the serialized
+    callable, if present.
+
+    LangChain's ``bind_tools`` stashes tools under varying paths
+    depending on the provider. We probe a couple of common shapes;
+    anything unrecognized returns ``[]`` rather than raising. Each
+    tool is rendered as ``{name, description, parameters}`` with NO
+    truncation — see the design note about full-content logging.
+    """
+    if not serialized:
+        return []
+    kwargs = serialized.get("kwargs") or {}
+    raw_tools = kwargs.get("tools") or []
+    out: list[dict] = []
+    for t in raw_tools:
+        if not isinstance(t, dict):
+            # Unknown shape — best-effort string repr, still no truncation.
+            out.append({"raw": str(t)})
+            continue
+        # OpenAI/Codex shape: {"type": "function", "function": {...}}
+        fn = t.get("function") if t.get("type") == "function" else None
+        if isinstance(fn, dict):
+            out.append({
+                "name":        fn.get("name"),
+                "description": fn.get("description"),
+                "parameters":  fn.get("parameters"),
+            })
+        else:
+            out.append(t)
+    return out
+
+
+def _build_request_event(
+    *,
+    lc_run_id: UUID,
+    metadata: dict | None,
+    serialized: dict | None,
+    messages: list[list[Any]] | None,
+) -> dict:
+    """Assemble the full request-log event for one LLM call start.
+
+    Captures:
+      - identity (lc_run_id, run_id, agent_id, node, model)
+      - the bound tools advertised to the model
+      - every message in the prompt, with role / content / chars /
+        tool-call linkage, NO truncation
+      - aggregate sizing (n_messages, total_chars, char_breakdown,
+        rough estimated_input_tokens via the chars/4 heuristic) so
+        post-run analysis can plot growth without re-summing each
+        message
+    """
+    meta = metadata or {}
+    ser = serialized or {}
+    model = (
+        (ser.get("kwargs") or {}).get("model")
+        or (ser.get("kwargs") or {}).get("model_name")
+        or meta.get("model")
+        or "?"
+    )
+
+    # ``messages`` arrives as list[list[BaseMessage]] from
+    # on_chat_model_start (one inner list per "prompt" — typically
+    # length 1 for chat models). Flatten while preserving order.
+    flat: list[Any] = []
+    for sub in messages or []:
+        if isinstance(sub, list):
+            flat.extend(sub)
+        else:
+            flat.append(sub)
+
+    serialized_msgs = [_serialize_message_for_request_log(m) for m in flat]
+
+    # Pull out the first SystemMessage for convenience — often the
+    # primary thing a reader wants to see when scrolling jq output.
+    system_prompt = None
+    for sm in serialized_msgs:
+        if sm.get("role") == "system":
+            system_prompt = sm.get("content")
+            break
+
+    char_breakdown = {"system": 0, "human": 0, "assistant": 0, "tool": 0}
+    for sm in serialized_msgs:
+        role = str(sm.get("role") or "")
+        chars = int(sm.get("chars") or 0)
+        if role in char_breakdown:
+            char_breakdown[role] += chars
+        else:
+            char_breakdown.setdefault("other", 0)
+            char_breakdown["other"] += chars
+    total_chars = sum(char_breakdown.values())
+
+    return {
+        "ts":         time.strftime("%Y-%m-%dT%H:%M:%S")
+                      + f".{int((time.time() % 1) * 1000):03d}",
+        "phase":      "start",
+        "lc_run_id":  str(lc_run_id),
+        "run_id":     meta.get("run_id"),
+        "agent_id":   str(meta.get("agent_id") or meta.get("ls_agent")
+                          or "_unknown"),
+        "node":       meta.get("node"),
+        "model":      str(model),
+        "request": {
+            "system_prompt":  system_prompt,
+            "messages":       serialized_msgs,
+            "tools":          _serialize_tools_for_request_log(serialized),
+            "n_messages":     len(serialized_msgs),
+            "total_chars":    total_chars,
+            "char_breakdown": char_breakdown,
+            # Char/4 is the standard cheap pre-tokenizer heuristic.
+            # Real input_tokens lands later in llm_calls.jsonl from
+            # the provider's usage_metadata; the join key
+            # ``lc_run_id`` lets you compare estimate vs reality.
+            "estimated_input_tokens": total_chars // 4,
+        },
+    }
 
 
 # ── Callback handler ────────────────────────────────────────────────────
@@ -251,10 +476,21 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Record the start time, publish the call identity for the
-        streaming sink, and tell the renderer to draw a "thinking…"
-        header (and start a heartbeat task)."""
+        streaming sink, write the full prompt to llm_requests.jsonl,
+        and tell the renderer to draw a "thinking…" header (and start
+        a heartbeat task)."""
         self._starts[run_id] = time.perf_counter()
         self._publish_call_context(run_id, metadata, serialized)
+        # Write the request-side log row BEFORE notifying the
+        # renderer so a slow disk doesn't delay the stderr header.
+        # Failures are swallowed inside _append_request_event.
+        request_event = _build_request_event(
+            lc_run_id=run_id,
+            metadata=metadata,
+            serialized=serialized,
+            messages=messages,
+        )
+        _append_request_event(request_event["run_id"], request_event)
         self._notify_render_start(run_id, metadata, serialized)
 
     async def on_llm_start(
@@ -272,6 +508,21 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         instead of ``on_chat_model_start``. Cover both."""
         self._starts[run_id] = time.perf_counter()
         self._publish_call_context(run_id, metadata, serialized)
+        # Wrap the raw prompt strings in a single synthetic ``human``
+        # message so the request-log row has a consistent shape across
+        # providers. Real chat-model providers route through
+        # on_chat_model_start above; this branch is the fallback for
+        # text-completion-style providers.
+        synthetic = [
+            [type("PromptStr", (), {"content": p})() for p in (prompts or [])]
+        ]
+        request_event = _build_request_event(
+            lc_run_id=run_id,
+            metadata=metadata,
+            serialized=serialized,
+            messages=synthetic,
+        )
+        _append_request_event(request_event["run_id"], request_event)
         self._notify_render_start(run_id, metadata, serialized)
 
     # ── end / error hooks ────────────────────────────────────────────────

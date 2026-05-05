@@ -23,12 +23,16 @@ imported from ``observability/__init__.py`` without triggering the
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import re
+import shutil
 import sys
 import time
 from typing import Any
+from uuid import UUID
 
 
 # ─────────────────────────── ANSI helpers ────────────────────────────
@@ -194,6 +198,25 @@ class _Live:
         # Per-node dedup of duplicated AIMessage content (planner emits
         # the same JSON twice across retry+repaired-parse path).
         self._seen_msg_hashes: set[int] = set()
+        # Per-LLM-call thinking state, keyed by the LangChain run_id
+        # UUID. Each entry holds:
+        #   started   — perf_counter timestamp
+        #   agent     — agent_id label for the header
+        #   model     — display string
+        #   delta_seen— True once any reasoning delta has arrived
+        #               (suppresses heartbeat — deltas already prove
+        #               liveness and the heartbeat would race them)
+        #   last_delta— perf_counter of the most recent delta
+        #   on_new_line — True when the next delta needs to start on a
+        #                 fresh line (after the header, after a "still
+        #                 thinking" heartbeat). Guards against deltas
+        #                 appearing concatenated on the same line as
+        #                 prior emit() output.
+        #   heartbeat_task — asyncio.Task or None
+        self._think_state: dict[Any, dict[str, Any]] = {}
+        # Startup banner runs once per process even if the runner
+        # invokes the renderer multiple times (e.g. langgraph dev).
+        self._banner_emitted: bool = False
 
     # -------- benchmark boundaries (always visible) ----------
 
@@ -643,64 +666,357 @@ class _Live:
     # bar.
     _CONTEXT_WARN_INPUT_TOKENS = 100_000
 
-    def llm_call(
+    # Heartbeat cadence — how often to print "…still thinking" while
+    # the model is producing zero reasoning deltas. 30 s lands between
+    # "too noisy" and "useful pulse" for the typical xhigh-effort
+    # 30 s – 3 min Codex thinking phase.
+    _HEARTBEAT_SECS = float(os.environ.get(
+        "SWARM_LIVE_THINK_HEARTBEAT_SECS", "30",
+    ))
+
+    def thinking_started(
         self,
         *,
         agent: str,
+        run_id: Any,
         model: str,
-        input_tokens: int,
-        output_tokens: int,
-        reasoning_tokens: int,
-        duration_ms: int,
-        running_input: int,
-        peak_input: int,
+        reasoning_effort: str = "",
     ) -> None:
-        """Surface a per-LLM-call line and a context-rot warning when due.
+        """Print the "🧠 thinking…" header for a new LLM call and
+        schedule a heartbeat task.
 
-        Cadence:
-          - silent: no output ever.
-          - compact: only the context-rot warning (one line, once per
-            agent, when peak_input crosses _CONTEXT_WARN_INPUT_TOKENS).
-            Every individual call would drown the console.
-          - verbose: one dim line per call ``🧠 agent  model  in/out/think  ms``
-            so the user can watch tokens accumulate live.
+        Mode behaviour:
+          - silent: no output, no heartbeat.
+          - compact: header + heartbeat (deltas suppressed; the
+            heartbeat is the user's only mid-call signal).
+          - verbose: header + per-delta streaming + heartbeat
+            fallback when no delta has arrived for HEARTBEAT_SECS.
 
-        The peak-input dedup state lives on the singleton so successive
-        calls from the same agent don't repeat the same warning.
+        Idempotent — calling twice with the same ``run_id`` cancels
+        the previous heartbeat and starts fresh.
         """
         mode = _mode()
         if mode == "silent":
             return
 
-        # Verbose: one dim line per call.
-        if mode == "verbose":
-            ag = _agent_tag(agent)
-            tokens_part = (
-                f"in={_fmt_tokens(input_tokens)} "
-                f"out={_fmt_tokens(output_tokens)} "
-                f"think={_fmt_tokens(reasoning_tokens)} "
-                f"running_in={_fmt_tokens(running_input)}"
+        # Cancel any pre-existing state for this run_id (LangChain
+        # doesn't normally re-emit start with the same UUID, but
+        # defensive — leaked tasks would race the heartbeat).
+        self._cancel_heartbeat(run_id)
+
+        ag = _agent_tag(agent)
+        effort = f", {reasoning_effort}" if reasoning_effort else ""
+        head = _paint("🧠 ", _DIM, _CYAN)
+        body = _paint(f"thinking ({model}{effort})…", _DIM)
+        _emit(f"{_now()}  {head}{ag} {body}")
+
+        # Record state for delta routing + heartbeat.
+        self._think_state[run_id] = {
+            "started":     time.perf_counter(),
+            "agent":       agent,
+            "model":       model,
+            "delta_seen":  False,
+            "last_delta":  time.perf_counter(),
+            "on_new_line": True,  # next delta starts on its own line
+            "heartbeat_task": None,
+        }
+        # Schedule the heartbeat. If we're not running inside an event
+        # loop (sync ChatCodex._generate path, tests), skip it — the
+        # heartbeat is a quality-of-life feature, not load-bearing.
+        try:
+            loop = asyncio.get_running_loop()
+            self._think_state[run_id]["heartbeat_task"] = loop.create_task(
+                self._heartbeat_loop(run_id),
             )
+        except RuntimeError:
+            # No running loop — skip heartbeat. Done line still fires.
+            pass
+
+    async def _heartbeat_loop(self, run_id: Any) -> None:
+        """Per-call heartbeat. Emits "…still thinking (Xs elapsed)"
+        every ``_HEARTBEAT_SECS`` *if* no reasoning delta has arrived
+        in that window. Cancelled by ``thinking_finished``.
+        """
+        try:
+            while True:
+                await asyncio.sleep(self._HEARTBEAT_SECS)
+                state = self._think_state.get(run_id)
+                if state is None:
+                    return  # call finished while we slept
+                # If a delta arrived recently, the user already has
+                # mid-call signal — skip this beat.
+                quiet_for = time.perf_counter() - state["last_delta"]
+                if quiet_for < self._HEARTBEAT_SECS:
+                    continue
+                elapsed = time.perf_counter() - state["started"]
+                ag = _agent_tag(state["agent"])
+                head = _paint("🧠 ", _DIM, _CYAN)
+                body = _paint(
+                    f"…still thinking ({elapsed:.0f}s elapsed)", _DIM,
+                )
+                # If a delta was streaming on a continuation line,
+                # break to a fresh line BEFORE the heartbeat so we
+                # don't concatenate it onto in-progress text. Mark
+                # ``on_new_line`` so the next delta also starts fresh.
+                if not state["on_new_line"]:
+                    print("", file=sys.stderr, flush=True)
+                state["on_new_line"] = True
+                _emit(f"{_now()}  {head}{ag} {body}")
+        except asyncio.CancelledError:
+            return
+
+    def thinking_delta(
+        self,
+        *,
+        agent: str,
+        run_id: Any,
+        text: str,
+    ) -> None:
+        """Stream a chunk of the model's chain-of-thought summary to
+        stderr. Called from inside the SSE parser (via the closure
+        built in ``ChatCodex._build_reasoning_sink``) so deltas land
+        live as the model produces them.
+
+        Mode behaviour:
+          - silent / compact: suppressed. Compact users get the
+            header + heartbeat + done line, but not the live text.
+          - verbose: dim cyan, written directly without ``_now()``
+            timestamp so successive deltas concatenate into a
+            running paragraph rather than fragmenting per chunk.
+        """
+        if not text:
+            return
+        if _mode() != "verbose":
+            # Even when not rendered, mark delta-seen so the
+            # heartbeat suppresses itself — we know the call is
+            # alive even if we're not painting it.
+            state = self._think_state.get(run_id)
+            if state is not None:
+                state["delta_seen"] = True
+                state["last_delta"] = time.perf_counter()
+            return
+
+        state = self._think_state.get(run_id)
+        if state is None:
+            # Late delta after thinking_finished — drop silently.
+            return
+        state["delta_seen"] = True
+        state["last_delta"] = time.perf_counter()
+
+        # If we're starting a fresh continuation block (right after
+        # the header or after a heartbeat broke the line), emit an
+        # indent prefix so the streaming text aligns under the
+        # header column.
+        if state["on_new_line"]:
+            indent = " " * 12  # matches the existing 💭 hanging indent
+            sys.stderr.write(_paint(indent, _DIM, _CYAN))
+            state["on_new_line"] = False
+
+        # Write the raw delta. Trailing newlines split the stream
+        # across multiple visual lines — preserve them but reset
+        # on_new_line so the next delta re-indents.
+        out = _paint(text, _DIM, _CYAN)
+        sys.stderr.write(out)
+        if text.endswith("\n"):
+            state["on_new_line"] = True
+        sys.stderr.flush()
+
+    def thinking_finished(
+        self,
+        *,
+        agent: str,
+        run_id: Any,
+        duration_ms: int,
+        model: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        reasoning_tokens: int = 0,
+        running_input: int = 0,
+        peak_input: int = 0,
+        error: str | None = None,
+    ) -> None:
+        """Close the streaming thinking line for ``run_id`` and emit
+        the per-call "done" summary. Always cancels the heartbeat.
+
+        Compact and verbose both get the done line; only the format
+        differs slightly. Silent mode still cancels the heartbeat
+        (it must, to avoid leaking asyncio tasks) but emits nothing.
+        """
+        # Cancel heartbeat first so it can't fire after the done
+        # line is painted.
+        self._cancel_heartbeat(run_id)
+        state = self._think_state.pop(run_id, None)
+
+        mode = _mode()
+        if mode == "silent":
+            return
+
+        # If a delta was mid-line in verbose mode, flush a newline
+        # so the done line lands cleanly.
+        if state is not None and not state.get("on_new_line", True):
+            print("", file=sys.stderr, flush=True)
+
+        ag = _agent_tag(agent)
+        rot = peak_input >= self._CONTEXT_WARN_INPUT_TOKENS
+
+        if error:
+            head = _paint("🧠 ", _BOLD, _RED)
+            body = _paint(
+                f"failed ({_fmt_ms(duration_ms)}, {error})", _RED,
+            )
+            _emit(f"{_now()}  {head}{ag} {body}")
+            return
+
+        tokens_part = (
+            f"in={_fmt_tokens(input_tokens)} "
+            f"out={_fmt_tokens(output_tokens)} "
+            f"think={_fmt_tokens(reasoning_tokens)}"
+        )
+        if mode == "verbose":
+            tokens_part += f" running_in={_fmt_tokens(running_input)}"
+
+        if rot:
+            head = _paint("🧠 ", _BOLD, _YELLOW)
+            tail = _paint(
+                f"done ({_fmt_ms(duration_ms)}, {tokens_part})  "
+                f"⚠ context-rot at peak={_fmt_tokens(peak_input)}",
+                _BOLD, _YELLOW,
+            )
+            _emit(f"{_now()}  {head}{ag} {tail}")
+        else:
             head = _paint("🧠 ", _DIM, _CYAN)
             body = _paint(
-                f"{model}  {tokens_part}  ({_fmt_ms(duration_ms)})", _DIM,
+                f"done ({_fmt_ms(duration_ms)}, {tokens_part})", _DIM,
             )
             _emit(f"{_now()}  {head}{ag} {body}")
 
-        # Both compact and verbose: fire the context-rot warning when
-        # peak_input crosses the threshold for the first time per agent.
-        if peak_input >= self._CONTEXT_WARN_INPUT_TOKENS:
-            key = f"context-rot:{agent}"
-            if key not in self._seen_msg_hashes:
-                self._seen_msg_hashes.add(key)
-                self.warning(
-                    f"context-rot risk — agent {agent!r} just sent "
-                    f"{_fmt_tokens(peak_input)} input tokens in a single "
-                    f"call. Quality on Codex / o-series degrades visibly "
-                    f"past ~128k. Consider stopping and re-dispatching "
-                    f"a fresh worker.",
-                    kind="context-rot",
-                )
+    def _cancel_heartbeat(self, run_id: Any) -> None:
+        """Cancel and forget the heartbeat task for ``run_id`` if any.
+
+        Idempotent — safe to call when no task exists or after the
+        task has already completed.
+        """
+        state = self._think_state.get(run_id)
+        if state is None:
+            return
+        task = state.get("heartbeat_task")
+        if task is None:
+            return
+        try:
+            if not task.done():
+                task.cancel()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # -------- Back-compat shim ----------
+    #
+    # ``llm_call`` was the old per-call stderr emitter. The
+    # ``thinking_*`` pipeline supersedes it but call sites that
+    # imported it directly (none currently, but defensive) get a
+    # no-op so nothing breaks.
+
+    def llm_call(self, **_kwargs: Any) -> None:
+        """Deprecated — see ``thinking_started`` /
+        ``thinking_finished``. Kept as a no-op for back-compat."""
+        return
+
+    # -------- Startup banner ----------
+
+    def startup_banner(
+        self,
+        *,
+        model_info: dict | None,
+        log_dir: str | None,
+        bench_ids: list[str] | None,
+        budgets_text: str | None = None,
+    ) -> None:
+        """Print the startup banner once per process invocation.
+
+        Shows provider/model/reasoning, all budgets and verbosity
+        knobs, the **absolute** log directory, and a legend
+        explaining which JSONL files populate live vs. at run end.
+
+        ``silent`` mode falls back to a single one-liner so even
+        the most muted runs still announce what they're running.
+        """
+        if self._banner_emitted:
+            return
+        self._banner_emitted = True
+
+        mi = model_info or {}
+        bench_count = len(bench_ids or [])
+        provider = str(mi.get("provider") or "?")
+        model = str(mi.get("model") or "?")
+        mode = _mode()
+
+        if mode == "silent":
+            _emit(
+                f"=== SwarmAttacker  {provider}/{model}  {mode}  "
+                f"{bench_count} benches ==="
+            )
+            return
+
+        # Determine terminal width so the rule line fits cleanly.
+        try:
+            cols = shutil.get_terminal_size((80, 24)).columns
+        except Exception:  # noqa: BLE001
+            cols = 80
+        cols = max(60, min(cols, 100))
+
+        # Title line: ═════ SwarmAttacker run ═════
+        # Center the label within ``cols`` *visible* columns, then
+        # apply ANSI colour AFTER the centring so the escape codes
+        # don't break the math.
+        label = " SwarmAttacker run "
+        pad = max(0, cols - len(label))
+        left = "═" * (pad // 2)
+        right = "═" * (pad - pad // 2)
+        title_line = left + label + right
+        _emit(_paint(title_line, _BOLD, _CYAN))
+        _emit(_paint("═" * cols, _CYAN))
+
+        def kv(key: str, val: str) -> None:
+            _emit(f"  {_paint(key, _BOLD)}{val}")
+
+        # LLM block
+        reff = mi.get("reasoning_effort") or "—"
+        rsum = mi.get("reasoning_summary") or "—"
+        kv("Provider:   ", f"{provider}   {_paint('Model:', _BOLD)} {model}")
+        kv("Reasoning:  ", f"effort={reff}  summary={rsum}")
+
+        # Budgets / verbosity from describe_config()
+        cfg_block = (budgets_text or "").splitlines()
+        if cfg_block:
+            for ln in cfg_block:
+                # describe_config() emits "Budgets:\n  k = v\n..." —
+                # rewrap so each line is indented uniformly under the
+                # banner column.
+                _emit(f"  {ln}" if not ln.startswith(" ") else f"  {ln}")
+
+        # Log dir + file legend
+        if log_dir:
+            kv("Log root:   ", str(log_dir))
+            legend = [
+                ("nodes.jsonl",          "1 line per node finish — quiet during long workers"),
+                ("llm_calls.jsonl",      "1 line per LLM call — populates live"),
+                ("terminal_events.jsonl","1 line per shell command — populates live"),
+                ("final_state.json",    "final agent_state at run end"),
+                ("summary.md",          "human digest at run end"),
+            ]
+            for i, (name, desc) in enumerate(legend):
+                bullet = "└─" if i == len(legend) - 1 else "├─"
+                _emit(_paint(
+                    f"              {bullet} {name:<22s} ({desc})", _DIM,
+                ))
+
+        # Benches
+        if bench_ids:
+            preview = ", ".join(bench_ids[:8])
+            if len(bench_ids) > 8:
+                preview += f", … ({len(bench_ids)} total)"
+            kv("Benches:    ", preview)
+
+        _emit(_paint(rule, _CYAN))
 
 
 _AGENT_TAG_WIDTH = 24  # fits owasp-input-validation (22) without truncation

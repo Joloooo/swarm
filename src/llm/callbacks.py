@@ -40,6 +40,7 @@ to grep the log file mid-run.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import threading
@@ -54,6 +55,27 @@ from langchain_core.outputs import LLMResult
 from src.observability import run_dir
 
 logger = logging.getLogger(__name__)
+
+
+# ── Per-call context (read by ChatCodex's reasoning-stream sink) ────────
+#
+# When the renderer needs to attribute an in-flight reasoning delta to a
+# specific agent — without plumbing agent_id through every parser call —
+# we stash the call's identity on a ContextVar that the LLM provider
+# reads when building its delta closure. This avoids needing to extend
+# parser signatures with kwargs that mean nothing to non-Codex providers.
+#
+# Shape: {"agent_id": str, "run_id": str | None, "node": str | None,
+#         "model": str | None, "lc_run_id": UUID}
+#
+# The ContextVar is set in ``on_chat_model_start`` / ``on_llm_start`` and
+# reset in ``on_llm_end`` / ``on_llm_error``. ContextVars copy correctly
+# across asyncio.create_task boundaries, so parallel fan-out workers
+# each see their own agent_id without collision.
+
+CURRENT_LLM_CALL: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "swarm_current_llm_call", default=None,
+)
 
 
 # ── Per-agent running totals ────────────────────────────────────────────
@@ -228,8 +250,12 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        """Record the start time so we can report duration on end."""
+        """Record the start time, publish the call identity for the
+        streaming sink, and tell the renderer to draw a "thinking…"
+        header (and start a heartbeat task)."""
         self._starts[run_id] = time.perf_counter()
+        self._publish_call_context(run_id, metadata, serialized)
+        self._notify_render_start(run_id, metadata, serialized)
 
     async def on_llm_start(
         self,
@@ -245,6 +271,8 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         """Some providers route through ``on_llm_start`` (string prompts)
         instead of ``on_chat_model_start``. Cover both."""
         self._starts[run_id] = time.perf_counter()
+        self._publish_call_context(run_id, metadata, serialized)
+        self._notify_render_start(run_id, metadata, serialized)
 
     # ── end / error hooks ────────────────────────────────────────────────
 
@@ -279,6 +307,32 @@ class TokenLoggingCallback(AsyncCallbackHandler):
             reasoning_tokens=usage["reasoning_tokens"],
         )
 
+        # Tell the renderer to close the streaming line / cancel the
+        # heartbeat. We do this BEFORE writing the disk event so the
+        # "🧠 done" line on stderr appears alongside the same fields
+        # that just landed in llm_calls.jsonl.
+        try:
+            from src.live import LIVE  # lazy — avoid import cycle
+            LIVE.thinking_finished(
+                agent=agent_id,
+                run_id=run_id,
+                duration_ms=dt_ms,
+                model=model,
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+                reasoning_tokens=usage["reasoning_tokens"],
+                running_input=running.input_tokens,
+                peak_input=running.peak_input,
+            )
+        except Exception:  # noqa: BLE001 — never let live rendering break logging
+            pass
+        # Clear the per-call ContextVar so a stray reasoning delta
+        # arriving after on_llm_end can't be misattributed.
+        try:
+            CURRENT_LLM_CALL.set(None)
+        except Exception:  # noqa: BLE001
+            pass
+
         event = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S")
                   + f".{int((time.time() % 1) * 1000):03d}",
@@ -294,23 +348,9 @@ class TokenLoggingCallback(AsyncCallbackHandler):
             "running_peak_input": running.peak_input,
         }
         _append_llm_event(run_id_str, event)
-
-        # Surface a one-line LIVE entry for verbose-mode users only —
-        # compact mode would drown in these (one per LLM call).
-        try:
-            from src.live import LIVE  # lazy — avoid import cycle
-            LIVE.llm_call(
-                agent=agent_id,
-                model=model,
-                input_tokens=usage["input_tokens"],
-                output_tokens=usage["output_tokens"],
-                reasoning_tokens=usage["reasoning_tokens"],
-                duration_ms=dt_ms,
-                running_input=running.input_tokens,
-                peak_input=running.peak_input,
-            )
-        except Exception:  # noqa: BLE001 — never let live rendering break logging
-            pass
+        # Note: the per-call "done" line on stderr is emitted by
+        # ``LIVE.thinking_finished`` above, BEFORE the disk write,
+        # so we don't double-print here.
 
     async def on_llm_error(
         self,
@@ -329,6 +369,30 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         agent_id = str(meta.get("agent_id") or meta.get("ls_agent") or "_unknown")
         node = str(meta.get("node") or "")
         run_id_str = meta.get("run_id")
+
+        # Tear down the renderer's heartbeat / streaming state for
+        # this call so an error doesn't leave a "🧠 thinking…" header
+        # hanging without a closer.
+        try:
+            from src.live import LIVE  # lazy — avoid import cycle
+            LIVE.thinking_finished(
+                agent=agent_id,
+                run_id=run_id,
+                duration_ms=dt_ms,
+                model=meta.get("model") or "?",
+                input_tokens=0,
+                output_tokens=0,
+                reasoning_tokens=0,
+                running_input=0,
+                peak_input=0,
+                error=type(error).__name__,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            CURRENT_LLM_CALL.set(None)
+        except Exception:  # noqa: BLE001
+            pass
 
         with _TOTALS_LOCK:
             t = TOKEN_TOTALS.setdefault(agent_id, _AgentTokenTotals())
@@ -351,6 +415,78 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         _append_llm_event(run_id_str, event)
 
     # ── helpers ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _publish_call_context(
+        run_id: UUID,
+        metadata: dict | None,
+        serialized: dict | None,
+    ) -> None:
+        """Stash the calling identity on :data:`CURRENT_LLM_CALL`.
+
+        Read by ``ChatCodex._build_reasoning_sink`` to attribute
+        reasoning deltas to the right agent_id without plumbing
+        kwargs through the parser API.
+        """
+        meta = metadata or {}
+        ser = serialized or {}
+        # Best-effort model name extraction from the serialized
+        # callable kwargs — covers ChatCodex (model on .kwargs) plus
+        # langchain-anthropic / langchain-openai variants.
+        model = (
+            (ser.get("kwargs") or {}).get("model")
+            or (ser.get("kwargs") or {}).get("model_name")
+            or meta.get("model")
+            or "?"
+        )
+        try:
+            CURRENT_LLM_CALL.set({
+                "agent_id": str(meta.get("agent_id") or meta.get("ls_agent")
+                                or "_unknown"),
+                "run_id":   meta.get("run_id"),
+                "node":     meta.get("node"),
+                "model":    str(model),
+                "lc_run_id": run_id,
+            })
+        except Exception:  # noqa: BLE001
+            pass
+
+    @staticmethod
+    def _notify_render_start(
+        run_id: UUID,
+        metadata: dict | None,
+        serialized: dict | None,
+    ) -> None:
+        """Tell the live renderer to draw the "🧠 thinking…" header
+        and start a heartbeat. Best-effort; never raises."""
+        try:
+            from src.live import LIVE  # lazy — avoid import cycle
+        except Exception:  # noqa: BLE001
+            return
+        meta = metadata or {}
+        ser = serialized or {}
+        model = (
+            (ser.get("kwargs") or {}).get("model")
+            or (ser.get("kwargs") or {}).get("model_name")
+            or meta.get("model")
+            or "?"
+        )
+        # Reasoning effort — only Codex carries it; others harmless to
+        # display as "" / None.
+        reasoning_effort = (
+            (ser.get("kwargs") or {}).get("reasoning_effort")
+            or meta.get("reasoning_effort")
+        )
+        try:
+            LIVE.thinking_started(
+                agent=str(meta.get("agent_id") or meta.get("ls_agent")
+                          or "_unknown"),
+                run_id=run_id,
+                model=str(model),
+                reasoning_effort=str(reasoning_effort or ""),
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     @staticmethod
     def _extract_usage(response: LLMResult) -> dict[str, int]:

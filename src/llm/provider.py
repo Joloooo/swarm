@@ -142,6 +142,33 @@ def _log_provider_diagnostic(config: LLMConfig, base_url: str | None) -> None:
         )
 
 
+def current_default_config() -> dict[str, Any]:
+    """Return a small display dict describing the active LLM defaults.
+
+    Used by the startup banner in ``src/live.py:LIVE.startup_banner``
+    so the user sees provider / model / reasoning settings up front
+    without having to grep ``logs/`` after the fact. Reads the
+    ``LLMConfig()`` defaults — which are themselves driven by
+    ``config.budgets`` env-var overrides — so this naturally
+    reflects whatever the next ``get_llm()`` call would pick.
+
+    Returns the empty dict on any error so the banner stays
+    rendering-safe.
+    """
+    try:
+        cfg = LLMConfig()
+        return {
+            "provider":          cfg.provider.value,
+            "model":             cfg.model,
+            "temperature":       cfg.temperature,
+            "max_tokens":        cfg.max_tokens,
+            "reasoning_effort":  cfg.reasoning_effort,
+            "reasoning_summary": cfg.reasoning_summary,
+        }
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def get_llm(config: LLMConfig | None = None) -> BaseChatModel:
     """Return a LangChain chat model for the given config.
 

@@ -437,6 +437,27 @@ async def main_async(args) -> int:
             f"{len(ids)} remaining"
         )
 
+    # Startup banner — prints model / budgets / verbosity / log root /
+    # file legend before the first bench. Idempotent across calls so
+    # re-entrant invocations (langgraph dev) only print once.
+    try:
+        from src.graph import describe_config
+        from src.llm.provider import current_default_config
+        # Resolve the absolute log dir for the FIRST bench; subsequent
+        # benches each get their own dir but the banner is one-shot.
+        first_log_dir = (
+            str((run_dir(make_run_id(benchmark_id=ids[0]))).resolve())
+            if ids else None
+        )
+        LIVE.startup_banner(
+            model_info=current_default_config(),
+            log_dir=first_log_dir,
+            bench_ids=list(ids),
+            budgets_text=describe_config(),
+        )
+    except Exception:  # noqa: BLE001 — banner failure must not stop the run
+        pass
+
     LIVE.runner_message(f"running {len(ids)} benchmark(s)")
     summary = {"pass": 0, "fail": 0, "error": 0}
 

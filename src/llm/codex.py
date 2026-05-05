@@ -17,13 +17,15 @@ OpenAI Codex CLI source code:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import httpx
 
@@ -251,34 +253,43 @@ def stream_codex(
         "temperature", "max_output_tokens", "tool_choice", "reasoning",
     ]
 
-    with httpx.Client(timeout=timeout) as client:
-        while True:
-            with client.stream("POST", CODEX_API_ENDPOINT, json=body, headers=headers) as resp:
-                if resp.status_code == 400:
-                    resp.read()
-                    error_text = resp.text.lower()
-                    removed = False
-                    for key in removable_keys:
-                        if key in body and key in error_text:
-                            logger.debug("Removing unsupported param '%s' and retrying", key)
-                            del body[key]
-                            removable_keys.remove(key)
-                            removed = True
-                            break
-                    if removed:
-                        continue
-                    raise CodexAPIError(
-                        f"Codex API returned 400: {resp.text[:500]}",
-                        status_code=400,
-                    )
-                if resp.status_code >= 400:
-                    resp.read()
-                    raise CodexAPIError(
-                        f"Codex API returned {resp.status_code}: {resp.text[:500]}",
-                        status_code=resp.status_code,
-                    )
-                yield from _parse_sse_lines(resp.iter_lines())
-                return
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            while True:
+                with client.stream("POST", CODEX_API_ENDPOINT, json=body, headers=headers) as resp:
+                    if resp.status_code == 400:
+                        resp.read()
+                        error_text = resp.text.lower()
+                        removed = False
+                        for key in removable_keys:
+                            if key in body and key in error_text:
+                                logger.debug("Removing unsupported param '%s' and retrying", key)
+                                del body[key]
+                                removable_keys.remove(key)
+                                removed = True
+                                break
+                        if removed:
+                            continue
+                        raise CodexAPIError(
+                            f"Codex API returned 400: {resp.text[:500]}",
+                            status_code=400,
+                        )
+                    if resp.status_code >= 400:
+                        resp.read()
+                        raise CodexAPIError(
+                            f"Codex API returned {resp.status_code}: {resp.text[:500]}",
+                            status_code=resp.status_code,
+                        )
+                    yield from _parse_sse_lines(resp.iter_lines())
+                    return
+    except httpx.HTTPError as e:
+        # Translate httpx transport errors (connection reset, peer-closed,
+        # incomplete chunked read, read timeout, ...) into a retryable
+        # CodexTransportError so the existing _generate retry loop picks
+        # them up. Without this they used to crash workers / the planner.
+        raise CodexTransportError(
+            f"Codex transport error ({type(e).__name__}): {e}"
+        ) from e
 
 
 async def astream_codex(
@@ -332,56 +343,281 @@ async def astream_codex(
         "temperature", "max_output_tokens", "tool_choice", "reasoning",
     ]
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        while True:
-            async with client.stream("POST", CODEX_API_ENDPOINT, json=body, headers=headers) as resp:
-                if resp.status_code == 400:
-                    await resp.aread()
-                    error_text = resp.text.lower()
-                    removed = False
-                    for key in removable_keys:
-                        if key in body and key in error_text:
-                            logger.debug("Removing unsupported param '%s' and retrying", key)
-                            del body[key]
-                            removable_keys.remove(key)
-                            removed = True
-                            break
-                    if removed:
-                        continue
-                    raise CodexAPIError(
-                        f"Codex API returned 400: {resp.text[:500]}",
-                        status_code=400,
-                    )
-                if resp.status_code >= 400:
-                    await resp.aread()
-                    raise CodexAPIError(
-                        f"Codex API returned {resp.status_code}: {resp.text[:500]}",
-                        status_code=resp.status_code,
-                    )
-                # Parse SSE from async line iterator
-                data_lines: list[str] = []
-                async for raw in resp.aiter_lines():
-                    line = raw.rstrip("\n")
-                    if not line:
-                        if data_lines:
-                            payload = "\n".join(data_lines)
-                            data_lines = []
-                            if payload.strip() == "[DONE]":
-                                continue
-                            try:
-                                yield json.loads(payload)
-                            except json.JSONDecodeError:
-                                continue
-                        continue
-                    if line.startswith("data:"):
-                        data_lines.append(line[5:].lstrip())
-                return
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            while True:
+                async with client.stream("POST", CODEX_API_ENDPOINT, json=body, headers=headers) as resp:
+                    if resp.status_code == 400:
+                        await resp.aread()
+                        error_text = resp.text.lower()
+                        removed = False
+                        for key in removable_keys:
+                            if key in body and key in error_text:
+                                logger.debug("Removing unsupported param '%s' and retrying", key)
+                                del body[key]
+                                removable_keys.remove(key)
+                                removed = True
+                                break
+                        if removed:
+                            continue
+                        raise CodexAPIError(
+                            f"Codex API returned 400: {resp.text[:500]}",
+                            status_code=400,
+                        )
+                    if resp.status_code >= 400:
+                        await resp.aread()
+                        raise CodexAPIError(
+                            f"Codex API returned {resp.status_code}: {resp.text[:500]}",
+                            status_code=resp.status_code,
+                        )
+                    # Parse SSE from async line iterator
+                    data_lines: list[str] = []
+                    async for raw in resp.aiter_lines():
+                        line = raw.rstrip("\n")
+                        if not line:
+                            if data_lines:
+                                payload = "\n".join(data_lines)
+                                data_lines = []
+                                if payload.strip() == "[DONE]":
+                                    continue
+                                try:
+                                    yield json.loads(payload)
+                                except json.JSONDecodeError:
+                                    continue
+                            continue
+                        if line.startswith("data:"):
+                            data_lines.append(line[5:].lstrip())
+                    return
+    except httpx.HTTPError as e:
+        # See ``stream_codex`` for the rationale — translate httpx
+        # transport errors into retryable CodexTransportError. Catching
+        # here (inside the async generator, before the ``async with``
+        # contexts unwind) also fixes the "error during closing of
+        # asynchronous generator" warnings that appeared at process
+        # shutdown when an httpx error left the stream half-open.
+        raise CodexTransportError(
+            f"Codex transport error ({type(e).__name__}): {e}"
+        ) from e
 
 
 class CodexAPIError(Exception):
+    """Base for all Codex API errors."""
+
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
         self.status_code = status_code
+
+
+# ── Stream-level failure taxonomy ──────────────────────────────────────────
+#
+# The Codex Responses API can terminate a stream with three event types:
+#
+#   response.completed / response.done   — happy path, normal output.
+#   response.failed                      — request errored mid-stream.
+#                                          Carries an ``error`` dict with
+#                                          a ``code`` and ``message``.
+#   response.incomplete                  — partial output cut off (e.g.
+#                                          ``max_output_tokens`` exceeded).
+#
+# Before this taxonomy existed, the parser silently returned an empty
+# CodexResponse on failed/incomplete events because ``_is_terminal`` only
+# matched the happy path. That looked like an empty AIMessage to the
+# LangGraph agent loop, which interpreted "no tool call, no content" as
+# "the agent decided to stop" — every worker died after one rate-limit
+# event with zero findings. See logs/run-XBEN-006-24-20260503T211810-*
+# for the failure mode this taxonomy + retry logic was added to fix.
+#
+# The error-code → exception mapping mirrors the upstream Codex CLI in
+# codex-rs/codex-api/src/sse/responses.rs (process_responses_event /
+# is_*_error / try_parse_retry_after). When OpenAI adds new error codes,
+# update both this taxonomy and ``_classify_response_failed`` below.
+
+class CodexStreamError(CodexAPIError):
+    """Raised by the SSE parser on a terminal failure event.
+
+    Subclasses set ``code`` (the upstream OpenAI error code) and
+    ``retryable`` (whether reissuing the request can plausibly succeed).
+    A retry hint extracted from the error message — common on
+    ``rate_limit_exceeded`` ("try again in 1.898s") — is exposed via
+    ``retry_after`` (seconds, ``None`` when absent).
+    """
+
+    code: str = "stream_error"
+    retryable: bool = False
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        retry_after: float | None = None,
+    ):
+        super().__init__(message)
+        if code:
+            self.code = code
+        self.retry_after = retry_after
+
+
+class CodexRateLimitError(CodexStreamError):
+    """TPM/RPM rate limit. Retryable; honors ``retry_after`` if present."""
+    code = "rate_limit_exceeded"
+    retryable = True
+
+
+class CodexServerOverloadedError(CodexStreamError):
+    """Upstream is overloaded ("server_is_overloaded" / "slow_down")."""
+    code = "server_is_overloaded"
+    retryable = True
+
+
+class CodexContextWindowError(CodexStreamError):
+    """Input exceeded the model's context window. NOT retryable —
+    the same input won't fit on retry; the caller must trim history."""
+    code = "context_length_exceeded"
+
+
+class CodexQuotaExceededError(CodexStreamError):
+    """Account quota exceeded ("insufficient_quota"). NOT retryable
+    within this run."""
+    code = "insufficient_quota"
+
+
+class CodexCyberPolicyError(CodexStreamError):
+    """Cyber-policy refusal. NOT retryable — the request itself is
+    blocked. Caller may want to rephrase / re-emphasize authorization."""
+    code = "cyber_policy"
+
+
+class CodexInvalidPromptError(CodexStreamError):
+    """``invalid_prompt`` — the request body is malformed or the prompt
+    triggers an upstream validation rule. NOT retryable as-is."""
+    code = "invalid_prompt"
+
+
+class CodexUsageNotIncludedError(CodexStreamError):
+    """``usage_not_included`` — the ChatGPT plan doesn't include this
+    model. NOT retryable; user must change plan or model."""
+    code = "usage_not_included"
+
+
+class CodexIncompleteError(CodexStreamError):
+    """Raised on ``response.incomplete`` — partial output cut off,
+    typically by ``max_output_tokens`` or a content-filter trigger."""
+    code = "incomplete"
+
+
+class CodexTransportError(CodexStreamError):
+    """Raised when the underlying HTTP transport fails — connection
+    reset, peer-closed-connection, read timeout, partial chunked read,
+    DNS error, etc.
+
+    These are usually transient and worth retrying. We translate
+    httpx exceptions into this type so the same retry loop that
+    handles rate-limits / server-overloaded can handle network blips
+    too, instead of letting them bubble all the way up to the planner
+    and force a premature ``report``.
+    """
+    code = "transport_error"
+    retryable = True
+
+
+# Matches the "try again in <N> seconds." / "in <N>ms." hint that OpenAI
+# embeds in rate-limit error messages. Mirrors codex-rs's
+# ``rate_limit_regex`` (codex-rs/codex-api/src/sse/responses.rs:582).
+_RETRY_AFTER_RE = re.compile(
+    r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)"
+)
+
+
+def _parse_retry_after(error: dict) -> float | None:
+    """Return retry-after seconds parsed from a Codex error dict.
+
+    Only fires when ``error.code == "rate_limit_exceeded"`` — the only
+    code where OpenAI consistently emits a retry hint. Returns ``None``
+    if no parseable hint is present.
+    """
+    if error.get("code") != "rate_limit_exceeded":
+        return None
+    msg = error.get("message") or ""
+    m = _RETRY_AFTER_RE.search(msg)
+    if not m:
+        return None
+    value = float(m.group(1))
+    unit = m.group(2).lower()
+    if unit.startswith("ms"):
+        return value / 1000.0
+    return value
+
+
+# ── Retry policy for retryable stream failures ───────────────────────────
+# Applied in ``ChatCodex._generate`` / ``_agenerate``. Triggered on
+# CodexRateLimitError, CodexServerOverloadedError, and any generic
+# CodexStreamError marked ``.retryable``. Non-retryable errors
+# (context-window, quota, cyber-policy, invalid-prompt) bubble up
+# immediately — re-issuing the request can't fix them.
+#
+# MAX_API_ATTEMPTS = total attempts including the first call.
+# BASE_RETRY_DELAY_S × 2^(attempt-1) is the backoff schedule when the API
+# does NOT include a ``try again in <N>s`` hint; honoring the hint takes
+# priority. MAX_RETRY_DELAY_S caps each sleep so we never park a worker
+# for minutes on a slow_down event.
+#
+# Lives at module scope (not on ChatCodex) because ChatCodex inherits
+# from a Pydantic BaseModel and underscored class attributes get
+# rewritten into ``ModelPrivateAttr`` instances.
+MAX_API_ATTEMPTS = 4
+BASE_RETRY_DELAY_S = 2.0
+MAX_RETRY_DELAY_S = 30.0
+
+
+def _retry_delay(err: CodexStreamError, attempt: int) -> float:
+    """Pick the sleep duration before the next attempt.
+
+    If the error includes a server-side ``retry_after`` hint, honor it
+    (capped by ``MAX_RETRY_DELAY_S``). Otherwise fall back to exponential
+    backoff anchored at ``BASE_RETRY_DELAY_S``.
+    """
+    if err.retry_after is not None:
+        return min(err.retry_after, MAX_RETRY_DELAY_S)
+    return min(BASE_RETRY_DELAY_S * (2 ** attempt), MAX_RETRY_DELAY_S)
+
+
+def _classify_response_failed(error: dict | None) -> CodexStreamError:
+    """Map a ``response.failed`` event's ``error`` dict to a typed exception.
+
+    Mirrors the upstream classifier in
+    ``codex-rs/codex-api/src/sse/responses.rs::process_responses_event``.
+    Unknown codes fall back to a generic retryable ``CodexStreamError`` —
+    matches upstream's ``ApiError::Retryable`` default.
+    """
+    if not isinstance(error, dict):
+        return CodexStreamError("response.failed event with no error body")
+
+    code = error.get("code") or ""
+    msg = error.get("message") or "Codex API failure"
+
+    if code == "context_length_exceeded":
+        return CodexContextWindowError(msg)
+    if code == "insufficient_quota":
+        return CodexQuotaExceededError(msg)
+    if code == "usage_not_included":
+        return CodexUsageNotIncludedError(msg)
+    if code == "cyber_policy":
+        return CodexCyberPolicyError(msg)
+    if code == "invalid_prompt":
+        return CodexInvalidPromptError(msg)
+    if code in ("server_is_overloaded", "slow_down"):
+        return CodexServerOverloadedError(msg)
+    if code == "rate_limit_exceeded":
+        return CodexRateLimitError(msg, retry_after=_parse_retry_after(error))
+
+    err = CodexStreamError(
+        msg,
+        code=code or "stream_error",
+        retry_after=_parse_retry_after(error),
+    )
+    err.retryable = True
+    return err
 
 
 # --- Response parsing (accumulates from SSE stream) ---
@@ -443,8 +679,28 @@ def _extract_reasoning_delta(event: dict) -> str | None:
     return None
 
 
-def parse_stream_to_response(events: Iterator[dict]) -> CodexResponse:
-    """Consume an SSE event stream and build a CodexResponse."""
+def parse_stream_to_response(
+    events: Iterator[dict],
+    *,
+    on_reasoning_delta: "Callable[[str], None] | None" = None,
+) -> CodexResponse:
+    """Consume an SSE event stream and build a CodexResponse.
+
+    Raises a ``CodexStreamError`` (or one of its subclasses) when the
+    stream terminates with ``response.failed`` or ``response.incomplete``.
+    The retry policy lives in ``ChatCodex._generate`` — the parser's job
+    is just to surface the error loudly instead of silently returning an
+    empty response, which is what used to break worker agent loops on
+    every TPM rate-limit blip.
+
+    ``on_reasoning_delta``: optional callback fired with each
+    chain-of-thought summary chunk as it arrives. Used by the live
+    renderer to stream "the model is thinking…" text to stderr in
+    verbose mode. Default is None — non-streaming callers (tests, the
+    salvage path) get the same behaviour as before. Exceptions raised
+    by the callback are swallowed so a misbehaving renderer never
+    breaks the LLM call.
+    """
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
@@ -452,6 +708,22 @@ def parse_stream_to_response(events: Iterator[dict]) -> CodexResponse:
     usage: dict[str, int] | None = None
 
     for event in events:
+        etype = str(event.get("type", ""))
+
+        # Stream-level failure events terminate parsing immediately.
+        # See the CodexStreamError taxonomy comment for why we can't
+        # just ignore them.
+        if etype == "response.failed":
+            resp = event.get("response") or {}
+            raise _classify_response_failed(resp.get("error"))
+        if etype == "response.incomplete":
+            resp = event.get("response") or {}
+            details = resp.get("incomplete_details") or {}
+            reason = details.get("reason") or "unknown"
+            raise CodexIncompleteError(
+                f"Codex returned response.incomplete (reason={reason})"
+            )
+
         # Accumulate visible text deltas
         delta = _extract_text_delta(event)
         if delta:
@@ -464,9 +736,16 @@ def parse_stream_to_response(events: Iterator[dict]) -> CodexResponse:
         rdelta = _extract_reasoning_delta(event)
         if rdelta is not None:
             reasoning_parts.append(rdelta)
+            if on_reasoning_delta is not None:
+                # Forward each chunk to the live renderer as it arrives.
+                # Errors in the renderer must NOT break the LLM call —
+                # observability is best-effort.
+                try:
+                    on_reasoning_delta(rdelta)
+                except Exception:  # noqa: BLE001
+                    pass
 
         # Capture completed function calls
-        etype = str(event.get("type", ""))
         if etype == "response.output_item.done":
             item = event.get("item", {})
             if isinstance(item, dict) and item.get("type") == "function_call":
@@ -511,12 +790,17 @@ def parse_stream_to_response(events: Iterator[dict]) -> CodexResponse:
     )
 
 
-async def aparse_stream_to_response(events) -> CodexResponse:
+async def aparse_stream_to_response(
+    events,
+    *,
+    on_reasoning_delta: "Callable[[str], None] | None" = None,
+) -> CodexResponse:
     """Async version: consume an async SSE event stream.
 
     Mirrors :func:`parse_stream_to_response` — captures reasoning
     summary text and reasoning_tokens usage in addition to the visible
-    response. See that function's docstring for details.
+    response. See that function's docstring for details on the
+    ``on_reasoning_delta`` hook.
     """
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
@@ -525,6 +809,21 @@ async def aparse_stream_to_response(events) -> CodexResponse:
     usage: dict[str, int] | None = None
 
     async for event in events:
+        etype = str(event.get("type", ""))
+
+        # Stream-level failure events terminate parsing immediately —
+        # see ``parse_stream_to_response`` for the rationale.
+        if etype == "response.failed":
+            resp = event.get("response") or {}
+            raise _classify_response_failed(resp.get("error"))
+        if etype == "response.incomplete":
+            resp = event.get("response") or {}
+            details = resp.get("incomplete_details") or {}
+            reason = details.get("reason") or "unknown"
+            raise CodexIncompleteError(
+                f"Codex returned response.incomplete (reason={reason})"
+            )
+
         delta = _extract_text_delta(event)
         if delta:
             text_parts.append(delta)
@@ -532,8 +831,14 @@ async def aparse_stream_to_response(events) -> CodexResponse:
         rdelta = _extract_reasoning_delta(event)
         if rdelta is not None:
             reasoning_parts.append(rdelta)
+            if on_reasoning_delta is not None:
+                # Same observability-best-effort pattern as the sync
+                # parser — see parse_stream_to_response above.
+                try:
+                    on_reasoning_delta(rdelta)
+                except Exception:  # noqa: BLE001
+                    pass
 
-        etype = str(event.get("type", ""))
         if etype == "response.output_item.done":
             item = event.get("item", {})
             if isinstance(item, dict) and item.get("type") == "function_call":
@@ -665,6 +970,41 @@ def _convert_tools_to_responses_format(tools: list[dict]) -> list[dict]:
         else:
             converted.append(t)
     return converted
+
+
+def _build_reasoning_sink() -> Callable[[str], None] | None:
+    """Build a per-call sink that forwards reasoning deltas to the live
+    renderer.
+
+    The sink resolves the calling agent_id and run_id from the
+    ``CURRENT_LLM_CALL`` ContextVar (set by
+    :class:`src.llm.callbacks.TokenLoggingCallback` on
+    ``on_chat_model_start``) and routes each delta to
+    ``LIVE.thinking_delta``. When called outside an instrumented LLM
+    invocation (e.g. tests, ``ask_focused`` paths that don't go
+    through the callback) the ContextVar is empty and we return None
+    so the parser short-circuits the streaming hook entirely — that
+    keeps non-streaming callers byte-for-byte equivalent to the old
+    parser API.
+    """
+    try:
+        from src.llm.callbacks import CURRENT_LLM_CALL  # lazy — circular guard
+    except Exception:  # noqa: BLE001
+        return None
+    ctx = CURRENT_LLM_CALL.get()
+    if not ctx:
+        return None
+    agent_id = ctx.get("agent_id") or "_unknown"
+    run_id = ctx.get("run_id")
+
+    def _sink(text: str) -> None:
+        try:
+            from src.live import LIVE  # lazy — never break the LLM call
+            LIVE.thinking_delta(agent=agent_id, run_id=run_id, text=text)
+        except Exception:  # noqa: BLE001
+            pass
+
+    return _sink
 
 
 def _build_additional_kwargs(resp: CodexResponse) -> dict[str, Any]:
@@ -818,8 +1158,31 @@ class ChatCodex(BaseChatModel):
         tool_choice = kwargs.get("tool_choice")
 
         req = self._build_request_kwargs(messages, tools, tool_choice)
-        events = stream_codex(tokens, **req)
-        resp = parse_stream_to_response(events)
+
+        # Build the reasoning-delta sink. Forwards each
+        # chain-of-thought summary chunk to the live renderer as it
+        # arrives, attributed to whichever agent_id is currently active
+        # (read from a ContextVar set by TokenLoggingCallback).
+        reasoning_sink = _build_reasoning_sink()
+
+        for attempt in range(MAX_API_ATTEMPTS):
+            try:
+                events = stream_codex(tokens, **req)
+                resp = parse_stream_to_response(
+                    events, on_reasoning_delta=reasoning_sink,
+                )
+                break
+            except CodexStreamError as e:
+                if not e.retryable or attempt == MAX_API_ATTEMPTS - 1:
+                    raise
+                delay = _retry_delay(e, attempt)
+                logger.warning(
+                    "Codex %s on attempt %d/%d — sleeping %.2fs before retry "
+                    "(code=%s, msg=%r)",
+                    type(e).__name__, attempt + 1, MAX_API_ATTEMPTS,
+                    delay, e.code, str(e)[:200],
+                )
+                time.sleep(delay)
 
         # Build tool calls
         lc_tool_calls = []
@@ -853,8 +1216,29 @@ class ChatCodex(BaseChatModel):
         tool_choice = kwargs.get("tool_choice")
 
         req = self._build_request_kwargs(messages, tools, tool_choice)
-        events = astream_codex(tokens, **req)
-        resp = await aparse_stream_to_response(events)
+
+        # Live-streaming sink for reasoning deltas — see _generate for
+        # rationale.
+        reasoning_sink = _build_reasoning_sink()
+
+        for attempt in range(MAX_API_ATTEMPTS):
+            try:
+                events = astream_codex(tokens, **req)
+                resp = await aparse_stream_to_response(
+                    events, on_reasoning_delta=reasoning_sink,
+                )
+                break
+            except CodexStreamError as e:
+                if not e.retryable or attempt == MAX_API_ATTEMPTS - 1:
+                    raise
+                delay = _retry_delay(e, attempt)
+                logger.warning(
+                    "Codex %s on attempt %d/%d — sleeping %.2fs before retry "
+                    "(code=%s, msg=%r)",
+                    type(e).__name__, attempt + 1, MAX_API_ATTEMPTS,
+                    delay, e.code, str(e)[:200],
+                )
+                await asyncio.sleep(delay)
 
         lc_tool_calls = []
         for tc in resp.tool_calls:

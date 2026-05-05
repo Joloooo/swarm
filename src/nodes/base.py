@@ -1102,6 +1102,7 @@ class BaseNode(ABC):
         config: AgentConfig,
         messages: list,
         last_text: str,
+        run_id: str | None = None,
     ) -> str | None:
         """Try to salvage a refused worker via a focused sub-LLM call.
 
@@ -1157,6 +1158,7 @@ class BaseNode(ABC):
             recovered = await self.ask_focused(
                 user_prompt,
                 agent_id=config.agent_id,
+                run_id=run_id,
             )
         except Exception as e:  # noqa: BLE001
             self.log.warning(
@@ -1418,6 +1420,7 @@ class BaseNode(ABC):
                 )
                 recovered = await self._recover_from_refusal(
                     config=config, messages=messages, last_text=last_text,
+                    run_id=run_id,
                 )
                 if recovered:
                     self.log.info(

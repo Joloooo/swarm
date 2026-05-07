@@ -43,6 +43,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -448,10 +449,22 @@ class TokenLoggingCallback(AsyncCallbackHandler):
     stateless beyond the global :data:`TOKEN_TOTALS` table.
     """
 
-    # Tracks per-run_id timestamps so on_llm_end can compute duration.
-    # Keyed by the LangChain ``run_id`` UUID (not our run_id), which is
-    # a unique identifier for *this* model call.
-    _starts: dict[UUID, float]
+    # Tracks per-run_id state so on_llm_end can compute duration AND
+    # restore the call's identity (agent_id / our run_id / node / model)
+    # that was published at start time. We can't trust LangChain to
+    # re-pass the parent's metadata to ``on_llm_end`` for nested
+    # chat-model calls inside ``create_agent`` — empirically, metadata
+    # is dropped on the end event and we'd see ``agent_id="_unknown"``
+    # / ``model="?"`` on every "done" line. Stashing it here is the fix.
+    #
+    # Each entry is a small dict:
+    #   {"started_at": perf_counter_float,
+    #    "agent_id":   "owasp-recon",
+    #    "run_id":     "XBEN-006-24__...",   # our run id (string)
+    #    "node":       "executor",
+    #    "model":      "gpt-5.4-mini",
+    #    "reasoning_effort": "xhigh"}
+    _starts: dict[UUID, dict[str, Any]]
 
     def __init__(self) -> None:
         super().__init__()
@@ -479,7 +492,9 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         streaming sink, write the full prompt to llm_requests.jsonl,
         and tell the renderer to draw a "thinking…" header (and start
         a heartbeat task)."""
-        self._starts[run_id] = time.perf_counter()
+        self._starts[run_id] = self._resolve_identity(
+            metadata=metadata, serialized=serialized,
+        )
         self._publish_call_context(run_id, metadata, serialized)
         # Write the request-side log row BEFORE notifying the
         # renderer so a slow disk doesn't delay the stderr header.
@@ -506,7 +521,9 @@ class TokenLoggingCallback(AsyncCallbackHandler):
     ) -> None:
         """Some providers route through ``on_llm_start`` (string prompts)
         instead of ``on_chat_model_start``. Cover both."""
-        self._starts[run_id] = time.perf_counter()
+        self._starts[run_id] = self._resolve_identity(
+            metadata=metadata, serialized=serialized,
+        )
         self._publish_call_context(run_id, metadata, serialized)
         # Wrap the raw prompt strings in a single synthetic ``human``
         # message so the request-log row has a consistent shape across
@@ -537,19 +554,41 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        t0 = self._starts.pop(run_id, None)
+        # Pull the identity stashed at start time. LangChain often
+        # drops parent metadata on ``on_llm_end`` for nested
+        # chat-model calls inside ``create_agent``, which is why we
+        # cannot trust the ``metadata`` argument here. The
+        # ``_starts`` dict was populated by
+        # ``on_chat_model_start`` / ``on_llm_start`` via
+        # ``_resolve_identity`` — read everything from there first
+        # and only fall back to the (possibly stale) metadata for
+        # fields that weren't captured.
+        ident = self._starts.pop(run_id, None) or {}
+        t0 = ident.get("started_at")
         dt_ms = int((time.perf_counter() - t0) * 1000) if t0 else 0
 
         # Walk the generations to find usage_metadata. ChatCodex puts it
         # on the AIMessage (see codex.py:1127); other providers attach
         # it via LLMResult.llm_output["token_usage"] — try both.
         usage = self._extract_usage(response)
-        model = self._extract_model(response, metadata)
+        # Model: prefer the actual response_metadata.model from the
+        # AIMessage (most accurate), fall back to the stash, fall
+        # back to the metadata dict, fall back to "?".
+        model = (
+            self._extract_model(response, metadata)
+            or ident.get("model")
+            or "?"
+        )
+        if model == "?" and ident.get("model"):
+            model = ident["model"]
 
         meta = metadata or {}
-        agent_id = str(meta.get("agent_id") or meta.get("ls_agent") or "_unknown")
-        node = str(meta.get("node") or "")
-        run_id_str = meta.get("run_id")
+        agent_id = (
+            ident.get("agent_id")
+            or str(meta.get("agent_id") or meta.get("ls_agent") or "_unknown")
+        )
+        node = ident.get("node") or str(meta.get("node") or "")
+        run_id_str = ident.get("run_id") or meta.get("run_id")
 
         running = self._update_totals(
             agent_id=agent_id,
@@ -613,13 +652,20 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        t0 = self._starts.pop(run_id, None)
+        # Same fallback discipline as on_llm_end — read identity
+        # from the stash first.
+        ident = self._starts.pop(run_id, None) or {}
+        t0 = ident.get("started_at")
         dt_ms = int((time.perf_counter() - t0) * 1000) if t0 else 0
 
         meta = metadata or {}
-        agent_id = str(meta.get("agent_id") or meta.get("ls_agent") or "_unknown")
-        node = str(meta.get("node") or "")
-        run_id_str = meta.get("run_id")
+        agent_id = (
+            ident.get("agent_id")
+            or str(meta.get("agent_id") or meta.get("ls_agent") or "_unknown")
+        )
+        node = ident.get("node") or str(meta.get("node") or "")
+        run_id_str = ident.get("run_id") or meta.get("run_id")
+        model = ident.get("model") or meta.get("model") or "?"
 
         # Tear down the renderer's heartbeat / streaming state for
         # this call so an error doesn't leave a "🧠 thinking…" header
@@ -630,7 +676,7 @@ class TokenLoggingCallback(AsyncCallbackHandler):
                 agent=agent_id,
                 run_id=run_id,
                 duration_ms=dt_ms,
-                model=meta.get("model") or "?",
+                model=model,
                 input_tokens=0,
                 output_tokens=0,
                 reasoning_tokens=0,
@@ -657,7 +703,7 @@ class TokenLoggingCallback(AsyncCallbackHandler):
             "run_id": run_id_str,
             "agent_id": agent_id,
             "node": node,
-            "model": meta.get("model") or "?",
+            "model": model,
             "duration_ms": dt_ms,
             "error_type": type(error).__name__,
             "error_msg": str(error)[:500],
@@ -668,7 +714,81 @@ class TokenLoggingCallback(AsyncCallbackHandler):
     # ── helpers ──────────────────────────────────────────────────────────
 
     @staticmethod
+    def _resolve_identity(
+        *,
+        metadata: dict | None,
+        serialized: dict | None,
+    ) -> dict[str, Any]:
+        """Best-effort resolution of the call's identity at start time.
+
+        The fields here are what every downstream consumer needs:
+        ``agent_id`` for live rendering / running totals,
+        ``run_id`` (our run id, not the LangChain UUID) for the JSONL
+        path, ``node`` for the disk row, ``model`` and
+        ``reasoning_effort`` for the "thinking…" header.
+
+        Why this exists as a single helper: the same identity is
+        needed in three places — the CURRENT_LLM_CALL ContextVar (for
+        the streaming reasoning sink in ``ChatCodex._build_reasoning_sink``),
+        the ``LIVE.thinking_started(...)`` header line, and ``self._starts``
+        so ``on_llm_end`` can recover the same fields after LangChain
+        drops parent metadata on the end event for nested chat-model
+        calls. Resolving once and storing once avoids the divergence
+        the user observed in production:
+
+            🧠 _planner   thinking (?)…
+            🧠 _unknown   done (...)
+
+        which happens when ``on_llm_end``'s ``metadata`` is stripped
+        but ``self._starts[run_id]`` still has the identity from
+        ``on_chat_model_start``.
+
+        Lookup order for each field walks: explicit metadata key →
+        ``serialized.kwargs`` key → ``serialized.repr`` regex (handles
+        Pydantic-v1 BaseChatModel reprs) → starting time / "?" /
+        "_unknown" sentinels.
+        """
+        meta = metadata or {}
+        ser = serialized or {}
+        kwargs = (ser.get("kwargs") or {}) if isinstance(ser, dict) else {}
+        # Pydantic-v1 chat models sometimes serialize the model name only
+        # into the ``repr`` string. Cheap regex scan as a final fallback.
+        repr_str = ser.get("repr") if isinstance(ser, dict) else ""
+
+        def _from_repr(needle: str) -> str | None:
+            if not isinstance(repr_str, str) or not repr_str:
+                return None
+            m = re.search(rf"{needle}=['\"]?([^\s'\",)]+)", repr_str)
+            return m.group(1) if m else None
+
+        model = (
+            kwargs.get("model")
+            or kwargs.get("model_name")
+            or meta.get("model")
+            or _from_repr("model")
+            or "?"
+        )
+        reasoning_effort = (
+            kwargs.get("reasoning_effort")
+            or meta.get("reasoning_effort")
+            or _from_repr("reasoning_effort")
+            or ""
+        )
+        agent_id = str(
+            meta.get("agent_id") or meta.get("ls_agent") or "_unknown"
+        )
+        return {
+            "started_at":       time.perf_counter(),
+            "agent_id":         agent_id,
+            "run_id":           meta.get("run_id"),
+            "node":             meta.get("node"),
+            "model":            str(model),
+            "reasoning_effort": str(reasoning_effort),
+        }
+
+    @classmethod
     def _publish_call_context(
+        cls,
         run_id: UUID,
         metadata: dict | None,
         serialized: dict | None,
@@ -679,31 +799,21 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         reasoning deltas to the right agent_id without plumbing
         kwargs through the parser API.
         """
-        meta = metadata or {}
-        ser = serialized or {}
-        # Best-effort model name extraction from the serialized
-        # callable kwargs — covers ChatCodex (model on .kwargs) plus
-        # langchain-anthropic / langchain-openai variants.
-        model = (
-            (ser.get("kwargs") or {}).get("model")
-            or (ser.get("kwargs") or {}).get("model_name")
-            or meta.get("model")
-            or "?"
-        )
+        ident = cls._resolve_identity(metadata=metadata, serialized=serialized)
         try:
             CURRENT_LLM_CALL.set({
-                "agent_id": str(meta.get("agent_id") or meta.get("ls_agent")
-                                or "_unknown"),
-                "run_id":   meta.get("run_id"),
-                "node":     meta.get("node"),
-                "model":    str(model),
+                "agent_id":  ident["agent_id"],
+                "run_id":    ident["run_id"],
+                "node":      ident["node"],
+                "model":     ident["model"],
                 "lc_run_id": run_id,
             })
         except Exception:  # noqa: BLE001
             pass
 
-    @staticmethod
+    @classmethod
     def _notify_render_start(
+        cls,
         run_id: UUID,
         metadata: dict | None,
         serialized: dict | None,
@@ -714,27 +824,13 @@ class TokenLoggingCallback(AsyncCallbackHandler):
             from src.live import LIVE  # lazy — avoid import cycle
         except Exception:  # noqa: BLE001
             return
-        meta = metadata or {}
-        ser = serialized or {}
-        model = (
-            (ser.get("kwargs") or {}).get("model")
-            or (ser.get("kwargs") or {}).get("model_name")
-            or meta.get("model")
-            or "?"
-        )
-        # Reasoning effort — only Codex carries it; others harmless to
-        # display as "" / None.
-        reasoning_effort = (
-            (ser.get("kwargs") or {}).get("reasoning_effort")
-            or meta.get("reasoning_effort")
-        )
+        ident = cls._resolve_identity(metadata=metadata, serialized=serialized)
         try:
             LIVE.thinking_started(
-                agent=str(meta.get("agent_id") or meta.get("ls_agent")
-                          or "_unknown"),
+                agent=ident["agent_id"],
                 run_id=run_id,
-                model=str(model),
-                reasoning_effort=str(reasoning_effort or ""),
+                model=ident["model"],
+                reasoning_effort=ident["reasoning_effort"],
             )
         except Exception:  # noqa: BLE001
             pass

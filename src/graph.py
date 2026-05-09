@@ -140,7 +140,35 @@ config = SimpleNamespace(
         # SWARM_WEB_MAX_CHARS if synthesis quality degrades on very
         # small-context fallback models.
         web_search_max_crawled_chars = _env_int("SWARM_WEB_MAX_CHARS",          8000),
-        # ── Codex reasoning controls (GPT-5.x family) ──
+        # ── Codex model + reasoning controls (GPT-5.x family) ──
+        # Model: the Codex model slug to talk to. The official Codex
+        # CLI exposes a small handful (see the model-picker UI in
+        # ChatGPT itself). Valid slugs as of May 2026:
+        #     "gpt-5.5"          — full GPT-5.5 (most capable, most
+        #                          expensive). The May-2026 default in
+        #                          the upstream Codex CLI but its
+        #                          policy classifier refuses ~60% of
+        #                          pentest-shaped prompts → we don't
+        #                          default to it.
+        #     "gpt-5.4-mini"     — small GPT-5.4 (default here).
+        #                          Cheaper, faster, far more permissive
+        #                          on offensive-security framing.
+        #     "gpt-5.4"          — full GPT-5.4 (between mini and 5.5
+        #                          on cost & capability)
+        #     "gpt-5.3-codex"    — older codex-tuned 5.3
+        #     "gpt-5.2"          — even older fallback
+        #     "codex-auto-review"— review-flavoured variant
+        #
+        # Override at runtime with SWARM_MODEL=<slug> — useful for
+        # ablation studies in the thesis ("does gpt-5.5 actually do
+        # better on benchmarks where its policy classifier doesn't
+        # refuse?"). The chosen slug flows through ``LLMConfig``
+        # defaults in ``src/llm/provider.py`` and shows up in the
+        # startup banner, so each run records which model it ran on.
+        # No ``choices=`` enforcement — the Codex backend will
+        # cleanly 4xx on bad slugs, which is more informative than a
+        # silent fallback.
+        model                        = _env_str("SWARM_MODEL", "gpt-5.4-mini"),
         # Effort: how hard the model thinks before responding. See the
         # full enum + valid values in src/llm/provider.py:LLMConfig.
         # Default xhigh = maximum reasoning depth → fullest chain-of-thought

@@ -763,16 +763,32 @@ def _build_forced_search_query(finding, state: SwarmGraphState) -> str:
 def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
     """Register custom skills + tasks inline, then build pending_dispatch.
 
+    Each entry in the returned list carries a ``dispatch_reason`` field —
+    the supervisor's reasoning for picking *this* worker on *this* turn.
+    The routing edge forwards it through to the worker's state, the
+    worker forwards it onward to the summarizer, and the summarizer
+    uses it as the **intent anchor** when condensing the trace ("the
+    supervisor dispatched this worker because: ..."). Without it, the
+    summary would be a generic "what the worker did" recap; with it,
+    the summary directly addresses the supervisor's hypothesis.
+
+    The reason string comes from the planner LLM's ``reasoning`` field
+    on the decision JSON (sometimes echoed in legacy decisions as
+    ``note``). When the planner stages multiple configs in one turn,
+    every staged config shares the same supervisor-level reason — that
+    is the right granularity since the planner reasoned about the
+    fan-out as a unit, not per-config.
+
     Three lanes are folded into one fan-out list, in this order:
 
-    1. ``configs``        — pre-built skills resolved by name.
-    2. ``custom_configs`` — planner-written one-off skills (full prompt).
-    3. ``tasks``          — generic-executor task descriptions.
+    1. ``configs``        - pre-built skills resolved by name.
+    2. ``custom_configs`` - planner-written one-off skills (full prompt).
+    3. ``tasks``          - generic-executor task descriptions.
 
     All three end up as cached ``AgentConfig`` entries the executor node
     can resolve via ``load_skill``. Unknown named skills and malformed
     custom/task entries are skipped with a warning. Returns the list
-    of dispatch items — possibly empty, in which case the caller is
+    of dispatch items - possibly empty, in which case the caller is
     responsible for falling back to "report".
     """
     mode = decision.get("mode") or state.get("mode") or "analyze"
@@ -836,6 +852,14 @@ def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
         raw_named = []
     named = [str(n).strip() for n in raw_named if str(n).strip()]
 
+    # Capture the planner's reasoning once so every staged worker
+    # carries it forward to the summarizer as the dispatch's intent
+    # anchor. Truncated for safety — the summariser only needs a couple
+    # of sentences to focus its lens, not the planner's full thinking.
+    dispatch_reason = (
+        str(decision.get("reasoning") or decision.get("note") or "").strip()
+    )[:1500]
+
     pending: list[dict] = []
     seen: set[str] = set()
     for i, name in enumerate(named + custom_names + task_names):
@@ -855,6 +879,7 @@ def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
             "config_name": name,
             "methodology": cfg.methodology,
             "mode": mode,
+            "dispatch_reason": dispatch_reason,
         })
     return pending
 

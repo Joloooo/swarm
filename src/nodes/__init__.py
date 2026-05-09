@@ -13,6 +13,7 @@ from src.nodes.initialize import InitializeNode, initialize_node
 from src.nodes.planner import PlannerNode, planner_node
 from src.nodes.recon import ReconNode, recon_node
 from src.nodes.report import ReportNode, report_node
+from src.nodes.summarizer import SummarizerNode, summarizer_node
 from src.nodes.web_search import WebSearchNode, web_search_node
 
 __all__ = [
@@ -23,11 +24,13 @@ __all__ = [
     "PlannerNode",
     "ReconNode",
     "ReportNode",
+    "SummarizerNode",
     "WebSearchNode",
     "executor_node",
     "initialize_node",
     "planner_node",
     "recon_node",
     "report_node",
+    "summarizer_node",
     "web_search_node",
 ]

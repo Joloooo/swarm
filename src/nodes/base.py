@@ -813,59 +813,41 @@ def _summarize_tool_call_pair(tool_call: dict, tool_msg: ToolMessage | None) -> 
 
 
 def _collect_prior_skill_history(state: dict, agent_id: str) -> str | None:
-    """Return a 'previous attempts' block for re-dispatch of this skill,
-    or ``None`` if no prior runs by the same agent_id are recorded.
+    """Return the previous summarizer report for this ``agent_id``, or
+    ``None`` if there is no prior dispatch.
 
-    Walks ``state['messages']`` once: indexes ToolMessages by
-    ``tool_call_id`` for O(1) pairing, then summarizes each AIMessage
-    that has the matching ``additional_kwargs.agent_id``. Always-empty
-    AIMessages (no tool_calls) are skipped — they're either narration
-    or refusal markers, not probes worth replaying.
+    Background: in the pre-summarizer-node design this function walked
+    ``state['messages']`` looking for raw ``AIMessage``s with matching
+    ``agent_id`` and reconstructed a "previous attempts" block from
+    their tool calls. After the worker → summarizer hand-off
+    (``state.pending_summary_inputs`` + ``SummarizerNode``), those raw
+    ``AIMessage``s no longer enter ``state['messages']`` — only the
+    summarizer's structured ``worker_report`` does.
+
+    So we just look up the most recent ``worker_report`` for the
+    matching ``agent_id``. The report is already in the right format
+    and tone (probe enumeration, what-was-NOT-tried, recommended next
+    angle) — no per-probe re-formatting needed here.
+
+    See :func:`src.llm.digest.find_prior_worker_report` for the lookup.
     """
-    msgs = state.get("messages") or []
-    if not msgs:
+    from src.llm.digest import find_prior_worker_report
+
+    report = find_prior_worker_report(state.get("messages") or [], agent_id)
+    if report is None:
         return None
-
-    tool_responses: dict[str, ToolMessage] = {}
-    for m in msgs:
-        if isinstance(m, ToolMessage):
-            tcid = getattr(m, "tool_call_id", None)
-            if tcid:
-                tool_responses[tcid] = m
-
-    summaries: list[str] = []
-    for m in msgs:
-        if not isinstance(m, AIMessage):
-            continue
-        akw = getattr(m, "additional_kwargs", None) or {}
-        if akw.get("agent_id") != agent_id:
-            continue
-        tool_calls = getattr(m, "tool_calls", None) or []
-        if not tool_calls:
-            continue
-        for tc in tool_calls:
-            tcid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
-            tool_msg = tool_responses.get(tcid) if tcid else None
-            summaries.append(_summarize_tool_call_pair(tc, tool_msg))
-
-    if not summaries:
+    body = report.content if isinstance(report.content, str) else str(report.content)
+    if not body.strip():
         return None
-
-    overflow = max(0, len(summaries) - _PRIOR_HISTORY_MAX_TURNS)
-    keep = summaries[-_PRIOR_HISTORY_MAX_TURNS:]
-
-    header = (
-        "## Prior attempts on this target by you (same agent)\n\n"
-        "These are tool calls you already made on a previous dispatch. "
-        "Do NOT repeat them — use the outcomes to plan your next probes. "
-        "Focus on variations and bypasses you have not yet tried."
+    return (
+        "## Your prior dispatch's report to the supervisor\n\n"
+        "The supervisor previously dispatched you on this target. The "
+        "summarizer's report from that run is below — it lists what was "
+        "tried, what was NOT tried, and the recommended next angle. Do "
+        "NOT repeat probes already tried; pick up from where the "
+        "previous run left off.\n\n"
+        f"{body}"
     )
-    if overflow:
-        header += (
-            f"\n\n(Showing the last {len(keep)} of {len(summaries)} probes; "
-            "older probes omitted for context budget.)"
-        )
-    return header + "\n\n" + "\n".join(keep)
 
 
 def _extract_latest_web_search(state: dict) -> str | None:
@@ -903,6 +885,89 @@ def _extract_findings(messages: list, agent_id: str) -> list[Finding]:
         findings.extend(_findings_from_markdown(content, agent_id))
         findings.extend(_findings_from_json(content, agent_id))
     return findings
+
+
+def _count_worker_iterations(trace: list[Any]) -> int:
+    """How many tool-call iterations did the worker actually run?
+
+    Counts ``AIMessage``s that carry tool calls (each one represents the
+    worker deciding to invoke a tool). Doesn't count ``AIMessage``s
+    without tool calls (the terminal "I'm done" message) or
+    ``ToolMessage``s (those are responses, not iterations). Useful
+    metadata for the summarizer prompt and for observability.
+    """
+    count = 0
+    for m in trace:
+        if isinstance(m, AIMessage):
+            tcs = getattr(m, "tool_calls", None) or []
+            if tcs:
+                count += 1
+    return count
+
+
+def _persist_worker_trace(
+    *,
+    trace: list[Any],
+    run_id: str,
+    agent_id: str,
+) -> "Path | None":  # noqa: F821 — type only at call time
+    """Write the worker's full trace to disk for forensics.
+
+    Path: ``logs/run-<run_id>/worker-<agent_id>-<timestamp>/trace.jsonl``.
+
+    The summarizer node consumes the in-memory trace via
+    ``state.pending_summary_inputs[*].trace``; this disk copy exists
+    purely for human debugging after the run (cross-checking the
+    summarizer's report against what the worker actually did) and as a
+    fallback if a future feature wants to re-summarize from raw bytes.
+
+    Best-effort: returns ``None`` on any failure (disk full, race,
+    weird path) — the summarisation pipeline doesn't depend on the
+    file existing.
+    """
+    if not trace:
+        return None
+    try:
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        from src.observability import run_dir
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        # Sanitise agent_id for filesystem use (it may contain slashes
+        # or other special chars in pathological cases).
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", agent_id)[:80]
+        worker_dir = run_dir(run_id) / f"worker-{safe_id}-{ts}"
+        worker_dir.mkdir(parents=True, exist_ok=True)
+        trace_path = worker_dir / "trace.jsonl"
+        with trace_path.open("w", encoding="utf-8") as fh:
+            for i, m in enumerate(trace):
+                row = {
+                    "i": i,
+                    "type": type(m).__name__,
+                    "content": (
+                        m.content if isinstance(getattr(m, "content", None), str)
+                        else str(getattr(m, "content", ""))
+                    ),
+                    "tool_calls": [
+                        {"name": tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None),
+                         "args":  tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None),
+                         "id":    tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)}
+                        for tc in (getattr(m, "tool_calls", None) or [])
+                    ],
+                    "tool_call_id": getattr(m, "tool_call_id", None),
+                    "name": getattr(m, "name", None),
+                    "additional_kwargs": getattr(m, "additional_kwargs", {}) or {},
+                }
+                fh.write(json.dumps(row, default=str, ensure_ascii=False) + "\n")
+        return trace_path
+    except Exception as e:  # noqa: BLE001
+        # Forensic disk write is best-effort — never let it sink the run.
+        logging.getLogger(__name__).warning(
+            "[%s] failed to persist worker trace to disk: %s: %s",
+            agent_id, type(e).__name__, str(e)[:200],
+        )
+        return None
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1905,8 +1970,56 @@ class BaseNode(ABC):
                     completed=bool(salvaged),
                 )
 
+        # Persist the full trace to disk for forensics. The planner will
+        # never see this file directly — it's the per-worker forensic
+        # artefact (and a fallback the salvage path can re-read). The
+        # summarizer node consumes the in-memory ``trace`` we hand back
+        # via ``pending_summary_inputs`` below, so the disk path is
+        # primarily for human debugging after the run.
+        trace_path = _persist_worker_trace(
+            trace=trace,
+            run_id=run_id,
+            agent_id=config.agent_id,
+        )
+
+        # Resolve the dispatch reason from state — set by the planner
+        # via ``pending_dispatch[i]["dispatch_reason"]`` and forwarded
+        # through the routing edge. Empty for cold runs (initialize →
+        # recon, before the planner has spoken) and that's fine — the
+        # summarizer prompt handles missing reason gracefully.
+        dispatch_reason = (
+            state.get("dispatch_reason")
+            or state.get("dispatch_focus")
+            or ""
+        )
+
+        # The summary input that the SummarizerNode will consume. Each
+        # parallel worker writes a singleton list; the
+        # ``_summary_inputs_reducer`` accumulates them so the
+        # SummarizerNode (the synchronization point after fan-out) sees
+        # one entry per worker. See ``src/state.py`` for the reducer
+        # and ``src/nodes/summarizer.py`` for the consumer.
+        summary_input: dict = {
+            "agent_id": config.agent_id,
+            "config_name": config.config_name,
+            "methodology": config.methodology,
+            "dispatch_reason": dispatch_reason,
+            "trace": trace,                    # in-memory, not mirrored to messages
+            "trace_path": str(trace_path) if trace_path else "",
+            "completed": getattr(agent_result, "completed", False),
+            "error": getattr(agent_result, "error", None),
+            "refused": (getattr(agent_result, "error", None) == "model refused"),
+            "findings_count": len(findings),
+            "iteration_count": _count_worker_iterations(trace),
+            "target_url": target_url,
+        }
+
         return {
-            "messages": trace,
+            # NOTE: no ``"messages": trace`` — that was the cause of the
+            # global-prompt explosion. The full trace stays on disk and
+            # in ``pending_summary_inputs[*].trace`` until the
+            # SummarizerNode replaces it with one ``AIMessage`` digest.
+            "pending_summary_inputs": [summary_input],
             "agent_results": [agent_result],
             "findings": findings,
             "active_agents": [config.agent_id],

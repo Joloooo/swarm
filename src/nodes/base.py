@@ -60,7 +60,6 @@ from src.nodes.salvage import salvage_finding
 from src.observability import (
     LIVE,
     append_node_event,
-    append_state_diff_event,
     make_run_id,
 )
 from src.state import AgentResult, Finding, Severity
@@ -1290,25 +1289,20 @@ class BaseNode(ABC):
         except Exception as e:  # noqa: BLE001 — visibility > strictness here
             dt_ms = int((time.perf_counter() - t0) * 1000)
             self.log.exception("[%s] crashed after %dms", name, dt_ms)
+            # One merged row in nodes.jsonl on crash too. Carries the
+            # same shape (before/after/delta) the success path uses,
+            # with after==before (the crash means no state change), so
+            # downstream `jq` queries don't have to special-case the
+            # error path.
             append_node_event(run_id, {
-                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "node": name,
-                "duration_ms": dt_ms,
-                "error": f"{type(e).__name__}: {e}",
-                "summary": "",
-                "result": None,
-            })
-            # Even on crash, record the (no-op) state diff so the
-            # state_diffs.jsonl row count matches the nodes.jsonl row
-            # count — makes joins / counts in jq one-liners reliable.
-            append_state_diff_event(run_id, {
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "node": name,
                 "run_id": run_id,
                 "duration_ms": dt_ms,
                 "error": f"{type(e).__name__}: {e}",
+                "summary": "",
                 "before": before_shape,
-                "after":  before_shape,  # crash → no state change
+                "after":  before_shape,
                 "delta":  _state_diff(
                     before=before_shape,
                     after=before_shape,
@@ -1330,19 +1324,15 @@ class BaseNode(ABC):
         result = result or {}
         dt_ms = int((time.perf_counter() - t0) * 1000)
         summary = _summarize_node_result(name, result)
-        append_node_event(run_id, {
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "node": name,
-            "duration_ms": dt_ms,
-            "summary": summary,
-            "result": result,
-        })
 
-        # State-diff event — full content of every newly added message,
-        # finding, and agent_result. The "after" shape projects what
-        # the LangGraph reducers will produce: messages and findings
-        # use additive reducers, so the post-reducer state is the
-        # before snapshot plus what this node returned.
+        # Project the post-reducer state shape from the before-snapshot
+        # plus what this node returned. messages and findings use
+        # additive reducers; scalar fields (next_action, active_agents,
+        # planner_iters, ...) are rewritten by whatever the result dict
+        # carries. This is the same projection the standalone
+        # state_diffs.jsonl writer used to produce — now folded into
+        # nodes.jsonl so a single row contains everything you need to
+        # answer "what did node X do?"
         new_messages_for_diff = list(result.get("messages") or [])
         new_findings_for_diff = list(result.get("findings") or [])
         new_agent_results_for_diff = list(result.get("agent_results") or [])
@@ -1362,9 +1352,6 @@ class BaseNode(ABC):
             "findings_count":      before_shape["findings_count"] + len(new_findings_for_diff),
             "agent_results_count": before_shape["agent_results_count"]
                                     + len(new_agent_results_for_diff),
-            # Scalar fields the node may have rewritten (next_action,
-            # active_agents, planner_iters): the result dict is the
-            # source of truth for their post-reducer value.
             "active_agents":       list(result.get("active_agents")
                                         or before_shape.get("active_agents") or []),
             "planner_iters":       result.get("planner_iters",
@@ -1376,8 +1363,7 @@ class BaseNode(ABC):
             "stealth_level":       result.get("stealth_level",
                                               before_shape.get("stealth_level", 0)),
         }
-        # Findings-by-severity update: merge the new findings into the
-        # before-snapshot tally.
+        # Findings-by-severity update.
         after_sev = dict(before_shape.get("findings_by_severity") or {})
         for f in new_findings_for_diff:
             sev = getattr(f, "severity", None)
@@ -1385,7 +1371,12 @@ class BaseNode(ABC):
             after_sev[sev_str] = after_sev.get(sev_str, 0) + 1
         after_shape["findings_by_severity"] = after_sev
 
-        append_state_diff_event(run_id, {
+        # ONE merged row to nodes.jsonl. Schema:
+        #   {ts, node, run_id, duration_ms, summary, error?,
+        #    before, after, delta}
+        # ``delta.messages_added_full`` is the per-node forensic
+        # reconstruction the user used to read out of state_diffs.jsonl.
+        append_node_event(run_id, {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "node": name,
             "run_id": run_id,

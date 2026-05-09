@@ -71,6 +71,15 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
                     "config_name": item["config_name"],
                     "methodology": item["methodology"],
                     "mode": item.get("mode", "analyze"),
+                    # Forward the planner's reasoning as the worker's
+                    # dispatch_reason so ``run_skill_agent`` can attach
+                    # it to ``pending_summary_inputs[*].dispatch_reason``.
+                    # The summarizer reads it as the intent anchor when
+                    # condensing the trace ("the supervisor dispatched
+                    # this worker because: …"). Empty string is a valid
+                    # value — the summariser handles missing reason
+                    # gracefully.
+                    "dispatch_reason": item.get("dispatch_reason", ""),
                 },
             )
             for item in pending

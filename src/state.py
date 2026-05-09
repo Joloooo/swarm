@@ -57,6 +57,29 @@ def _merge_results(left: list[AgentResult], right: list[AgentResult]) -> list[Ag
     return left + right
 
 
+def _summary_inputs_reducer(
+    left: list[dict] | None, right: list[dict] | None,
+) -> list[dict]:
+    """Reducer for ``pending_summary_inputs``.
+
+    Plain ``operator.add`` would concatenate forever — and after the
+    summarizer node has consumed the list, there is no way to clear it
+    because re-emitting ``[]`` reduces to a no-op append. So we use a
+    sentinel: when ``right`` is ``None``, the field is **cleared**
+    (replaced by ``[]``); otherwise it is appended to the existing list.
+
+    Each parallel worker (executor / recon) returns
+    ``{"pending_summary_inputs": [singleton]}``; LangGraph fan-out
+    accumulates the writes via this reducer so the synchronization-point
+    summarizer node sees one entry per worker. The summarizer then
+    returns ``{"pending_summary_inputs": None}`` to clear before
+    transitioning to the planner.
+    """
+    if right is None:
+        return []
+    return list(left or []) + list(right or [])
+
+
 class SwarmState:
     """Root state for the SwarmAttacker LangGraph graph.
 
@@ -153,6 +176,36 @@ class SwarmGraphState(TypedDict, total=False):
     #   - src.nodes.planner.PlannerNode.execute (planner prompt addendum
     #     and the `_maybe_force_recovery` safety net)
     expected_flag: str
+
+    # ── Worker → Summarizer hand-off (the context-window fix) ──
+    # Each worker (executor, recon, salvage) writes a SINGLE-ITEM list
+    # here describing its run; LangGraph fan-out accumulates writes via
+    # the ``_summary_inputs_reducer`` so the summarizer node — the
+    # synchronization point — sees one entry per parallel worker. The
+    # summarizer produces one ``AIMessage`` per entry (the worker's
+    # report to the supervisor) and clears the list with ``None``.
+    #
+    # The raw worker trace NEVER enters ``state["messages"]`` — it lives
+    # only inside this list while it's pending, and on disk under
+    # ``logs/run-<id>/worker-<agent_id>-<ts>/trace.jsonl`` for forensics.
+    # This bound the planner's input prompt to digests + planner
+    # decisions instead of the full mirrored trace storm.
+    #
+    # Each entry shape (see ``src/nodes/summarizer.py`` for the canonical
+    # definition):
+    #   {
+    #     "agent_id":         str,
+    #     "config_name":      str,
+    #     "methodology":      str,
+    #     "dispatch_reason":  str,                 # planner's "why"
+    #     "trace":            list[BaseMessage],   # not mirrored to messages
+    #     "trace_path":       str,                 # disk pointer
+    #     "completed":        bool,
+    #     "error":            str | None,
+    #     "refused":          bool,
+    #     "findings_count":   int,
+    #   }
+    pending_summary_inputs: Annotated[list[dict], _summary_inputs_reducer]
 
 
 class AgentState(TypedDict, total=False):

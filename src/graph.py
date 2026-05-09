@@ -22,17 +22,28 @@ here. It inherits all the instrumentation automatically.
 
 Flow::
 
-    START → initialize → planner ← ──────────────────────────┐
-                          │                                   │
-            ┌─────────────┼────────────────┬───────────┐      │
-            ↓             ↓                ↓           ↓      │
-          recon       executor        web_search    report    │
-            │       (×N parallel, via                 │       │
-            │        Send() fan-out)                  │       │
-            └─────── all workers return ──────────────┘       │
-                          │                                   │
-                          └───────────────────────────────────┘
+    START → initialize → planner ← ──────────────────────────────────┐
+                          │                                           │
+            ┌─────────────┼────────────────┬───────────┐              │
+            ↓             ↓                ↓           ↓              │
+          recon       executor        web_search    report            │
+            │       (×N parallel, via       │           │             │
+            │        Send() fan-out)        │           │             │
+            ↓             ↓                 │           │             │
+            summarizer ←──┘                 │           │             │
+            (synchronization point —        │           │             │
+            converts pending traces         │           │             │
+            into one report each)           │           │             │
+                          ↓                 ↓           │             │
+                          └─────────────────┴───────────┴─────────────┘
                                           report → END
+
+The ``summarizer`` is the context-window fix: each worker hands its
+full trace via ``state["pending_summary_inputs"]`` (transient, not
+mirrored to messages) and the summarizer writes ONE structured
+``worker_report`` AIMessage per worker. The planner reads only those
+reports — never the raw tool-call traces. See
+``src/nodes/summarizer.py`` and ``src/llm/digest.py``.
 """
 
 from __future__ import annotations
@@ -141,34 +152,13 @@ config = SimpleNamespace(
         # small-context fallback models.
         web_search_max_crawled_chars = _env_int("SWARM_WEB_MAX_CHARS",          8000),
         # ── Codex model + reasoning controls (GPT-5.x family) ──
-        # Model: the Codex model slug to talk to. The official Codex
-        # CLI exposes a small handful (see the model-picker UI in
-        # ChatGPT itself). Valid slugs as of May 2026:
-        #     "gpt-5.5"          — full GPT-5.5 (most capable, most
-        #                          expensive). The May-2026 default in
-        #                          the upstream Codex CLI but its
-        #                          policy classifier refuses ~60% of
-        #                          pentest-shaped prompts → we don't
-        #                          default to it.
-        #     "gpt-5.4-mini"     — small GPT-5.4 (default here).
-        #                          Cheaper, faster, far more permissive
-        #                          on offensive-security framing.
-        #     "gpt-5.4"          — full GPT-5.4 (between mini and 5.5
-        #                          on cost & capability)
-        #     "gpt-5.3-codex"    — older codex-tuned 5.3
-        #     "gpt-5.2"          — even older fallback
-        #     "codex-auto-review"— review-flavoured variant
-        #
-        # Override at runtime with SWARM_MODEL=<slug> — useful for
-        # ablation studies in the thesis ("does gpt-5.5 actually do
-        # better on benchmarks where its policy classifier doesn't
-        # refuse?"). The chosen slug flows through ``LLMConfig``
-        # defaults in ``src/llm/provider.py`` and shows up in the
-        # startup banner, so each run records which model it ran on.
-        # No ``choices=`` enforcement — the Codex backend will
-        # cleanly 4xx on bad slugs, which is more informative than a
-        # silent fallback.
-        model                        = _env_str("SWARM_MODEL", "gpt-5.4-mini"),
+        # Model slug. Override with SWARM_MODEL=<slug>.
+        model                        = _env_str("SWARM_MODEL", "gpt-5.4-mini",
+                                                choices=("gpt-5.5", "gpt-5.4",
+                                                         "gpt-5.4-mini",
+                                                         "gpt-5.3-codex",
+                                                         "gpt-5.2",
+                                                         "codex-auto-review")),
         # Effort: how hard the model thinks before responding. See the
         # full enum + valid values in src/llm/provider.py:LLMConfig.
         # Default xhigh = maximum reasoning depth → fullest chain-of-thought
@@ -226,6 +216,7 @@ from src.nodes import (  # noqa: E402
     planner_node,
     recon_node,
     report_node,
+    summarizer_node,
     web_search_node,
 )
 from src.state import SwarmGraphState  # noqa: E402
@@ -246,6 +237,7 @@ def build_graph():
     graph.add_node("planner",    planner_node)
     graph.add_node("recon",      recon_node)
     graph.add_node("executor",   executor_node)
+    graph.add_node("summarizer", summarizer_node)
     graph.add_node("web_search", web_search_node)
     graph.add_node("report",     report_node)
 
@@ -270,10 +262,31 @@ def build_graph():
         ],
     )
 
-    #this is like loop every loop combinations recon is allowed to go to planner basically every node is only allowed to talk to planner
-    # Workers always return to the supervisor so it can reassess.
-    graph.add_edge("recon", "planner")
-    graph.add_edge("executor", "planner")
+    # Worker → summarizer → planner.
+    #
+    # Why a summarizer node instead of letting workers talk to the
+    # planner directly? Each worker may run up to 60 tool-call
+    # iterations and accumulate ~240 KB of trace. Mirroring that into
+    # ``state["messages"]`` made the planner's prompt grow ~50 KB per
+    # turn — Codex's 256 K window died within ~3 fan-out cycles. The
+    # summarizer reads each worker's full trace from
+    # ``state["pending_summary_inputs"]`` (a transient field, not
+    # mirrored to messages), produces ONE structured ``worker_report``
+    # AIMessage per worker, and writes only those reports into global
+    # state. The planner's input prompt is bounded to digests + planner
+    # decisions instead of raw tool-call storms.
+    #
+    # The summarizer is the **synchronization point** after fan-out:
+    # when 4 parallel executors finish, the summarizer runs ONCE with
+    # the accumulated list (via ``_summary_inputs_reducer`` in
+    # ``src/state.py``) and produces 4 reports in parallel via
+    # ``asyncio.gather``. See ``src/nodes/summarizer.py``.
+    #
+    # ``web_search`` skips the summarizer because its output is already
+    # a single concentrated synthesis, not a tool-call trace.
+    graph.add_edge("recon", "summarizer")
+    graph.add_edge("executor", "summarizer")
+    graph.add_edge("summarizer", "planner")
     graph.add_edge("web_search", "planner")
 
     graph.add_edge("report", END)

@@ -997,13 +997,11 @@ class _Live:
         if log_dir:
             kv("Log root:   ", str(log_dir))
             legend = [
-                ("nodes.jsonl",          "1 line per node finish — quiet during long workers"),
-                ("state_diffs.jsonl",    "1 line per node finish — full text of new msgs/findings + size deltas"),
-                ("llm_calls.jsonl",      "1 line per LLM call end — token counts, populates live"),
-                ("llm_requests.jsonl",   "1 line per LLM call start — full prompt sent, populates live"),
+                ("nodes.jsonl",          "1 line per node finish — duration, summary, full state diff (before / after / delta with new msgs)"),
+                ("llm_calls.jsonl",      "2 lines per LLM call — phase=start (full prompt) + phase=end (tokens, response). Live."),
                 ("terminal_events.jsonl","1 line per shell command — populates live"),
-                ("final_state.json",    "final agent_state at run end"),
-                ("summary.md",          "human digest at run end"),
+                ("final_state.json",     "final agent_state at run end"),
+                ("summary.md",           "human entry point — open this first; per-node detail collapsed"),
             ]
             for i, (name, desc) in enumerate(legend):
                 bullet = "└─" if i == len(legend) - 1 else "├─"

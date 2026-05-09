@@ -161,24 +161,18 @@ def _llm_log_path(run_id: str) -> "pathlib.Path":  # noqa: F821 — string annot
     return run_dir(run_id) / "llm_calls.jsonl"
 
 
-def _llm_requests_path(run_id: str) -> "pathlib.Path":  # noqa: F821
-    """Where ``llm_requests.jsonl`` for ``run_id`` lives.
-
-    Sister file to ``llm_calls.jsonl`` — that one captures the *end*
-    of each call (token counts, duration, errors). This one captures
-    the *start*: the full prompt that was actually shipped to the
-    model. Each row in either file shares the same ``lc_run_id`` so a
-    join is trivial.
-    """
-    return run_dir(run_id) / "llm_requests.jsonl"
-
-
 _LOG_LOCK = threading.Lock()
-_REQUEST_LOG_LOCK = threading.Lock()
 
 
 def _append_llm_event(run_id: str | None, event: dict) -> None:
     """Append one JSON line to ``logs/run-<id>/llm_calls.jsonl``.
+
+    Both ``phase=start`` (full prompt) and ``phase=end`` /
+    ``phase=error`` (usage tokens, duration) rows land in the **same
+    file**. This is the consolidated writer — prior to merging
+    ``llm_requests.jsonl`` into ``llm_calls.jsonl``, the start rows
+    went to a sister file. Sharing the file means one ``tail -f`` on
+    the calls log shows both sides of every round-trip.
 
     Failures are swallowed — observability must never break a graph
     run. The lock keeps parallel worker calls from interleaving
@@ -195,23 +189,10 @@ def _append_llm_event(run_id: str | None, event: dict) -> None:
         pass
 
 
-def _append_request_event(run_id: str | None, event: dict) -> None:
-    """Append one JSON line to ``logs/run-<id>/llm_requests.jsonl``.
-
-    Same swallowed-failure / lock-guarded pattern as
-    :func:`_append_llm_event`. Separate lock so a slow request-log
-    write (full prompts can run 100+ KB) can't block the much
-    cheaper end-of-call write on llm_calls.jsonl.
-    """
-    if not run_id:
-        return
-    try:
-        path = _llm_requests_path(run_id)
-        line = json.dumps(event, default=str, ensure_ascii=False) + "\n"
-        with _REQUEST_LOG_LOCK, path.open("a", encoding="utf-8") as f:
-            f.write(line)
-    except Exception:  # noqa: BLE001 — observability must not break runs
-        pass
+# Back-compat alias — the start-side event builder still calls
+# ``_append_request_event``; redirect it to the unified writer so
+# callers don't all need updating in this commit.
+_append_request_event = _append_llm_event
 
 
 # ── Request-side serialization helpers ───────────────────────────────────

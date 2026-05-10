@@ -53,7 +53,7 @@ from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.nodes.base import (
-    AUTHORIZATION_PREAMBLE,
+    IDENTITY_PREAMBLE,
     BaseNode,
     _looks_like_refusal,
 )
@@ -382,7 +382,7 @@ SUPERVISOR_SYSTEM_PROMPT = SUPERVISOR_SYSTEM_PROMPT.replace(
 # that happily executes payloads as a worker — refuses on the
 # decision-making turn ("I can't help retrieve a flag from a live
 # target"). Workers had this defense, supervisor did not.
-SUPERVISOR_SYSTEM_PROMPT = AUTHORIZATION_PREAMBLE + "\n\n" + SUPERVISOR_SYSTEM_PROMPT
+SUPERVISOR_SYSTEM_PROMPT = IDENTITY_PREAMBLE + "\n\n" + SUPERVISOR_SYSTEM_PROMPT
 
 
 # Extracts a fenced ```json { ... } ``` block from the LLM's final
@@ -456,8 +456,7 @@ def _fallback_decision(state: SwarmGraphState) -> dict:
         "reasoning": (
             "Refusal-recovery fallback: supervisor refused twice after "
             "recon. Dispatching sqli/xss/idor as broad coverage of common "
-            "web vulnerabilities to keep the authorized engagement "
-            "productive."
+            "input-handling issue categories to keep the test productive."
         ),
     }
 
@@ -928,24 +927,29 @@ class PlannerNode(BaseNode):
         )
 
         # Check 1 — benchmark mode: expected flag is set and not in state.
-        # We build the haystack from worker output (messages + findings)
-        # only, NOT the full state — the state's own expected_flag field
-        # would otherwise self-match and defeat the check.
+        #
+        # Uses the format-tolerant matcher in ``src.flag``. Critical
+        # for XBOW benchmarks where the flag served by the container
+        # may differ in case (``flag{...}`` vs ``FLAG{...}``) or
+        # entire inner format (UUID vs SHA-256). The previous
+        # ``expected_flag not in haystack`` substring check forced
+        # web_search even when the worker had demonstrably captured
+        # a flag — see XBEN-006-24 run on 2026-05-09 where the
+        # ``owasp-recon`` worker extracted ``flag{582d82bb-...}`` and
+        # the planner still dispatched 7 more attacks because the
+        # case-sensitive substring missed it.
+        #
+        # If the matcher succeeds the early-exit edge in
+        # ``src.edges.routing.route_after_summarizer`` will already
+        # have routed to END before this planner turn even fires —
+        # so this branch is just a defensive secondary check for
+        # paths that bypass the summarizer (e.g. ``web_search`` →
+        # ``planner`` directly).
         expected_flag = (state.get("expected_flag") or "").strip()
         if expected_flag:
-            haystack_parts: list[str] = []
-            for msg in state.get("messages") or []:
-                content = getattr(msg, "content", None)
-                if content is None and isinstance(msg, dict):
-                    content = msg.get("content")
-                if content:
-                    haystack_parts.append(str(content))
-            for f in findings:
-                haystack_parts.append(_finding_attr(f, "evidence"))
-                haystack_parts.append(_finding_attr(f, "title"))
-                haystack_parts.append(_finding_attr(f, "description"))
-            haystack = "\n".join(haystack_parts)
-            if expected_flag not in haystack:
+            from src.flag import find_flag_in_state
+            found, _captured = find_flag_in_state(state, expected=expected_flag)
+            if not found:
                 query = _build_forced_search_query(blocking, state)
                 return (
                     {

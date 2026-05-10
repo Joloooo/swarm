@@ -1756,7 +1756,24 @@ class BaseNode(ABC):
         # All tiers exhausted — surface the last refusal so the outer
         # except in ``run_skill_agent`` runs its existing logging /
         # flag-salvage logic.
+        #
+        # Attach the attempt counters to the exception so the catch
+        # site can read them via ``getattr(e, "_swarm_*", default)``.
+        # Without this the call site's ``worker_attempts`` /
+        # ``worker_last_tier`` locals stay at their initial values
+        # (0 / "plain") because tuple-unpacking the helper's return
+        # never fires when the helper raises. Verified empirically
+        # in run-XBEN-006-24__2026-05-10_23h13m42s where the first
+        # ``refusals.jsonl`` row showed ``attempts_made: 0`` despite
+        # 4 actual attempts in the log.
         assert last_exc is not None
+        try:
+            last_exc._swarm_attempts = total_attempts  # type: ignore[attr-defined]
+            last_exc._swarm_last_tier = last_tier  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            # Some exception classes use ``__slots__``; falling back
+            # to the locals at the call site is acceptable.
+            pass
         raise last_exc
 
     async def run_skill_agent(
@@ -2038,6 +2055,20 @@ class BaseNode(ABC):
                 # ``logs/run-<id>/refusals.jsonl`` so the run summary can
                 # answer "X of Y workers refused" by skill/iteration/size.
                 # Best-effort, never raises.
+                #
+                # Pull the attempt counters off the exception (set by
+                # ``_astream_with_refusal_retry`` before re-raising) —
+                # the local variables ``worker_attempts`` /
+                # ``worker_last_tier`` only get populated when the
+                # helper RETURNS (not on raise), so they'd otherwise
+                # show 0/"plain" here. Fall back to the locals if the
+                # exception didn't carry the attrs.
+                attempts_for_log = getattr(
+                    e, "_swarm_attempts", worker_attempts,
+                )
+                tier_for_log = getattr(
+                    e, "_swarm_last_tier", worker_last_tier,
+                )
                 try:
                     from src.llm.refusal import RefusalError, log_refusal
                     refusal_record = RefusalError(
@@ -2046,9 +2077,9 @@ class BaseNode(ABC):
                         iteration=len(partial_messages),
                         request_size_chars=len(system_msg or ""),
                         request_size_tokens=(len(system_msg or "")) // 4,
-                        attempts_made=worker_attempts,
+                        attempts_made=attempts_for_log,
                         refusal_message=str(e)[:400],
-                        last_tier=worker_last_tier,
+                        last_tier=tier_for_log,
                     )
                     log_refusal(refusal_record, run_id=run_id)
                 except Exception as log_err:  # noqa: BLE001

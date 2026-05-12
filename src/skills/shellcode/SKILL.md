@@ -2,7 +2,9 @@
 name: shellcode
 description: Use when crafting position-independent payloads for memory-corruption RCE / post-exploitation contexts — alphanumeric and ASCII-printable shellcode, encoder / decoder design, ROP / JOP gadget chains, AV-static-bypass via XOR / RC4 / staged loaders, syscall-direct invocation (Linux x86_64 / Windows x64), null-byte avoidance, badchar enumeration. Out of normal SwarmAttacker scope (web-focused) — included for engagements that pivot to native exploitation.
 metadata:
-  agent_id: vulntype-shellcode
+  # Reference-only — out of normal SwarmAttacker scope. Removed from the
+  # dispatchable menu by dropping ``agent_id``. Restore the line to
+  # re-enable.
   methodology: custom
   config_name: shellcode
   tools: [bash]

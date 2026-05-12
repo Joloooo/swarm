@@ -2,7 +2,11 @@
 name: initial-access
 description: Use when seeking the first authenticated foothold on a web target — credential stuffing strategy, password spraying with safe rates, default-credential lookup tables per product, registration-form abuse (email-confirmation bypass, weak signup flows, invite-link enumeration), guest / demo account abuse, exposed staging / preview environments, and OAuth-grant misuse. Covers the transition from external recon to authenticated probing.
 metadata:
-  agent_id: phase-initial-access
+  # Reference-only — credential-stuffing/password-spraying language
+  # reliably trips upstream cyber-policy classifiers and the
+  # capabilities here aren't applicable to localhost benchmarks.
+  # Removed from the dispatchable menu by dropping ``agent_id``;
+  # restore the line to re-enable for FQDN engagements.
   methodology: custom
   config_name: initial-access
   tools: [bash]

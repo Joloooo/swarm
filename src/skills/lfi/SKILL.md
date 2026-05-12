@@ -39,7 +39,7 @@ normalize and bind to an allowlist, or eliminate user control entirely.
    - PHP wrappers: `php://filter/convert.base64-encode/resource=index`
    - `/proc/self/environ` injection
 
-## Attack Surface
+## input surface
 
 - **Path traversal** — read files outside intended roots via `../`,
   encoding gaps, normalization gaps.
@@ -172,7 +172,7 @@ upload or log poisoning when remote includes are disabled.
 3. **Probe normalization** — separators, encodings, double-decodes, case,
    trailing dots/slashes.
 4. **Compare behaviors** — web server vs. application behavior. The
-   gap between them is the attack surface.
+   gap between them is the input surface.
 5. **Escalate** — from disclosure (read) to influence (write/extract/
    include), then to execution (wrapper / engine chains).
 

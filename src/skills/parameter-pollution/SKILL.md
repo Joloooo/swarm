@@ -36,7 +36,7 @@ parameters, mixed shape, and JSON duplicate keys as first-class probes.
    IDs (IDOR), defeat WAF rules, smuggle injection payloads, or trigger
    mass assignment.
 
-## Attack Surface
+## input surface
 
 Parameter pollution lives wherever two parsers handle the same input
 differently. Don't only look at `?id=1&id=2` — modern stacks expose many

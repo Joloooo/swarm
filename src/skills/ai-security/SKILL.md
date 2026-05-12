@@ -2,7 +2,11 @@
 name: ai-security
 description: Use when testing LLM-backed features inside web applications — direct and indirect prompt injection, jailbreaks, system-prompt leakage, tool-call hijacking, RAG-corpus poisoning, embedding-space attacks, output-handling vulnerabilities (rendered markdown XSS, command exec via tool-call, SQL injection from generated queries), supply-chain risks (model registries, finetune corpora), and OWASP LLM Top 10 coverage. Covers detection probes, jailbreak payload library, indirect-injection through user-controlled documents, and chained pivots into traditional vuln classes.
 metadata:
-  agent_id: vulntype-ai-security
+  # Reference-only — prompt-injection/jailbreak vocabulary trips
+  # upstream cyber-policy classifiers, and the XBEN benchmark suite
+  # has no LLM-backed targets that need this skill. Removed from the
+  # dispatchable menu by dropping ``agent_id``; restore to re-enable
+  # when an engagement actually has LLM-backed surface.
   methodology: vulntype
   config_name: ai-security
   tools: [bash]

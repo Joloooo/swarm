@@ -39,7 +39,7 @@ takeover.
 - CAPTCHA / rate-limit bypass via header changes (`X-Forwarded-For`,
   `X-Real-IP`), distributed source IPs, alternate transports.
 
-## JWT / OIDC attack surface
+## JWT / OIDC input surface
 
 - Web / mobile / API authentication using JWT (JWS/JWE) and OIDC/OAuth2.
 - Access vs. ID tokens, refresh tokens, device / PKCE / Backchannel
@@ -84,7 +84,7 @@ takeover.
 - **`kid` injection** — path traversal `../../../../keys/prod.key`,
   SQL/command/template injection in key lookup, or pointing to
   world-readable files.
-- **`jku` / `x5u` abuse** — host attacker-controlled JWKS / X509 chain;
+- **`jku` / `x5u` abuse** — host user-controlled JWKS / X509 chain;
   if not pinned/whitelisted, the server fetches and trusts attacker
   keys.
 - **`jwk` header injection** — embed attacker JWK in the header; some
@@ -177,7 +177,7 @@ finding:
 - **Refresh-token rotation not enforced** — reuse old refresh token
   indefinitely; no reuse detection.
 - **Long-lived JWTs with no revocation** — persistent access post-logout.
-- **Session fixation** — bind new tokens to attacker-controlled session
+- **Session fixation** — bind new tokens to user-controlled session
   identifiers or cookies.
 
 ### Cross-format token confusion

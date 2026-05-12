@@ -36,7 +36,7 @@ matched against an exact allowlist per scheme, host, and path.
    server-side (SSRF feeder), use the redirect to bypass an SSRF
    destination allowlist.
 
-## Attack Surface
+## input surface
 
 - **Server-driven redirects** — HTTP 3xx `Location`.
 - **Client-driven redirects** — `window.location`, meta refresh, SPA
@@ -210,7 +210,7 @@ A finding is real only when:
 3. For multi-hop, you prove only the first hop is validated and the
    second hop escapes constraints.
 4. For OAuth / SAML, you demonstrate code / `RelayState` delivery to
-   an attacker-controlled endpoint.
+   an user-controlled endpoint.
 
 ## False positives to rule out
 - Redirects constrained to relative same-origin paths with robust

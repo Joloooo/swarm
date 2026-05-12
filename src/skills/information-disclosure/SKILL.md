@@ -38,7 +38,7 @@ response byte, artifact, and header as potential intelligence.
 6. **Side-channel timing**: differential response timing on
    user-existence, password-reset, login flows.
 
-## Attack Surface
+## input surface
 
 - **Errors and exception pages** — stack traces, file paths, SQL,
   framework versions.

@@ -32,7 +32,7 @@ token AND strict origin checks for every state change.
 5. **Login/logout CSRF**: test whether an attacker can log a victim into
    the attacker's account, or log them out at will.
 
-## Attack Surface
+## input surface
 
 **Session types**: web apps with cookie-based sessions and HTTP auth;
 JSON / REST, GraphQL (GET / persisted queries), file-upload endpoints.

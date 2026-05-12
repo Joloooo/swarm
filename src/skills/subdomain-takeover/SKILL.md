@@ -35,7 +35,7 @@ cache poisoning.
    inclusion, OAuth redirect_uri inclusion, CSP `connect-src` /
    `script-src` inclusion.
 
-## Attack Surface
+## input surface
 
 - Dangling CNAME / A / ALIAS to third-party services (hosting,
   storage, serverless, CDN).

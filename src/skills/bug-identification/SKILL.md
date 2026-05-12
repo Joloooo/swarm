@@ -32,7 +32,7 @@ specialist, and tell them where to look.
    deserialisation, or just a NullPointerException. Use targeted
    probes to separate them.
 3. **Confirm with one cheap signal**: Before dispatching a heavy
-   attack skill, send one minimal probe that produces a
+   test skills, send one minimal probe that produces a
    distinguishing response. Cheap proof now saves a long agent run
    later.
 4. **Hand off with context**: Emit a structured finding — endpoint,
@@ -58,7 +58,7 @@ column, the right column is your candidate-class shortlist.
 | Same input changes a sibling user's record                      | idor, mass-assignment                                               |
 | Numeric ID in URL — incrementing reveals other records          | idor                                                                |
 | `403` for one user, `200` for another on the same path          | broken-access-control, privilege-escalation                         |
-| `302` to an attacker-controlled host                            | open-redirect                                                       |
+| `302` to an user-controlled host                            | open-redirect                                                       |
 | Body contains `/etc/passwd`-shaped strings, `root:x:`           | lfi, path-traversal                                                 |
 | Body contains internal IPs, `169.254.169.254`, AWS metadata     | ssrf                                                                |
 | Outbound DNS / HTTP to your collaborator after submitting input | ssrf, blind-xxe, blind-rce, oast-confirmed                          |
@@ -82,7 +82,7 @@ the engagement.
 ## Per-symptom decision tree
 
 For each candidate class, run one cheap discriminator before
-dispatching the full attack skill. The probes below are minimal and
+dispatching the full test skills. The probes below are minimal and
 non-destructive — they answer "is this really class X?" with a yes
 or no, then stop.
 
@@ -203,7 +203,7 @@ Status codes lie less than bodies do. Watch for:
   a parser.
 - `200` → `403` on path manipulation: an access-control check
   fired.
-- `200` → `302` to attacker-supplied URL: open redirect.
+- `200` → `302` to user-supplied URL: open redirect.
 - `200` → `401` after one extra request: rate-limit triggered or
   session invalidated (race-condition signal).
 
@@ -218,7 +218,7 @@ Status codes lie less than bodies do. Watch for:
 4. **Confirm or rule out** each candidate. Stop on the first
    confirmation; do not exploit further.
 5. **Emit the finding** in the standard schema (see Validation).
-6. **Recommend the next skill**: name the attack skill that
+6. **Recommend the next skill**: name the test skills that
    should pick this up, with the parameter and oracle already
    filled in.
 
@@ -249,7 +249,7 @@ and let the planner decide whether to invest more.
 - **Three samples for timing claims.** A single slow response is
   noise. Median of three at minimum.
 - **Hand off, do not hoard.** When you confirm a class, emit the
-  finding and stop. The dedicated attack skill will go deeper.
+  finding and stop. The dedicated test skills will go deeper.
 - **Log near-misses too.** A failed discriminator is still data.
   Record what you tried, what you saw, and why you ruled the
   class out — the planner uses this to avoid re-trying the same

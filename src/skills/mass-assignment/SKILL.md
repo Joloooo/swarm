@@ -22,7 +22,7 @@ modern APIs and GraphQL.
 ## Objectives
 1. **Discover hidden fields**: scrape responses (REST), introspect the
    schema (GraphQL), read JS bundles, diff admin vs. user response
-   shapes. Hidden fields you didn't send are the attack surface.
+   shapes. Hidden fields you didn't send are the input surface.
 2. **Privilege escalation**: try `role`, `isAdmin`, `permissions`,
    `groups`, `scopes`, `tier` on every account-mutation endpoint
    (signup, profile update, account creation).
@@ -36,7 +36,7 @@ modern APIs and GraphQL.
 6. **Cross-format probes**: same payload as JSON, form-encoded, and
    multipart — each may hit a different binder with different rules.
 
-## Attack Surface
+## input surface
 
 - REST / JSON, GraphQL inputs, form-encoded and multipart bodies.
 - Model binding in controllers / resolvers; ORM `create` / `update`

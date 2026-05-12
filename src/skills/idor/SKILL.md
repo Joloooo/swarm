@@ -31,7 +31,7 @@ bound to the caller.
 5. **Indirect references**: Check if internal object references are
    exposed in responses (database IDs, file paths) that shouldn't be.
 
-## Attack Surface
+## input surface
 
 **Scope dimensions**:
 - **Horizontal** — access another subject's objects of the same type.

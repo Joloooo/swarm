@@ -1,6 +1,6 @@
 ---
 name: xss
-description: Use when testing for Cross-Site Scripting — reflected (parameters echoed in response), stored (input persisted then rendered), and DOM-based (dangerous JS sinks like innerHTML, document.write, eval fed by user-controllable sources). Covers context classification (HTML body, attribute, JS, URL, CSS, SVG, Markdown), filter and sanitizer bypass (event handlers, mutation XSS, polyglots), framework-specific sinks (React `dangerouslySetInnerHTML`, Vue `v-html`, Angular `$sce`, Svelte `{@html}`), CSP and Trusted Types bypass, and post-exploitation paths. See `references/payloads.md` for the full payload library.
+description: Use when testing for Cross-Site Scripting — reflected (parameters echoed in response), stored (input persisted then rendered), and DOM-based (dangerous JS sinks like innerHTML, document.write, eval fed by user-controllable sources). Covers context classification (HTML body, attribute, JS, URL, CSS, SVG, Markdown), filter and sanitizer bypass (event handlers, mutation XSS, polyglots), framework-specific sinks (React `dangerouslySetInnerHTML`, Vue `v-html`, Angular `$sce`, Svelte `{@html}`), CSP and Trusted Types bypass, and post-access paths. See `references/payloads.md` for the full payload library.
 metadata:
   agent_id: vulntype-xss
   methodology: vulntype
@@ -33,7 +33,7 @@ Types).
    - Case variation: `<ScRiPt>`, `<SCRIPT>`
    - Template literals if framework uses them
 
-## Attack Surface
+## input surface
 
 **Types**: reflected, stored, and DOM-based, across web/mobile/desktop
 shells.
@@ -250,16 +250,18 @@ A finding is real only when:
 - Scriptable contexts disabled (no HTML pass-through, safe URL schemes
   enforced).
 
-## Post-exploitation
-- Session / token exfiltration — prefer fetch/XHR over image beacons for
-  reliability. `SameSite=Lax` is the modern default, so cross-site cookie
-  theft is often blocked; pivot to tokens in `localStorage` /
-  `sessionStorage` or to same-origin CSRFable actions.
-- Real-time control — WebSocket C2 with a strict command set.
-- Persistence — service-worker registration; localStorage / script-gadget
-  re-injection.
-- Impact paths — role hijack, CSRF chaining, internal port scan via fetch,
-  credential phishing overlays.
+## Demonstrating impact once XSS triggers
+- Session / token recovery — prefer fetch/XHR over image beacons for
+  reliability when demonstrating that the script can read auth state.
+  `SameSite=Lax` is the modern default, so cross-site cookie reads
+  are often blocked; pivot to tokens in `localStorage` /
+  `sessionStorage` or to same-origin CSRF-able actions.
+- Real-time control — a WebSocket back-channel with a strict command
+  set is the most flexible PoC for reachable scripted actions.
+- Persistence on the page — service-worker registration; localStorage
+  / script-gadget re-injection.
+- Impact paths to write up — role hijack, CSRF chaining, internal-host
+  fetches, credential-prompt overlays.
 
 ## Tools to use
 - `curl` for injecting payloads and inspecting responses.

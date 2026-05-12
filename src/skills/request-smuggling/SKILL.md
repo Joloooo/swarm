@@ -37,7 +37,7 @@ connections as a candidate.
 5. **Stop on responsible scope**: do not poison shared caches against
    third parties or hijack live user sessions outside engagement scope.
 
-## Attack Surface
+## input surface
 
 Smuggling requires (a) a front-end that pools and reuses connections to a
 back-end, and (b) any parser inconsistency between the two.
@@ -214,7 +214,7 @@ A confirmed desync is the entry; impact comes from what you smuggle.
   Only works on busy connections with real victim traffic — do not
   attempt outside engagement scope.
 - **Cache poisoning** — smuggle a request to a cacheable static path
-  whose response is attacker-controlled, then make the front-end cache
+  whose response is user-controlled, then make the front-end cache
   the poisoned response under the victim URL. Effective against CDNs
   that cache by URL alone.
 - **Internal-only access** — `/admin`, `/debug`, `/metrics`,

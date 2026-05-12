@@ -776,12 +776,26 @@ async def _run_skill_agent_impl(
             # tied to actual usage).
             findings = []
             try:
-                from src.flag import (
-                    FLAG_RE,
-                    _stringify_messages,
-                )
-                haystack = _stringify_messages(partial_messages)
-                flag_hits = FLAG_RE.findall(haystack)
+                from src.flag import extract_flags
+
+                # Stringify partial messages inline. The old code used a
+                # private ``_stringify_messages`` helper from ``src.flag``;
+                # that helper was deleted in the 2026-05 refactor that
+                # replaced state scanning with explicit ``submit_flag``.
+                # Salvage still legitimately scans the partial trace of a
+                # refused worker, so the stringifier lives here now —
+                # narrower scope, no public API surface for state scans.
+                parts: list[str] = []
+                for m in partial_messages:
+                    c = getattr(m, "content", None)
+                    if isinstance(c, str):
+                        parts.append(c)
+                    elif isinstance(c, list):
+                        for block in c:
+                            if isinstance(block, dict):
+                                parts.append(str(block.get("text") or ""))
+                haystack = "\n".join(parts)
+                flag_hits = extract_flags(haystack)
                 if flag_hits:
                     flag_value = flag_hits[0]
                     # Pull a short evidence excerpt around the

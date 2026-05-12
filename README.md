@@ -32,6 +32,16 @@ and see every tool call and output live in the terminal — the right
 rhythm while the agent itself is still being tuned.
 
 ```bash
+# Daily 15 (resume-friendly):
+uv run python -m benchmarks.xbow_runner --daily --resume --skip-build
+
+# Single bench debug:
+uv run python -m benchmarks.xbow_runner --bench XBEN-006-24 --skip-build
+
+# Quiet for an overnight sweep:
+uv run python -m benchmarks.xbow_runner --daily --resume --skip-build
+
+# Loud for one-time deep debugging:
 uv run python -m benchmarks.xbow_runner --bench XBEN-006-24 --verbose
 ```
 

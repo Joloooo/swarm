@@ -209,7 +209,10 @@ def describe_config() -> str:
 
 from langgraph.graph import END, START, StateGraph  # noqa: E402
 
-from src.edges.routing import route_after_planner  # noqa: E402
+from src.edges.routing import (  # noqa: E402
+    route_after_planner,
+    route_after_summarizer,
+)
 from src.nodes import (  # noqa: E402
     executor_node,
     initialize_node,
@@ -286,7 +289,22 @@ def build_graph():
     # a single concentrated synthesis, not a tool-call trace.
     graph.add_edge("recon", "summarizer")
     graph.add_edge("executor", "summarizer")
-    graph.add_edge("summarizer", "planner")
+
+    # The summarizer → planner edge is **conditional**: in benchmark
+    # mode (``state.expected_flag`` is set), if a flag pattern shows
+    # up in worker output we short-circuit straight to END instead of
+    # spending another planner turn. See
+    # ``src.edges.routing.route_after_summarizer`` — it scans
+    # state.messages / state.findings / state.agent_results for any
+    # ``[fF][lL][aA][gG]{...}`` pattern using the format-tolerant
+    # matcher in ``src.flag``. Real pentest runs (empty
+    # ``expected_flag``) always fall through to the planner, so the
+    # gate is a no-op outside of benchmark contexts.
+    graph.add_conditional_edges(
+        "summarizer",
+        route_after_summarizer,
+        ["planner", END],
+    )
     graph.add_edge("web_search", "planner")
 
     graph.add_edge("report", END)

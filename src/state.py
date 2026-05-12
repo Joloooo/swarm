@@ -175,7 +175,27 @@ class SwarmGraphState(TypedDict, total=False):
     #   - src.nodes.base._build_system_message (worker prompt addendum)
     #   - src.nodes.planner.PlannerNode.execute (planner prompt addendum
     #     and the `_maybe_force_recovery` safety net)
+    #   - src.edges.routing.route_after_summarizer (early-exit edge)
     expected_flag: str
+
+    # Captured flag string — the actual ``flag{...}`` / ``FLAG{...}``
+    # value extracted from worker output. Set by the early-exit edge
+    # (``src.edges.routing.route_after_summarizer``) the first time a
+    # flag pattern shows up in messages / findings / agent_results.
+    # Once set, in benchmark mode the graph routes straight to END
+    # rather than asking the planner for another iteration.
+    #
+    # Why store it instead of recomputing it on each routing call?
+    # Two reasons:
+    #   (1) The xbow_runner reads it post-run as the source of truth
+    #       for ``flag_found`` (the substring match in the haystack
+    #       can no longer self-match because we strip ``expected_flag``
+    #       before serialising).
+    #   (2) ``write_final_state`` and ``write_summary`` surface the
+    #       captured value in run artefacts, which makes failed runs
+    #       easier to triage when the format-tolerant matcher accepted
+    #       a flag that didn't equal the expected one.
+    flag_captured: str
 
     # ── Worker → Summarizer hand-off (the context-window fix) ──
     # Each worker (executor, recon, salvage) writes a SINGLE-ITEM list
@@ -186,10 +206,12 @@ class SwarmGraphState(TypedDict, total=False):
     # report to the supervisor) and clears the list with ``None``.
     #
     # The raw worker trace NEVER enters ``state["messages"]`` — it lives
-    # only inside this list while it's pending, and on disk under
-    # ``logs/run-<id>/worker-<agent_id>-<ts>/trace.jsonl`` for forensics.
-    # This bound the planner's input prompt to digests + planner
-    # decisions instead of the full mirrored trace storm.
+    # only inside this list while it's pending, and on disk in the
+    # consolidated ``logs/run-<id>/worker_traces.jsonl`` file (one shared
+    # file per run; rows tagged with ``agent_id`` + ``dispatch_ts`` so
+    # individual worker invocations stay distinguishable). This bound the
+    # planner's input prompt to digests + planner decisions instead of the
+    # full mirrored trace storm.
     #
     # Each entry shape (see ``src/nodes/summarizer.py`` for the canonical
     # definition):

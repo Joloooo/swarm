@@ -207,7 +207,8 @@ class SummarizerNode(BaseNode):
                 f"completed without producing a summary."
                 + (f" Error: {err}" if err else "")
                 + f"\n\n## Inputs tried\n(see "
-                f"`logs/run-<id>/worker-{agent_id}-*/trace.jsonl` on disk)"
+                f"`logs/run-<id>/worker_traces.jsonl` on disk; "
+                f"filter by `.agent_id == \"{agent_id}\"`)"
                 f"\n\n## Server responses\n(unavailable)"
                 f"\n\n## Inferred server-side behaviour\n(unavailable)"
                 f"\n\n## NOT tried\n(unavailable)"

@@ -1,38 +1,30 @@
-"""All JSONL appenders + the final-state writer for one run.
+"""Disk writers for the per-run debug logs.
 
-Each artefact written under ``logs/run-<run_id>/`` has its own writer
-function in this file. The shape is uniform — open the file in append
-mode under a per-artefact lock, JSON-serialise one row, write one
-line — so they share the ``_JsonlWriter`` helper.
+Each run writes two artefacts under ``logs/run-<run_id>/``:
 
-Artefacts:
+  - ``full_logs.jsonl``              — every LLM call (start + end / error
+                                        rows) and every shell command,
+                                        chronologically interleaved.
+                                        One row per event. Each row has a
+                                        ``type`` field so consumers can
+                                        filter (``llm_start``, ``llm_end``,
+                                        ``llm_error``, ``shell_*``, …).
+                                        Written by :func:`append_event`.
+  - ``displayed_terminal_logs.log``   — plain-text mirror of the live
+                                        ticker output, ANSI-stripped so
+                                        any editor / ``grep`` works.
+                                        Written by the LIVE renderer
+                                        through the sink configured in
+                                        :func:`set_terminal_log_file`.
 
-  - ``nodes.jsonl``           — :func:`append_node_event` (called from
-                                 ``BaseNode.__call__`` per node finish)
-  - ``worker_traces.jsonl``   — :func:`append_worker_trace` (called from
-                                 ``run_skill_agent`` per worker finish)
-  - ``llm_calls.jsonl``       — :func:`append_llm_event` (called from
-                                 ``TokenLoggingCallback`` per LLM call)
-  - ``terminal_events.jsonl`` — :func:`append_terminal_event` (called from
-                                 ``src/tools/shell/_common.py`` per
-                                 shell command)
-  - ``refusals.jsonl``        — :func:`append_refusal` (called from
-                                 ``src/nodes/base/skill_runner.py`` per
-                                 cyber_policy refusal). FOLLOW-UP: this
-                                 artefact is nearly redundant with
-                                 ``llm_calls.jsonl`` error rows; flagged
-                                 as a deletion candidate in a future
-                                 session.
-  - ``final_state.json``      — :func:`write_final_state` (called from
-                                 the runner at end-of-run)
-
-Run-id resolution helpers (``make_run_id``, ``run_dir``, ``LOGS_ROOT``)
-also live here because they are file-system concerns.
-
-Why one file: every writer is the same shape. They belong together so
-``grep -rn "<artefact>.jsonl"`` finds the writer in one searchable
-file. If any individual writer grows past ~80 lines (e.g. complex
-serialization), split THAT one out then; default to the simpler shape.
+History — the pre-refactor run dir had seven files (``nodes.jsonl``,
+``worker_traces.jsonl``, ``llm_calls.jsonl``, ``terminal_events.jsonl``,
+``refusals.jsonl``, ``final_state.json``, ``summary.md``). Five never
+got read in practice; three were redundant with each other. The two
+files above are the survivors that actually answer debugging
+questions: ``full_logs.jsonl`` for "what did the model see / what did
+the tools do", ``displayed_terminal_logs.log`` for "what was the
+human-readable story of the run".
 """
 
 from __future__ import annotations
@@ -42,13 +34,8 @@ import json
 import logging
 import re
 import threading
-from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
-
-if TYPE_CHECKING:
-    from src.refusals.errors import RefusalError
 
 logger = logging.getLogger(__name__)
 
@@ -58,19 +45,10 @@ logger = logging.getLogger(__name__)
 LOGS_ROOT = Path(__file__).resolve().parents[2] / "logs"
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# Per-artefact thread locks. Parallel executor workers append concurrently;
-# the lock keeps lines atomic so a half-flushed JSONL row never appears.
-# One lock per file is enough — different artefacts can be written in
-# parallel without coordination.
-# ────────────────────────────────────────────────────────────────────────────
-
-
-_NODES_LOCK = threading.Lock()
-_WORKER_TRACES_LOCK = threading.Lock()
-_LLM_CALLS_LOCK = threading.Lock()
-_TERMINAL_EVENTS_LOCK = threading.Lock()
-_REFUSALS_LOCK = threading.Lock()
+# Per-artefact locks. Parallel executors emit concurrently; the lock keeps
+# JSONL rows atomic so a half-flushed line never appears.
+_FULL_LOGS_LOCK = threading.Lock()
+_TERMINAL_LOG_LOCK = threading.Lock()
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -92,18 +70,7 @@ def make_run_id(
     """Build a run_id that ties target identity to a readable timestamp.
 
     Format:  ``<slug>__<YYYY-MM-DD>_<HHhMMmSSs>``
-
     Example: ``XBEN-006-24__2026-05-03_21h18m10s``
-
-    The slug embeds whichever of these is most identifying, in order:
-        1. benchmark_id (XBEN-019-24)
-        2. target host (target-localhost-32768)
-        3. ``studio`` fallback for langgraph dev runs
-
-    The pid suffix (used in earlier versions to disambiguate concurrent
-    runs of the same benchmark) is dropped — colliding runs of the same
-    bench id are pathological enough that letting them share a directory
-    is acceptable, and the readable timestamp is the user-visible win.
     """
     now = dt.datetime.now()
     ts = now.strftime("%Y-%m-%d_%Hh%Mm%Ss")
@@ -126,144 +93,111 @@ def run_dir(run_id: str) -> Path:
     return d
 
 
+def full_logs_path(run_id: str) -> Path:
+    """Return the path to ``full_logs.jsonl`` for a run."""
+    return run_dir(run_id) / "full_logs.jsonl"
+
+
+def terminal_log_path(run_id: str) -> Path:
+    """Return the path to ``displayed_terminal_logs.log`` for a run."""
+    return run_dir(run_id) / "displayed_terminal_logs.log"
+
+
 # ────────────────────────────────────────────────────────────────────────────
-# JSONL writers — one function per artefact, sharing the same shape.
+# Unified event writer — every structured event in one chronological file.
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _append_jsonl(path: Path, payload: dict | list[dict], lock: threading.Lock) -> None:
-    """Shared body for every JSONL appender.
+def append_event(run_id: str | None, type: str, **fields: object) -> None:
+    """Append one event row to ``full_logs.jsonl``.
 
-    Serialises one row (or N rows when ``payload`` is a list) and
-    writes them under the per-artefact lock. Best-effort — failures
-    log a warning but never raise; observability must not break the
-    graph run.
+    ``type`` is required and identifies the event kind so consumers can
+    filter with ``jq 'select(.type == "shell_output")'`` and similar.
+    Conventional types:
+
+      * ``llm_start``   — LLM call begins (with full prompt).
+      * ``llm_end``     — LLM call completes (with response + tokens).
+      * ``llm_error``   — LLM call raised (refusal, network, etc.).
+      * ``shell_command``, ``shell_output``, ``shell_spawn``,
+        ``shell_blocked``, … — one row per shell event.
+
+    Best-effort: failures log a warning but never raise. Observability
+    must not break a graph run. Tolerates ``run_id=None`` (e.g. callbacks
+    fired before the run id is propagated) by no-op'ing.
     """
+    if not run_id:
+        return
     try:
-        rows = payload if isinstance(payload, list) else [payload]
-        if not rows:
-            return
-        lines = [
-            json.dumps(r, default=str, ensure_ascii=False) + "\n"
-            for r in rows
-        ]
-        with lock, path.open("a", encoding="utf-8") as f:
-            f.writelines(lines)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Could not append to %s: %s", path, e)
+        row = {
+            "ts": dt.datetime.now().isoformat(timespec="milliseconds"),
+            "type": type,
+            **fields,
+        }
+        line = json.dumps(row, default=str, ensure_ascii=False) + "\n"
+        path = full_logs_path(run_id)
+        with _FULL_LOGS_LOCK, path.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception as e:  # noqa: BLE001 — observability must not break the graph
+        logger.warning("append_event(%s) failed: %s", type, e)
 
 
-def append_node_event(run_id: str, event: dict) -> None:
-    """Append one JSON line to ``nodes.jsonl``.
+# ────────────────────────────────────────────────────────────────────────────
+# Plain-text terminal-log sink — set once at run start by the runner.
+#
+# The LIVE renderer (src/observability/live.py) calls
+# ``write_terminal_line(text)`` for every line it emits to stderr. This
+# function tees that text (ANSI-stripped) to ``displayed_terminal_logs.log``
+# so the file is a verbatim, color-stripped mirror of what showed on
+# screen.
+# ────────────────────────────────────────────────────────────────────────────
 
-    Called from ``BaseNode.__call__`` after every node finish. Each
-    row carries timestamp, node name, run id, duration, summary, the
-    state shape before/after, and the per-call ``delta`` block (full
-    text of every newly added message / finding).
+
+# Single sink path for the whole process. ``None`` means "do not write a
+# file" — the LIVE renderer continues to print to stderr regardless.
+_TERMINAL_LOG_FILE: Path | None = None
+
+
+# ANSI CSI escape sequences (colours, cursor moves). Stripped so the
+# saved file opens cleanly in plain editors / behaves under ``grep``.
+_ANSI_RE = re.compile(r"\x1B\[[0-9;]*[A-Za-z]")
+
+
+def set_terminal_log_file(path: Path | None) -> None:
+    """Set (or clear) the path the LIVE renderer tees output to.
+
+    Called once from the benchmark runner / CLI entry after the run_id
+    is known. Passing ``None`` disables file output (useful for Studio
+    / langgraph dev sessions where there is no run dir yet).
     """
-    _append_jsonl(run_dir(run_id) / "nodes.jsonl", event, _NODES_LOCK)
-
-
-def append_worker_trace(run_id: str, rows: list[dict]) -> Path:
-    """Append worker trace messages to ``worker_traces.jsonl``.
-
-    Replaces the older per-worker subdirectory layout
-    (``worker-<agent_id>-<ts>/trace.jsonl``) which produced one folder
-    per worker invocation — that didn't scale to 15+ workers per bench
-    and made the run directory hard to navigate. Each row in the
-    consolidated file carries ``agent_id`` and ``dispatch_ts`` fields
-    so multiple invocations of the same worker stay distinguishable;
-    ``i`` is the message index within a single dispatch.
-
-    Returns the file path (constant per run) for the caller's benefit.
-    """
-    path = run_dir(run_id) / "worker_traces.jsonl"
-    if rows:
-        _append_jsonl(path, rows, _WORKER_TRACES_LOCK)
-    return path
-
-
-def append_llm_event(run_id: str | None, event: dict) -> None:
-    """Append one JSON line to ``llm_calls.jsonl``.
-
-    Called from ``TokenLoggingCallback`` for every LLM call: one
-    ``phase=start`` row when the call begins, one ``phase=end`` (or
-    ``phase=error``) row when it ends. The summary builder pairs them
-    by ``lc_run_id`` to render per-call cost.
-
-    Tolerates ``run_id=None`` (e.g. callbacks that fire before the
-    run id is propagated) by no-op'ing — better silent drop than crash.
-    """
-    if not run_id:
+    global _TERMINAL_LOG_FILE
+    if path is None:
+        _TERMINAL_LOG_FILE = None
         return
-    _append_jsonl(run_dir(run_id) / "llm_calls.jsonl", event, _LLM_CALLS_LOCK)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _TERMINAL_LOG_FILE = path
 
 
-def append_terminal_event(run_id: str | None, event: dict) -> None:
-    """Append one JSON line to ``terminal_events.jsonl``.
+def get_terminal_log_file() -> Path | None:
+    return _TERMINAL_LOG_FILE
 
-    Called from the bash + tmux tool wrappers per shell command. Each
-    row carries timestamp, agent, command, exit_code, duration_ms,
-    bytes, tail, and reasoning — mirroring what ``LIVE.shell_command``
-    and ``LIVE.shell_output`` render to stderr.
+
+def write_terminal_line(line: str) -> None:
+    """Append one line to ``displayed_terminal_logs.log`` if a sink is set.
+
+    Strips ANSI escape codes so the file is readable in any editor.
+    The trailing newline is added if not already present. Best-effort —
+    failures swallow silently (LIVE must always print to stderr).
     """
-    if not run_id:
+    path = _TERMINAL_LOG_FILE
+    if path is None:
         return
-    _append_jsonl(
-        run_dir(run_id) / "terminal_events.jsonl", event, _TERMINAL_EVENTS_LOCK,
-    )
-
-
-def append_refusal(err: "RefusalError", *, run_id: str | None) -> None:
-    """Append one JSON line to ``refusals.jsonl``.
-
-    Takes a :class:`src.refusals.errors.RefusalError` and serialises
-    its structured fields (agent_id, skill_name, iteration, request
-    sizes, attempts made, last tier attempted, raw refusal message).
-    Called from ``run_skill_agent`` once the tier ladder has exhausted.
-
-    FOLLOW-UP: this artefact is nearly redundant with
-    ``llm_calls.jsonl`` error rows, undercounts (only writes once per
-    tier-exhausted worker, not once per retry), and the
-    ``refusal_message`` field is identical generic Codex boilerplate
-    for every row. A future session should evaluate deleting it
-    entirely and computing the count from ``llm_calls.jsonl`` rows
-    where ``error_type`` matches the refusal pattern. NOT done in
-    this refactor (the rule was "no behaviour change").
-    """
-    if not run_id:
-        return
-    payload = {
-        "ts": _now_iso(),
-        "run_id": run_id,
-        **asdict(err),
-    }
-    _append_jsonl(
-        run_dir(run_id) / "refusals.jsonl", payload, _REFUSALS_LOCK,
-    )
-
-
-def write_final_state(run_id: str, state: dict) -> Path:
-    """Dump the full agent_state to ``final_state.json``.
-
-    Called once at end-of-run by the runner. Unlike the JSONL appenders
-    this is a one-shot write of the entire state dict; failure here is
-    not swallowed — the summary builder consumes the file.
-    """
-    path = run_dir(run_id) / "final_state.json"
-    path.write_text(
-        json.dumps(state, indent=2, default=str, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    return path
-
-
-def _now_iso() -> str:
-    """Return the current local time as ``YYYY-MM-DDTHH:MM:SS``.
-
-    Matches the timestamp shape used by the legacy
-    ``src/llm/refusal.py:log_refusal`` so existing tests + log
-    parsers keep working unchanged.
-    """
-    import time
-    return time.strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        stripped = _ANSI_RE.sub("", line)
+        if not stripped.endswith("\n"):
+            stripped += "\n"
+        with _TERMINAL_LOG_LOCK, path.open("a", encoding="utf-8") as f:
+            f.write(stripped)
+    except Exception:
+        # Never let log writes break a run. The screen has the data either way.
+        pass

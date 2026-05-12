@@ -60,16 +60,9 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from src.llm.callbacks import make_call_config
 from src.observability import (
     LIVE,
-    append_node_event,
     make_run_id,
 )
-from src.observability.state import (
-    _msg_chars,
-    _msg_role_label,
-    _state_diff,
-    _state_shape,
-    _summarize_node_result,
-)
+from src.observability.state import _summarize_node_result
 from src.refusals.detect import REFUSAL_PATTERNS, looks_like_refusal
 from src.refusals.recover import recover_from_refusal
 from src.refusals.retry import astream_with_refusal_retry
@@ -165,29 +158,33 @@ class BaseNode(ABC):
         Side effects per call:
             1. Append a boundary ``✅ [name] Xms — summary`` AIMessage
                to ``state.messages`` so Studio shows live progress.
-            2. Append one line to ``logs/run-<run_id>/nodes.jsonl``
-               capturing timestamp, node name, duration, summary, and
-               full result dict — for thesis-grade post-run analysis.
-            3. On crash, return a ``❌ [name] crashed`` AIMessage and
-               log the JSONL row with ``error`` set, instead of
-               propagating the exception and killing the graph.
-            4. Stream a colored, mode-aware view of the node transition
+            2. On crash, return a ``❌ [name] crashed`` AIMessage
+               instead of propagating the exception (which would kill
+               the whole graph).
+            3. Stream a colored, mode-aware view of the node transition
                to stderr via :data:`src.observability.LIVE`. The
                ``compact`` / ``verbose`` / ``silent`` mode lives in
                ``config.verbosity.mode`` (see ``src/graph.py``); the
-               renderer reads it on every call.
+               renderer reads it on every call. The same line is
+               teed (ANSI-stripped) to
+               ``logs/run-<run_id>/displayed_terminal_logs.log``.
 
         ``run_id`` is read from state. If absent (e.g. Studio runs that
         bypass the runner), one is derived on the fly from target_url.
+
+        Structured per-event logging lives in
+        ``logs/run-<run_id>/full_logs.jsonl`` — one row per LLM call
+        and one row per shell command, written by ``llm.callbacks`` and
+        ``tools.shell._common.log_event`` respectively. The base class
+        no longer maintains a separate ``nodes.jsonl`` shape diff:
+        that artefact was never read in practice and the same
+        information is reconstructable from ``full_logs.jsonl`` +
+        ``displayed_terminal_logs.log``.
         """
         name = self.name
         run_id = (state or {}).get("run_id") or make_run_id(
             target_url=(state or {}).get("target_url"),
         )
-
-        # Snapshot the state *shape* before execute() runs so we can
-        # diff post-hoc. Cheap (counts + char totals); never raises.
-        before_shape = _state_shape(state)
 
         t0 = time.perf_counter()
         try:
@@ -195,29 +192,6 @@ class BaseNode(ABC):
         except Exception as e:  # noqa: BLE001 — visibility > strictness here
             dt_ms = int((time.perf_counter() - t0) * 1000)
             self.log.exception("[%s] crashed after %dms", name, dt_ms)
-            # One merged row in nodes.jsonl on crash too. Carries the
-            # same shape (before/after/delta) the success path uses,
-            # with after==before (the crash means no state change), so
-            # downstream `jq` queries don't have to special-case the
-            # error path.
-            append_node_event(run_id, {
-                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "node": name,
-                "run_id": run_id,
-                "duration_ms": dt_ms,
-                "error": f"{type(e).__name__}: {e}",
-                "summary": "",
-                "before": before_shape,
-                "after":  before_shape,
-                "delta":  _state_diff(
-                    before=before_shape,
-                    after=before_shape,
-                    duration_ms=dt_ms,
-                    new_messages=[],
-                    new_findings=[],
-                    new_agent_results=[],
-                ),
-            })
             return {
                 "messages": [
                     AIMessage(
@@ -231,74 +205,10 @@ class BaseNode(ABC):
         dt_ms = int((time.perf_counter() - t0) * 1000)
         summary = _summarize_node_result(name, result)
 
-        # Project the post-reducer state shape from the before-snapshot
-        # plus what this node returned. messages and findings use
-        # additive reducers; scalar fields (next_action, active_agents,
-        # planner_iters, ...) are rewritten by whatever the result dict
-        # carries. This is the same projection the standalone
-        # state_diffs.jsonl writer used to produce — now folded into
-        # nodes.jsonl so a single row contains everything you need to
-        # answer "what did node X do?"
-        new_messages_for_diff = list(result.get("messages") or [])
-        new_findings_for_diff = list(result.get("findings") or [])
-        new_agent_results_for_diff = list(result.get("agent_results") or [])
-        new_chars = sum(_msg_chars(m) for m in new_messages_for_diff)
-        after_role_chars = dict(before_shape.get("messages_role_chars") or {})
-        after_role_counts = dict(before_shape.get("messages_role_counts") or {})
-        for m in new_messages_for_diff:
-            r = _msg_role_label(m)
-            after_role_chars[r] = after_role_chars.get(r, 0) + _msg_chars(m)
-            after_role_counts[r] = after_role_counts.get(r, 0) + 1
-        after_shape = {
-            **before_shape,
-            "messages_count":      before_shape["messages_count"] + len(new_messages_for_diff),
-            "messages_chars":      before_shape["messages_chars"] + new_chars,
-            "messages_role_chars": after_role_chars,
-            "messages_role_counts": after_role_counts,
-            "findings_count":      before_shape["findings_count"] + len(new_findings_for_diff),
-            "agent_results_count": before_shape["agent_results_count"]
-                                    + len(new_agent_results_for_diff),
-            "active_agents":       list(result.get("active_agents")
-                                        or before_shape.get("active_agents") or []),
-            "planner_iters":       result.get("planner_iters",
-                                              before_shape.get("planner_iters", 0)),
-            "next_action":         result.get("next_action",
-                                              before_shape.get("next_action")),
-            "waf_detected":        bool(result.get("waf_detected",
-                                                   before_shape.get("waf_detected", False))),
-            "stealth_level":       result.get("stealth_level",
-                                              before_shape.get("stealth_level", 0)),
-        }
-        # Findings-by-severity update.
-        after_sev = dict(before_shape.get("findings_by_severity") or {})
-        for f in new_findings_for_diff:
-            sev = getattr(f, "severity", None)
-            sev_str = getattr(sev, "value", None) or str(sev or "info")
-            after_sev[sev_str] = after_sev.get(sev_str, 0) + 1
-        after_shape["findings_by_severity"] = after_sev
+        # Touch run_id so unused-warning linters stay quiet; the value
+        # is read upstream via state, not consumed here.
+        _ = run_id
 
-        # ONE merged row to nodes.jsonl. Schema:
-        #   {ts, node, run_id, duration_ms, summary, error?,
-        #    before, after, delta}
-        # ``delta.messages_added_full`` is the per-node forensic
-        # reconstruction the user used to read out of state_diffs.jsonl.
-        append_node_event(run_id, {
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "node": name,
-            "run_id": run_id,
-            "duration_ms": dt_ms,
-            "summary": summary,
-            "before": before_shape,
-            "after":  after_shape,
-            "delta":  _state_diff(
-                before=before_shape,
-                after=after_shape,
-                duration_ms=dt_ms,
-                new_messages=new_messages_for_diff,
-                new_findings=new_findings_for_diff,
-                new_agent_results=new_agent_results_for_diff,
-            ),
-        })
         # Live terminal view — silent/compact/verbose decided by the
         # renderer from config.verbosity.mode. In compact mode the
         # planner's JSON is parsed into a one-line "→ recon ..." trace;

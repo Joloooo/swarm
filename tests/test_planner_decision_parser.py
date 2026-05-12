@@ -127,7 +127,15 @@ Final decision:
 
 
 def test_valid_actions_set_is_what_the_planner_documents():
-    """The planner's prompt promises exactly these four actions. If
-    we add a new one (e.g. 'pause'), this test reminds us to update
-    the prompt and the parser together."""
-    assert VALID_ACTIONS == {"attack", "recon", "web_search", "report"}
+    """The planner's prompt promises exactly these five actions. If we
+    add a new one, this test reminds us to update the prompt and the
+    parser together.
+
+    ``submit_flag`` was added in 2026-05 as the explicit flag-submission
+    protocol — the routing edge verifies it inline against
+    ``state["expected_flag"]`` instead of the previous passive
+    regex-scan of free-form messages.
+    """
+    assert VALID_ACTIONS == {
+        "attack", "recon", "web_search", "report", "submit_flag",
+    }

@@ -39,20 +39,9 @@ from src.observability import (
     LiveLogHandler,
     make_run_id,
     run_dir,
-    write_final_state,
-    write_summary,
+    set_terminal_log_file,
+    terminal_log_path,
 )
-
-try:
-    from src.tools.terminal import set_log_file as _set_terminal_log_file
-except ImportError:
-    def _set_terminal_log_file(path: Path) -> Path:
-        logger.warning(
-            "src.tools.terminal.set_log_file is unavailable; "
-            "terminal_events.jsonl will not be written to %s",
-            path,
-        )
-        return path
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +222,12 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
     # per-run folder.
     run_id = make_run_id(benchmark_id=benchmark_id)
     rdir = run_dir(run_id)
-    _set_terminal_log_file(rdir / "terminal_events.jsonl")
+    # Point the LIVE renderer's file sink at this run's plain-text log
+    # so every ticker line we print to stderr is also captured to
+    # ``displayed_terminal_logs.log`` (ANSI-stripped). The structured
+    # ``full_logs.jsonl`` is appended to by callers (LLM callbacks +
+    # shell tools); no setup needed there.
+    set_terminal_log_file(terminal_log_path(run_id))
     # Wipe any per-agent token totals carried over from a previous
     # bench in the same Python process (the daily sweep runs many
     # benches in one invocation). Without this, the running_input
@@ -295,52 +289,31 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
             timeout=RUN_TIMEOUT_S,
         )
 
-        # Verdict: did the run capture a flag?
+        # Verdict: did the planner submit a verified flag?
         #
-        # Three sources of truth, checked in order:
+        # New (2026-05) protocol — the planner emits ``action="submit_flag"``
+        # with the flag string it believes the worker captured. The
+        # routing edge (`src/edges/routing.py:route_after_planner`)
+        # compares that submission against ``state["expected_flag"]``
+        # via ``src.flag.flags_match`` and routes straight to END when
+        # it matches. The runner re-uses the same matcher so the
+        # verdict is consistent between in-graph routing and post-run
+        # reporting.
         #
-        # 1. ``state["flag_captured"]`` — set by
-        #    ``src.edges.routing.route_after_summarizer`` the moment
-        #    a flag pattern shows up in worker output. This is the
-        #    early-exit signal: when present, the graph terminated
-        #    deliberately (not from a timeout or natural stop).
-        # 2. ``find_flag_in_state(...)`` — format-tolerant rescan of
-        #    messages / findings / agent_results. Catches the case
-        #    where the run ended for some other reason (planner cap,
-        #    timeout, crash) but a flag still landed in state.
-        # 3. Legacy substring match against the deterministic
-        #    ``expected_flag`` value, kept for back-compat with the
-        #    SHA-256-style benchmarks where the matcher tier 5
-        #    fallback is too lenient.
-        #
-        # Why the format-tolerant rescan: XBOW's flag format is not
-        # consistent across benchmarks. Some serve the documented
-        # ``FLAG{sha256(BENCHMARK_UPPER)}``, others serve a
-        # container-generated UUID like ``flag{582d82bb-...}``. The
-        # old ``flag in haystack`` check missed every UUID variant.
-        # See ``src/flag.py`` for the matcher specification.
-        from src.flag import find_flag_in_state
+        # No more passive regex-scan of free-form state: a placeholder
+        # like ``FLAG{...}`` in the planner's narration can no longer
+        # masquerade as a captured flag.
+        from src.flag import flags_match
 
-        captured = (agent_state.get("flag_captured") or "").strip()
-        if captured:
+        attempts = list(agent_state.get("submission_attempts") or [])
+        result["submission_attempts"] = attempts
+        submitted = attempts[-1].strip() if attempts else ""
+        if submitted and flags_match(submitted=submitted, expected=flag or ""):
             result["flag_found"] = True
-            result["captured_flag"] = captured
+            result["captured_flag"] = submitted
         else:
-            found, captured = find_flag_in_state(agent_state, expected=flag or "")
-            if found and captured:
-                result["flag_found"] = True
-                result["captured_flag"] = captured
-            else:
-                # Final fallback — the original strict substring
-                # check, in case the matcher is too restrictive in a
-                # future edit. ``expected_flag`` is excluded from the
-                # haystack so the state field doesn't self-match.
-                flag_search_state = {
-                    k: v for k, v in agent_state.items() if k != "expected_flag"
-                }
-                haystack = json.dumps(flag_search_state, default=str)
-                result["flag_found"] = bool(flag) and flag in haystack
-                result["captured_flag"] = flag if result["flag_found"] else ""
+            result["flag_found"] = False
+            result["captured_flag"] = ""
         result["findings_count"] = len(agent_state.get("findings") or [])
 
     except asyncio.TimeoutError:
@@ -365,26 +338,13 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         except Exception:  # noqa: BLE001
             logger.exception("[%s] docker compose down failed", benchmark_id)
         result["duration_s"] = round(time.time() - started, 1)
-
-        # Persist run artifacts even on partial failures — final_state may
-        # be empty, summary will still be informative about where it died.
+        # Clear the LIVE file sink so any later (non-bench) log lines
+        # from this Python process don't get appended to this run's
+        # log file.
         try:
-            write_final_state(run_id, agent_state)
-        except Exception:  # noqa: BLE001
-            logger.exception("[%s] write_final_state failed", benchmark_id)
-        try:
-            write_summary(
-                run_id,
-                benchmark_id=benchmark_id,
-                target_url=result["target_url"],
-                expected_flag=flag,
-                flag_found=result["flag_found"] if not result["error"] else None,
-                duration_s=result["duration_s"],
-                error=result["error"],
-                final_state=agent_state,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("[%s] write_summary failed", benchmark_id)
+            set_terminal_log_file(None)
+        except Exception:  # noqa: BLE001 — observability must not break the sweep
+            pass
 
     return result
 
@@ -513,7 +473,11 @@ async def main_async(args) -> int:
             ok=bool(r["flag_found"]),
             duration_s=float(r["duration_s"] or 0.0),
             findings_n=int(r["findings_count"] or 0),
-            summary_path=f"{r['run_dir']}/summary.md",
+            # The summary.md artefact was removed in the 2026-05 log
+            # consolidation; we now point the end-of-bench line at the
+            # plain-text terminal log instead. The structured log is one
+            # directory over: ``logs/run-<run_id>/full_logs.jsonl``.
+            summary_path=f"{r['run_dir']}/displayed_terminal_logs.log",
             error=r["error"],
         )
         LIVE.runner_message(f"           jsonl   → {path}")

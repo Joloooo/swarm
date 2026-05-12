@@ -215,10 +215,7 @@ def describe_config() -> str:
 
 from langgraph.graph import END, START, StateGraph  # noqa: E402
 
-from src.edges.routing import (  # noqa: E402
-    route_after_planner,
-    route_after_summarizer,
-)
+from src.edges.routing import route_after_planner  # noqa: E402
 from src.nodes import (  # noqa: E402
     executor_node,
     planner_node,
@@ -256,11 +253,22 @@ def build_graph():
     # handlers at import time. The cognitive graph stays pure cognition.
     graph.add_edge(START, "planner")
 
-    # Supervisor is the only decision-maker. `route_after_planner` returns
-    # either a node name (recon / web_search / report) OR a list of Send()
-    # calls that fan out to parallel executor runs for "attack".
-    # END is a valid destination too — see `_TERMINATE` in
-    # src/edges/routing.py for the report-bypass note.
+    # Supervisor is the only decision-maker. ``route_after_planner``
+    # returns either a node name (``recon`` / ``web_search`` / ``report``)
+    # or a list of ``Send()`` calls that fan out to parallel executor
+    # runs for ``action="attack"``. It is ALSO the flag verifier — on
+    # ``action="submit_flag"`` the edge compares the planner's
+    # submitted flag against ``state["expected_flag"]`` via
+    # :func:`src.flag.flags_match` and routes to ``END`` on a match or
+    # back to ``"planner"`` on a miss (so the planner can try a
+    # different candidate, seeing its rejected attempt in
+    # ``submission_attempts``).
+    #
+    # ``END`` is a valid destination — see ``_TERMINATE`` in
+    # ``src/edges/routing.py`` for the report-bypass note. ``"planner"``
+    # is also listed so the rejected-submission re-entry path is
+    # statically declared (LangGraph validates conditional-edge targets
+    # against this whitelist).
     graph.add_conditional_edges(
         "planner",
         route_after_planner,
@@ -269,6 +277,7 @@ def build_graph():
             "executor",
             "web_search",
             "report",
+            "planner",
             END,
         ],
     )
@@ -298,21 +307,15 @@ def build_graph():
     graph.add_edge("recon", "summarizer")
     graph.add_edge("executor", "summarizer")
 
-    # The summarizer → planner edge is **conditional**: in benchmark
-    # mode (``state.expected_flag`` is set), if a flag pattern shows
-    # up in worker output we short-circuit straight to END instead of
-    # spending another planner turn. See
-    # ``src.edges.routing.route_after_summarizer`` — it scans
-    # state.messages / state.findings / state.agent_results for any
-    # ``[fF][lL][aA][gG]{...}`` pattern using the format-tolerant
-    # matcher in ``src.flag``. Real pentest runs (empty
-    # ``expected_flag``) always fall through to the planner, so the
-    # gate is a no-op outside of benchmark contexts.
-    graph.add_conditional_edges(
-        "summarizer",
-        route_after_summarizer,
-        ["planner", END],
-    )
+    # The summariser → planner edge used to be conditional — it scanned
+    # state for ``flag{...}`` patterns and short-circuited to ``END`` on
+    # any match. That scan produced false positives whenever a
+    # ``FLAG{...}`` placeholder appeared in the planner's narration
+    # (the supervisor's reasoning text frequently mentioned the format).
+    # Flag verification now lives in the explicit submit-flag protocol
+    # in ``route_after_planner``; the summariser just hands control back
+    # to the supervisor.
+    graph.add_edge("summarizer", "planner")
     graph.add_edge("web_search", "planner")
 
     graph.add_edge("report", END)

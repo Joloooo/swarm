@@ -178,24 +178,27 @@ class SwarmGraphState(TypedDict, total=False):
     #   - src.edges.routing.route_after_summarizer (early-exit edge)
     expected_flag: str
 
-    # Captured flag string — the actual ``flag{...}`` / ``FLAG{...}``
-    # value extracted from worker output. Set by the early-exit edge
-    # (``src.edges.routing.route_after_summarizer``) the first time a
-    # flag pattern shows up in messages / findings / agent_results.
-    # Once set, in benchmark mode the graph routes straight to END
-    # rather than asking the planner for another iteration.
+    # Append-only list of flag strings the planner has explicitly
+    # submitted via ``action="submit_flag"``. The routing edge
+    # (``src.edges.routing.route_after_planner``) compares the most
+    # recent entry against ``expected_flag`` using
+    # ``src.flag.flags_match`` and routes the graph to ``END`` on a
+    # match — otherwise control returns to the planner so it can try a
+    # different candidate. The system prompt teaches the planner that
+    # re-entering after a submission means the previous attempt was
+    # rejected.
     #
-    # Why store it instead of recomputing it on each routing call?
-    # Two reasons:
-    #   (1) The xbow_runner reads it post-run as the source of truth
-    #       for ``flag_found`` (the substring match in the haystack
-    #       can no longer self-match because we strip ``expected_flag``
-    #       before serialising).
-    #   (2) ``write_final_state`` and ``write_summary`` surface the
-    #       captured value in run artefacts, which makes failed runs
-    #       easier to triage when the format-tolerant matcher accepted
-    #       a flag that didn't equal the expected one.
-    flag_captured: str
+    # Two consumers:
+    #   * ``route_after_planner`` — reads ``attempts[-1]`` to verify.
+    #   * ``benchmarks.xbow_runner.run_one`` — reads the same value
+    #     post-run as the authoritative verdict (no more passive regex
+    #     scan of free-form messages, no more false-positive on a
+    #     ``FLAG{...}`` placeholder in narration).
+    #
+    # The reducer is plain ``operator.add`` so multiple turns of the
+    # planner each appending their own attempt are concatenated rather
+    # than overwriting.
+    submission_attempts: Annotated[list[str], operator.add]
 
     # ── Worker → Summarizer hand-off (the context-window fix) ──
     # Each worker (executor, recon, salvage) writes a SINGLE-ITEM list

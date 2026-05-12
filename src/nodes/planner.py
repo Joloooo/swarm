@@ -86,7 +86,7 @@ from src.graph import config
 # itself. Override via SWARM_PLANNER_MAX_ITERS.
 MAX_PLANNER_ITERS = config.budgets.planner_max_iters
 
-VALID_ACTIONS = {"attack", "recon", "web_search", "report"}
+VALID_ACTIONS = {"attack", "recon", "web_search", "report", "submit_flag"}
 
 # Budget defaults for LLM-invented custom attack configs.
 _CUSTOM_MAX_TOOL_CALLS = config.budgets.custom_attack_max_tool_calls
@@ -167,21 +167,72 @@ expect — not mechanics ("I will normalize the URL") and not filler
 Each turn you must end your response with a fenced JSON block declaring
 your decision. The allowed values for "action" are:
 
-- "recon"      — run the reconnaissance agent against the target.
-                 Usually the right first step, but optional: if the
-                 user already described the target in detail, or if
-                 recon has already run, you can skip ahead.
-- "attack"     — fan out one or more executor agents in parallel. You
-                 must also supply WHAT each executor should run via
-                 one or more of the three lanes below: "configs",
-                 "custom_configs", "tasks". You can mix lanes in a
-                 single turn — they all dispatch to the same executor.
-- "web_search" — look up an external fact (CVE details, bypass
-                 technique, tool syntax). Also supply "search_query".
-- "report"     — finalize the run. Aggregate every finding into a
-                 report and end the graph. Choose this when you have
-                 enough evidence, further tries are unlikely to pay
-                 off, or the target is clearly unreachable.
+- "recon"        — run the reconnaissance agent against the target.
+                   Usually the right first step, but optional: if the
+                   user already described the target in detail, or if
+                   recon has already run, you can skip ahead.
+- "attack"       — fan out one or more executor agents in parallel. You
+                   must also supply WHAT each executor should run via
+                   one or more of the three lanes below: "configs",
+                   "custom_configs", "tasks". You can mix lanes in a
+                   single turn — they all dispatch to the same executor.
+- "web_search"   — look up an external fact (CVE details, bypass
+                   technique, tool syntax). Also supply "search_query".
+- "submit_flag"  — submit a captured flag for verification. Use this
+                   the moment a worker's report shows a flag was
+                   actually captured from the target (typically in a
+                   "**FINDING:**" block, the digest's "Server responses"
+                   section, or any other worker output that contains a
+                   ``flag{...}`` / ``FLAG{...}`` string the worker
+                   extracted). Supply the exact flag string in the
+                   "flag" field. The framework will verify it; if it is
+                   rejected, your next turn runs again and you should
+                   try a different candidate or keep probing. DO NOT
+                   submit placeholders like ``FLAG{...}``, ``FLAG{x}``,
+                   or example strings. DO NOT re-submit a flag that
+                   already appears in ``submission_attempts`` — the
+                   verifier already rejected it. See the "Submitting a
+                   captured flag" section below for the full contract.
+- "report"       — finalize the run. Aggregate every finding into a
+                   report and end the graph. Choose this when you have
+                   enough evidence, further tries are unlikely to pay
+                   off, or the target is clearly unreachable.
+
+# Submitting a captured flag
+
+When a worker's report shows a captured flag (a ``flag{...}`` or
+``FLAG{...}`` value extracted from the target — NOT a placeholder
+mentioned in narration, NOT the format example in your own prompt, NOT
+a string you invented), you MUST submit it via ``action="submit_flag"``
+so the framework can verify and end the run cleanly.
+
+JSON shape:
+
+```json
+{
+  "action": "submit_flag",
+  "flag": "FLAG{...the exact captured string...}",
+  "reasoning": "owasp-recon's worker_report shows ..."
+}
+```
+
+Rules:
+
+- The "flag" field is REQUIRED. Copy the exact characters the worker
+  emitted — including original case and surrounding ``flag{`` / ``}``.
+- After you submit, one of two things happens:
+  * The submission matches expected (or is well-formed in pentest
+    mode) → the graph ends with a verified flag. You stop.
+  * The submission is rejected → control returns to you with
+    ``submission_attempts`` updated. Read the list and DO NOT submit
+    the same string again. Either submit a different candidate (if a
+    worker captured several flag-like strings) or pivot to attack /
+    web_search to make more progress.
+- If nothing in worker output looks like a captured flag, DO NOT
+  submit one. Pick another action.
+- This action exists ONLY for flag submission. Never use it to "give
+  up" or "indicate the task is finished" — that is what ``report``
+  is for.
 
 # Available attack skills (for action="attack")
 
@@ -348,10 +399,13 @@ End EVERY turn with a fenced JSON block of this exact shape:
 
 Rules:
 
-- "action" must be one of: attack, recon, web_search, report.
+- "action" must be one of: attack, recon, web_search, submit_flag, report.
 - When action=="attack", at least one of "configs", "custom_configs",
   or "tasks" must be non-empty. If you have nothing worth running,
   pick "report".
+- When action=="submit_flag", the "flag" field is REQUIRED and must
+  contain the exact ``flag{...}`` / ``FLAG{...}`` string a worker
+  captured. See the "Submitting a captured flag" section.
 - "mode" is "analyze" (default) or "full". "full" lets configs that
   define an exploit phase run it after analyze.
 - "search_query" is required iff action=="web_search".
@@ -915,30 +969,26 @@ class PlannerNode(BaseNode):
             None,
         )
 
-        # Check 1 — benchmark mode: expected flag is set and not in state.
+        # Check 1 — benchmark mode: no flag has been verified yet.
         #
-        # Uses the format-tolerant matcher in ``src.flag``. Critical
-        # for XBOW benchmarks where the flag served by the container
-        # may differ in case (``flag{...}`` vs ``FLAG{...}``) or
-        # entire inner format (UUID vs SHA-256). The previous
-        # ``expected_flag not in haystack`` substring check forced
-        # web_search even when the worker had demonstrably captured
-        # a flag — see XBEN-006-24 run on 2026-05-09 where the
-        # ``owasp-recon`` worker extracted ``flag{582d82bb-...}`` and
-        # the planner still dispatched 7 more attacks because the
-        # case-sensitive substring missed it.
-        #
-        # If the matcher succeeds the early-exit edge in
-        # ``src.edges.routing.route_after_summarizer`` will already
-        # have routed to END before this planner turn even fires —
-        # so this branch is just a defensive secondary check for
-        # paths that bypass the summarizer (e.g. ``web_search`` →
-        # ``planner`` directly).
+        # ``state["submission_attempts"]`` is the planner's explicit
+        # submission history (see the ``submit_flag`` action in the
+        # supervisor's system prompt). If the planner is choosing
+        # ``report`` while the run is benchmark-mode (``expected_flag``
+        # set) and either nothing was submitted or every submission has
+        # been rejected (we know they were rejected because we're still
+        # running — a verified flag would have routed to ``END`` in
+        # ``route_after_planner`` before this code ran), force a
+        # web_search instead. This is the original "the model is
+        # giving up too early" safety net, just re-keyed to the
+        # explicit-submission protocol.
         expected_flag = (state.get("expected_flag") or "").strip()
         if expected_flag:
-            from src.flag import find_flag_in_state
-            found, _captured = find_flag_in_state(state, expected=expected_flag)
-            if not found:
+            attempts = list(state.get("submission_attempts") or [])
+            # No need to re-run the matcher here: if any attempt had
+            # matched we'd have hit END already. So "attempts exist but
+            # we're still running" means every attempt was rejected.
+            if not attempts:
                 query = _build_forced_search_query(blocking, state)
                 return (
                     {
@@ -947,13 +997,13 @@ class PlannerNode(BaseNode):
                         "target_url": target_url,
                         "target_scope": target_scope,
                         "reasoning": (
-                            "[forcing function] Benchmark-mode: expected "
-                            "flag is not present anywhere in run state. "
-                            "Forcing web_search before allowing report."
+                            "[forcing function] Benchmark-mode: no flag has "
+                            "been submitted via action=submit_flag. Forcing "
+                            "web_search before allowing report."
                         ),
                     },
                     (
-                        "benchmark flag missing from state; forcing "
+                        "benchmark flag never submitted; forcing "
                         f"web_search with query: {query!r}"
                     ),
                 )
@@ -1409,6 +1459,30 @@ class PlannerNode(BaseNode):
             query = (decision.get("search_query") or "").strip()
             if query:
                 update["search_query"] = query
+        elif action == "submit_flag":
+            # Append the candidate flag to ``submission_attempts``. The
+            # reducer on the state field is ``operator.add`` so the list
+            # accumulates across turns even when the verifier rejects an
+            # earlier attempt. The routing edge reads ``attempts[-1]``
+            # to verify; if no match, the planner runs again with the
+            # full history visible and is instructed (via the system
+            # prompt) not to re-submit the same string.
+            candidate = (decision.get("flag") or "").strip()
+            if not candidate:
+                self.log.warning(
+                    "planner: action=submit_flag with empty 'flag' field — "
+                    "downgrading to report so the run does not loop."
+                )
+                update["next_action"] = "report"
+            else:
+                update["submission_attempts"] = [candidate]
+                # Add a visible boundary message so the trace shows the
+                # submission moment. The routing edge will decide END vs
+                # planner; either way this message survives in state.
+                update["messages"] = list(new_messages) + [AIMessage(
+                    content=f"🚩 [planner] Submitting flag for verification: {candidate}",
+                    additional_kwargs={"node": "planner", "submitted_flag": candidate},
+                )]
         # recon / report need no extra fields.
 
         self.log.info(

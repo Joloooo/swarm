@@ -46,7 +46,7 @@ from langchain_core.tools import BaseTool
 
 from src.llm.callbacks import make_call_config
 from src.nodes.base.system_prompt import _build_system_message
-from src.observability import append_worker_trace, make_run_id
+from src.observability import make_run_id
 from src.observability.state import _count_worker_iterations
 from src.refusals.detect import looks_like_refusal
 from src.refusals.recover import recover_from_refusal
@@ -366,64 +366,22 @@ def _persist_worker_trace(
     run_id: str,
     agent_id: str,
 ):
-    """Append the worker's full trace to the consolidated forensic log.
+    """No-op shim — worker traces are no longer mirrored to disk.
 
-    Path: ``logs/run-<run_id>/worker_traces.jsonl`` — one shared file
-    for the whole run. Each appended row carries ``agent_id``,
-    ``dispatch_ts`` (the per-invocation timestamp) and ``i`` (message
-    index within this dispatch) so multiple invocations of the same
-    agent stay distinguishable when reading back. To filter to a
-    single worker invocation: ``jq 'select(.agent_id=="executor-0" and
-    .dispatch_ts=="20260509T161235Z")' worker_traces.jsonl``.
+    The previous behaviour wrote one row per LangChain message into
+    ``logs/run-<run_id>/worker_traces.jsonl``. The file was nearly
+    redundant with ``full_logs.jsonl`` (every LLM round-trip is already
+    captured there with full prompt + response) and was never read by
+    a human in practice. Removed as part of the 2026-05 log
+    consolidation.
 
-    Replaces the older per-invocation directory layout
-    (``worker-<agent_id>-<ts>/trace.jsonl``) which produced one folder
-    per worker run — fine for a 1-worker bench, ugly with 15+ workers
-    per bench. The data captured per row is unchanged.
-
-    The summarizer node consumes the in-memory trace via
-    ``state.pending_summary_inputs[*].trace``; this disk copy exists
-    purely for human debugging after the run (cross-checking the
-    summarizer's report against what the worker actually did).
-
-    Best-effort: returns ``None`` on failure — the summarisation
-    pipeline doesn't depend on the file existing.
+    Kept as a function (instead of being deleted) so call sites in
+    ``run_skill_agent`` can keep invoking it without conditional logic.
+    Returns ``None`` so any caller that stored the path falls back to
+    its empty-path branch.
     """
-    if not trace:
-        return None
-    try:
-        from datetime import datetime, timezone
-
-        dispatch_ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        rows: list[dict] = []
-        for i, m in enumerate(trace):
-            rows.append({
-                "agent_id":    agent_id,
-                "dispatch_ts": dispatch_ts,
-                "i":           i,
-                "type":        type(m).__name__,
-                "content": (
-                    m.content if isinstance(getattr(m, "content", None), str)
-                    else str(getattr(m, "content", ""))
-                ),
-                "tool_calls": [
-                    {"name": tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None),
-                     "args":  tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None),
-                     "id":    tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)}
-                    for tc in (getattr(m, "tool_calls", None) or [])
-                ],
-                "tool_call_id":      getattr(m, "tool_call_id", None),
-                "name":              getattr(m, "name", None),
-                "additional_kwargs": getattr(m, "additional_kwargs", {}) or {},
-            })
-        return append_worker_trace(run_id, rows)
-    except Exception as e:  # noqa: BLE001
-        # Forensic disk write is best-effort — never let it sink the run.
-        logging.getLogger(__name__).warning(
-            "[%s] failed to persist worker trace to disk: %s: %s",
-            agent_id, type(e).__name__, str(e)[:200],
-        )
-        return None
+    del trace, run_id, agent_id  # explicitly unused
+    return None
 
 
 # ────────────────────────────────────────────────────────────────────────────

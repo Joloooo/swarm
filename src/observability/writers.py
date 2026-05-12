@@ -201,3 +201,26 @@ def write_terminal_line(line: str) -> None:
     except Exception:
         # Never let log writes break a run. The screen has the data either way.
         pass
+
+
+def write_terminal_chunk(text: str) -> None:
+    """Append a raw chunk (no newline added) to ``displayed_terminal_logs.log``.
+
+    Used by the streaming reasoning path in ``src/observability/live.py``
+    where chunks are sub-line fragments that get concatenated into
+    paragraphs as the model emits them. The companion
+    :func:`write_terminal_line` would corrupt the stream by injecting a
+    newline after every word.
+
+    Strips ANSI escape codes so the saved file stays editor-friendly.
+    Best-effort: failures swallow silently.
+    """
+    path = _TERMINAL_LOG_FILE
+    if path is None or not text:
+        return
+    try:
+        stripped = _ANSI_RE.sub("", text)
+        with _TERMINAL_LOG_LOCK, path.open("a", encoding="utf-8") as f:
+            f.write(stripped)
+    except Exception:
+        pass

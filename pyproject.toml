@@ -21,6 +21,12 @@ dependencies = [
     "aiofiles>=23.0",
     "python-nmap>=0.7.1",
     "langgraph-cli[inmem]>=0.2",
+    # Interactive `swarm` CLI — questionary for arrow-key menus,
+    # rich for the banner / spinners / panels, tomlkit for round-
+    # tripping ``swarm-config.toml`` without nuking user comments.
+    "questionary>=2.0",
+    "rich>=13.0",
+    "tomlkit>=0.13",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +48,11 @@ markers = [
 ]
 
 [project.scripts]
+# ``swarm`` is the new primary CLI — interactive TUI with no args,
+# benchmark shortcuts via flags, legacy natural-language one-shot
+# when given a positional. ``swarmattacker`` is kept as an alias
+# for backwards compatibility (same dispatcher, same module).
+swarm         = "src.cli:main"
 swarmattacker = "src.cli:main"
 
 [build-system]

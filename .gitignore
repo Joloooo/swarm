@@ -7,3 +7,7 @@ dist/
 .langgraph/
 .langgraph_api/
 logs/
+
+# `swarm` CLI: per-user persistent config + generated full-benchmark list.
+swarm-config.toml
+benchmarks/all_xben_24.txt

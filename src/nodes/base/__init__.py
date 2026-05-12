@@ -33,10 +33,10 @@ Package layout:
   (the worker lifecycle) + finding parsers + worker-memory helpers.
 
 State-shape / diff / serialize helpers used by ``BaseNode.__call__``
-to instrument each node finish currently live in this file too. They
-will move to ``src/observability/state.py`` in the next refactor step
-— at that point ``__call__`` will import them from observability.
-For now they live here to keep this step's diff bounded.
+to instrument each node finish live in ``src/observability/state.py``
+and are imported in below. The "compute what to log" stays in
+observability/ alongside "write what we computed" — keeping
+nodes/base/ free of disk-shape concerns.
 
 NB: ``src.llm.provider`` and ``src.skills.loader`` are imported lazily
 inside the methods that need them. The cycle is

@@ -47,6 +47,7 @@ from langchain_core.tools import BaseTool
 from src.llm.callbacks import make_call_config
 from src.nodes.base.system_prompt import _build_system_message
 from src.observability import append_worker_trace, make_run_id
+from src.observability.state import _count_worker_iterations
 from src.refusals.detect import looks_like_refusal
 from src.refusals.recover import recover_from_refusal
 from src.refusals.retry import astream_with_refusal_retry
@@ -357,24 +358,6 @@ def _extract_latest_web_search(state: dict) -> str | None:
                 content = content[:_WEB_SEARCH_INJECT_CHARS] + "\n…[truncated for context budget]"
             return content
     return None
-
-
-def _count_worker_iterations(trace: list[Any]) -> int:
-    """How many tool-call iterations did the worker actually run?
-
-    Counts ``AIMessage``s that carry tool calls (each one represents the
-    worker deciding to invoke a tool). Doesn't count ``AIMessage``s
-    without tool calls (the terminal "I'm done" message) or
-    ``ToolMessage``s (those are responses, not iterations). Useful
-    metadata for the summarizer prompt and for observability.
-    """
-    count = 0
-    for m in trace:
-        if isinstance(m, AIMessage):
-            tcs = getattr(m, "tool_calls", None) or []
-            if tcs:
-                count += 1
-    return count
 
 
 def _persist_worker_trace(

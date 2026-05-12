@@ -444,6 +444,43 @@ async def run_skill_agent(
 ) -> dict:
     """Run a ``create_agent`` loop with the given skill config.
 
+    Public entry point. Thin wrapper that guarantees per-worker shell
+    cleanup runs whether the implementation succeeded, raised, was
+    salvaged, or refused. The actual worker lifecycle lives in
+    :func:`_run_skill_agent_impl` immediately below.
+
+    Why the wrapper exists: without it, every worker leaves its tmux
+    session and bash subprocess alive in the
+    :class:`~src.tools.shell.manager.ShellManager` registry until
+    ``atexit`` fires at process death. For benchmark runs with many
+    parallel/sequential workers that means dozens of live sessions
+    accumulating in one Python process — fine in theory, sloppy in
+    practice. The finally-block frees them as each worker finishes.
+    """
+    try:
+        return await _run_skill_agent_impl(node, config, state, llm)
+    finally:
+        # Best-effort per-worker shell cleanup. Never raise from the
+        # finally — a cleanup failure must not mask a successful return
+        # or a real exception from the implementation.
+        try:
+            from src.tools.shell import get_shell_manager
+            await get_shell_manager().cleanup_agent(config.agent_id)
+        except Exception as e:  # noqa: BLE001
+            node.log.warning(
+                "[%s] shell cleanup_agent failed (non-fatal): %s",
+                config.agent_id, e,
+            )
+
+
+async def _run_skill_agent_impl(
+    node: "BaseNode",
+    config: AgentConfig,
+    state: dict,
+    llm: BaseChatModel | None = None,
+) -> dict:
+    """Run a ``create_agent`` loop with the given skill config.
+
     Returns the standard worker-node update dict::
 
         {
@@ -458,6 +495,9 @@ async def run_skill_agent(
     the LLM call config and for trace persistence), and the focused
     sub-LLM helper ``node.ask_focused`` (which the refusal-recovery
     path needs).
+
+    Called only via :func:`run_skill_agent` (the public entry point
+    that adds the per-worker shell cleanup ``finally``).
     """
     if llm is None:
         from src.llm.provider import get_llm  # lazy — see module docstring

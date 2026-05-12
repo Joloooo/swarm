@@ -22,21 +22,27 @@ here. It inherits all the instrumentation automatically.
 
 Flow::
 
-    START → initialize → planner ← ──────────────────────────────────┐
-                          │                                           │
-            ┌─────────────┼────────────────┬───────────┐              │
-            ↓             ↓                ↓           ↓              │
-          recon       executor        web_search    report            │
-            │       (×N parallel, via       │           │             │
-            │        Send() fan-out)        │           │             │
-            ↓             ↓                 │           │             │
-            summarizer ←──┘                 │           │             │
-            (synchronization point —        │           │             │
-            converts pending traces         │           │             │
-            into one report each)           │           │             │
-                          ↓                 ↓           │             │
-                          └─────────────────┴───────────┴─────────────┘
+    START → planner ← ────────────────────────────────────────────────┐
+              │                                                        │
+            ┌─┼────────────────┬───────────┐                           │
+            ↓ ↓                ↓           ↓                           │
+          recon       executor        web_search    report             │
+            │       (×N parallel, via       │           │              │
+            │        Send() fan-out)        │           │              │
+            ↓             ↓                 │           │              │
+            summarizer ←──┘                 │           │              │
+            (synchronization point —        │           │              │
+            converts pending traces         │           │              │
+            into one report each)           │           │              │
+                          ↓                 ↓           │              │
+                          └─────────────────┴───────────┴──────────────┘
                                           report → END
+
+There is no preceding ``initialize`` node — per-invocation shell
+session lifecycle (tmux + bash) is owned by the singleton
+:class:`~src.tools.shell.manager.ShellManager`, which registers
+``atexit`` + signal handlers at module import time. See
+``src/tools/shell/manager.py`` for the rationale.
 
 The ``summarizer`` is the context-window fix: each worker hands its
 full trace via ``state["pending_summary_inputs"]`` (transient, not
@@ -215,7 +221,6 @@ from src.edges.routing import (  # noqa: E402
 )
 from src.nodes import (  # noqa: E402
     executor_node,
-    initialize_node,
     planner_node,
     recon_node,
     report_node,
@@ -236,7 +241,6 @@ def build_graph():
     # JSONL run logging, crash-to-AIMessage, SWARM_VERBOSE streaming).
     # Adding a new node? Subclass BaseNode, export a singleton from
     # `src.nodes`, register it here. No wrapper required.
-    graph.add_node("initialize", initialize_node)
     graph.add_node("planner",    planner_node)
     graph.add_node("recon",      recon_node)
     graph.add_node("executor",   executor_node)
@@ -244,9 +248,13 @@ def build_graph():
     graph.add_node("web_search", web_search_node)
     graph.add_node("report",     report_node)
 
-    # Edges
-    graph.add_edge(START, "initialize")
-    graph.add_edge("initialize", "planner")
+    # Edges. START routes straight to the planner — no preceding
+    # initialize/setup node. Per-invocation shell session lifecycle
+    # (creating tmux sessions, killing them on process exit or Ctrl+C)
+    # is owned by the singleton :class:`ShellManager` in
+    # ``src/tools/shell/manager.py``, which registers atexit + signal
+    # handlers at import time. The cognitive graph stays pure cognition.
+    graph.add_edge(START, "planner")
 
     # Supervisor is the only decision-maker. `route_after_planner` returns
     # either a node name (recon / web_search / report) OR a list of Send()

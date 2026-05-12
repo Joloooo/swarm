@@ -25,11 +25,7 @@ import logging
 import os
 import re
 import subprocess
-import sys
-import threading
 import time
-from datetime import datetime
-from pathlib import Path
 
 from langchain_core.tools import tool
 
@@ -37,8 +33,8 @@ from src.tools.shell._common import (
     log_event as _log_event,
     set_log_file,  # re-exported for the back-compat shim
     truncate_output,
-    workspace_for,
 )
+from src.tools.shell.manager import get_shell_manager
 from src.tools.shell.safety import (
     check_attacker_host_safety,
     check_scope,
@@ -58,96 +54,11 @@ def _current_scope() -> list[str]:
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
-# -- tmux session manager (used internally by tools) --
-
-SESSION_NAME = "swarmattacker"
-_PANE_REGISTRY: dict[str, str] = {}  # agent_id -> pane_id
-
-# Locks: parallel agents (Send() fan-out) call _ensure_session and
-# _get_or_create_pane concurrently. Without locking, two simultaneous
-# `tmux new-session -d -s NAME` calls race and one fails with
-# "duplicate session: swarmattacker" — the bug from the user's logs.
-# We also use `tmux new-session -A` (attach if exists) as a belt-and-suspenders
-# idempotency guarantee at the shell level.
-_SESSION_LOCK = threading.Lock()
-_PANE_LOCK = threading.Lock()
-
-
-def _ensure_session() -> None:
-    """Create the tmux session if it doesn't exist (idempotent under concurrency).
-
-    Uses ``tmux new-session -A`` so the call is a no-op when the session
-    already exists. Wrapped in a lock so two concurrent callers can't both
-    pass the existence check and then both try to create.
-    """
-    with _SESSION_LOCK:
-        # -A: attach if exists, otherwise create. -d: detached. -s: name.
-        result = subprocess.run(
-            ["tmux", "new-session", "-A", "-d", "-s", SESSION_NAME],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            stderr = result.stderr.strip() or result.stdout.strip()
-            _log_event(
-                "session_ensure_failed",
-                session=SESSION_NAME,
-                rc=result.returncode,
-                stderr=stderr,
-            )
-            # `-A` should make this idempotent; if it still fails something
-            # is genuinely wrong (e.g. tmux not installed). Surface it.
-            raise RuntimeError(
-                f"tmux session creation failed (rc={result.returncode}): {stderr}"
-            )
-        _log_event("session_ensure", session=SESSION_NAME)
-
-
-def _get_or_create_pane(agent_id: str) -> str:
-    """Get (or create) a tmux pane for the given agent (concurrency-safe)."""
-    with _PANE_LOCK:
-        if agent_id in _PANE_REGISTRY:
-            pane_id = _PANE_REGISTRY[agent_id]
-            # Validate the cached pane still exists (session may have been killed).
-            check = subprocess.run(
-                ["tmux", "list-panes", "-t", pane_id],
-                capture_output=True,
-            )
-            if check.returncode == 0:
-                _log_event("pane_reuse", agent=agent_id, pane=pane_id)
-                return pane_id
-            _log_event("pane_stale", agent=agent_id, pane=pane_id)
-            del _PANE_REGISTRY[agent_id]
-
-        _ensure_session()
-
-        # Create a new window for this agent
-        result = subprocess.run(
-            ["tmux", "new-window", "-t", SESSION_NAME, "-n", agent_id,
-             "-P", "-F", "#{pane_id}"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        pane_id = result.stdout.strip()
-        _PANE_REGISTRY[agent_id] = pane_id
-
-        # Drop the pane into the agent's workspace so relative paths in
-        # output flags (e.g. ``nmap -oX scan.xml``) land somewhere
-        # predictable and the bash tool's workspace_for() agrees.
-        try:
-            ws = workspace_for(agent_id)
-            subprocess.run(
-                ["tmux", "send-keys", "-t", pane_id, f"cd {ws}", "Enter"],
-                check=True,
-            )
-        except Exception as e:  # noqa: BLE001
-            _log_event("pane_workspace_cd_failed", agent=agent_id,
-                       pane=pane_id, error=str(e))
-
-        _log_event("pane_create", agent=agent_id, pane=pane_id)
-        return pane_id
+# tmux session lifecycle (creation, registry, cleanup) lives in
+# :mod:`src.tools.shell.manager`. This module owns only the I/O on an
+# existing pane: `_run_in_pane` (dual-sentinel command capture) and the
+# LangChain-facing tool wrappers below. All session-creation calls go
+# through ``get_shell_manager().get_or_create_tmux_pane(agent_id)``.
 
 
 def _run_in_pane(pane_id: str, command: str, timeout: int = 120) -> str:
@@ -326,7 +237,9 @@ async def run_command(
     if block:
         return block
 
-    pane_id = await asyncio.to_thread(_get_or_create_pane, agent_id)
+    _, pane_id = await asyncio.to_thread(
+        get_shell_manager().get_or_create_tmux_pane, agent_id,
+    )
 
     t0 = time.perf_counter()
     _log_event(
@@ -380,7 +293,9 @@ async def shell(
     if block:
         return block
 
-    pane_id = await asyncio.to_thread(_get_or_create_pane, agent_id)
+    _, pane_id = await asyncio.to_thread(
+        get_shell_manager().get_or_create_tmux_pane, agent_id,
+    )
 
     t0 = time.perf_counter()
     _log_event(
@@ -454,43 +369,9 @@ async def read_file(reasoning: str, file_path: str) -> str:
     return content
 
 
-def cleanup_session() -> None:
-    """Kill the tmux session and clear the pane registry.
-
-    Called on shutdown AND at the start of every run (from initialize_node)
-    so a stale session left over from a previous run can't cause "duplicate
-    session" failures or hand out invalid pane IDs from the registry.
-    """
-    with _SESSION_LOCK, _PANE_LOCK:
-        prior_panes = dict(_PANE_REGISTRY)
-        result = subprocess.run(
-            ["tmux", "kill-session", "-t", SESSION_NAME],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            logger.info(f"Killed stale tmux session: {SESSION_NAME}")
-            _log_event(
-                "session_killed", session=SESSION_NAME, panes=prior_panes
-            )
-        else:
-            # Most common benign case: no session existed to kill. Logged
-            # so the absence of a kill event isn't mysterious when reading
-            # the run log back.
-            _log_event(
-                "session_kill_noop",
-                session=SESSION_NAME,
-                rc=result.returncode,
-                stderr=result.stderr.strip(),
-            )
-        _PANE_REGISTRY.clear()
-
-
 __all__ = [
     "run_command",
     "shell",
     "read_file",
-    "cleanup_session",
     "set_log_file",  # re-export for shim back-compat
-    "SESSION_NAME",
 ]

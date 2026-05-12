@@ -295,16 +295,52 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
             timeout=RUN_TIMEOUT_S,
         )
 
-        # Search only worker output for the flag — NOT the full state.
-        # The graph state now contains an `expected_flag` field (so the
-        # planner and workers can read it for benchmark-mode prompts);
-        # if we serialized the full state, that field would self-match
-        # and report every run as a successful flag capture.
-        flag_search_state = {
-            k: v for k, v in agent_state.items() if k != "expected_flag"
-        }
-        haystack = json.dumps(flag_search_state, default=str)
-        result["flag_found"] = bool(flag) and flag in haystack
+        # Verdict: did the run capture a flag?
+        #
+        # Three sources of truth, checked in order:
+        #
+        # 1. ``state["flag_captured"]`` — set by
+        #    ``src.edges.routing.route_after_summarizer`` the moment
+        #    a flag pattern shows up in worker output. This is the
+        #    early-exit signal: when present, the graph terminated
+        #    deliberately (not from a timeout or natural stop).
+        # 2. ``find_flag_in_state(...)`` — format-tolerant rescan of
+        #    messages / findings / agent_results. Catches the case
+        #    where the run ended for some other reason (planner cap,
+        #    timeout, crash) but a flag still landed in state.
+        # 3. Legacy substring match against the deterministic
+        #    ``expected_flag`` value, kept for back-compat with the
+        #    SHA-256-style benchmarks where the matcher tier 5
+        #    fallback is too lenient.
+        #
+        # Why the format-tolerant rescan: XBOW's flag format is not
+        # consistent across benchmarks. Some serve the documented
+        # ``FLAG{sha256(BENCHMARK_UPPER)}``, others serve a
+        # container-generated UUID like ``flag{582d82bb-...}``. The
+        # old ``flag in haystack`` check missed every UUID variant.
+        # See ``src/flag.py`` for the matcher specification.
+        from src.flag import find_flag_in_state
+
+        captured = (agent_state.get("flag_captured") or "").strip()
+        if captured:
+            result["flag_found"] = True
+            result["captured_flag"] = captured
+        else:
+            found, captured = find_flag_in_state(agent_state, expected=flag or "")
+            if found and captured:
+                result["flag_found"] = True
+                result["captured_flag"] = captured
+            else:
+                # Final fallback — the original strict substring
+                # check, in case the matcher is too restrictive in a
+                # future edit. ``expected_flag`` is excluded from the
+                # haystack so the state field doesn't self-match.
+                flag_search_state = {
+                    k: v for k, v in agent_state.items() if k != "expected_flag"
+                }
+                haystack = json.dumps(flag_search_state, default=str)
+                result["flag_found"] = bool(flag) and flag in haystack
+                result["captured_flag"] = flag if result["flag_found"] else ""
         result["findings_count"] = len(agent_state.get("findings") or [])
 
     except asyncio.TimeoutError:

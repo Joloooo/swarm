@@ -1,8 +1,12 @@
-"""Tier-1 unit tests for ``src/llm/refusal.py``.
+"""Tier-1 unit tests for the refusal-error type and JSONL round-trip.
 
 Pure-function tests, no LLM. Verify that ``RefusalError`` is
-serialisable and that ``log_refusal`` / ``count_refusals`` round-trip
-through the JSONL on-disk format.
+serialisable and that the writer + counter round-trip through the
+JSONL on-disk format. The writer lives in
+``src.observability.writers.append_refusal`` and the counter inlines
+into ``src.observability.summary.header.count_refusals`` — the
+``src.llm.refusal`` module is a transitional shim that re-exports
+both, so the legacy import paths used here still resolve.
 """
 
 from __future__ import annotations
@@ -62,18 +66,20 @@ def test_log_refusal_writes_jsonl_and_count_works(
 ) -> None:
     """End-to-end: log two refusals to a tmp run dir, then count
     them via the public API."""
-    # Repoint the resolver at our tmp dir.
+    # Repoint the writer's path resolver at our tmp dir. ``run_dir`` is
+    # the central helper that every JSONL writer (including the refusal
+    # appender and the summary's ``count_refusals``) uses to resolve
+    # ``logs/run-<id>/...`` — patching it once redirects both.
     repo_root = tmp_path
     (repo_root / "logs").mkdir()
+
+    def _fake_run_dir(run_id: str) -> Path:
+        d = repo_root / "logs" / f"run-{run_id}"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     monkeypatch.setattr(
-        "src.llm.refusal.Path",
-        lambda *a, **kw: Path(*a, **kw),
-        raising=False,
-    )
-    # Easier: monkey-patch the helper itself.
-    monkeypatch.setattr(
-        "src.llm.refusal._refusals_log_path",
-        lambda run_id: repo_root / "logs" / f"run-{run_id}" / "refusals.jsonl",
+        "src.observability.writers.run_dir", _fake_run_dir,
     )
 
     err1 = RefusalError(

@@ -1,6 +1,6 @@
 """Tier 1 — Finding extractor tests.
 
-``src/nodes/base.py`` runs two parsers on every assistant message:
+``src/nodes/base/skill_runner.py`` runs two parsers on every assistant message:
 - ``_findings_from_markdown`` — the structured ``**FINDING:**`` /
   ``## Finding`` format defined in ``base_rules.py``.
 - ``_findings_from_json`` — a forgiving fallback for

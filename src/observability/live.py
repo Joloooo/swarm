@@ -83,15 +83,25 @@ def _emit(line: str) -> None:
     print(line, file=sys.stderr, flush=True)
 
 
-# ─────────────── Helpers for trimming / extracting text ──────────────
+# ─────────────── Helpers for extracting text ──────────────────────────
+#
+# Display clipping was removed by user request — every live-stream
+# helper below now returns the full text instead of capping at N chars
+# with a trailing ``…``. The only remaining "compaction" is the
+# structural ``+N more lines`` hint in ``_summarize_output``: when a
+# command's tail spans multiple lines, the synopsis still shows the
+# first line + a count of how many more were captured. That's a hint,
+# not a string truncation. If you want full multi-line output dumped
+# inline too, switch verbosity to ``verbose`` mode (which already
+# prints every tail line).
 
-_MAX_CMD = 120
-_MAX_TAIL_INLINE = 200  # bytes — below this we may inline the full output
 
-
-def _clip(s: str, n: int) -> str:
-    s = s.replace("\n", " ⏎ ")
-    return s if len(s) <= n else s[: n - 1] + "…"
+def _inline_newlines(s: str) -> str:
+    """Replace newlines with the ``⏎`` glyph so multi-line strings fit
+    on one logical terminal line. No length cap — used wherever we
+    used to call ``_clip`` for layout reasons.
+    """
+    return s.replace("\n", " ⏎ ")
 
 
 def _first_nonempty(text: str) -> str:
@@ -114,10 +124,16 @@ def _summarize_output(tail: str, exit_code: int | None) -> str:
     """One-line summary of a command tail. Used in ``compact`` mode.
 
     * empty tail → just the exit-code chip (caller adds it).
-    * exit==0 and short → first non-empty line.
-    * exit==0 and long  → first line + ``+N more lines`` if multi-line.
-    * exit!=0 → last non-empty line (the actual error usually surfaces last).
+    * exit==0 and single-line → the full line (no length cap).
+    * exit==0 and multi-line → full first line + ``+N more lines``.
+    * exit!=0 → full last non-empty line (the actual error usually
+      surfaces last).
     * HTTP responses (first line starts with ``HTTP/``) → status + server.
+
+    Display clipping was removed: long commands and outputs now show
+    in full. The multi-line ``+N more lines`` hint stays as structural
+    info (it's not truncating any individual line, just signalling
+    that more lines exist below the synopsis).
     """
     text = (tail or "").strip()
     if not text:
@@ -136,51 +152,36 @@ def _summarize_output(tail: str, exit_code: int | None) -> str:
         return ", ".join(bits)
 
     if (exit_code is not None) and exit_code != 0:
-        return _clip(_last_nonempty(text), 200)
+        return _last_nonempty(text)
 
-    if len(lines) <= 1 and len(text) < _MAX_TAIL_INLINE:
-        return _clip(text, 200)
+    if len(lines) <= 1:
+        return text
 
     extra = len(lines) - 1
     suffix = f"  +{extra} more line{'s' if extra != 1 else ''}" if extra > 0 else ""
-    return _clip(first, 180) + suffix
+    return first + suffix
 
 
 # ───────────────── Planner JSON → one-line decision ──────────────────
-
-_JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+#
+# Live rendering uses the LAX parser — it'd rather show a partially-
+# valid decision than render nothing for a slightly malformed JSON
+# emission. The shared parser lives at
+# ``src.observability.decision_parser.parse_planner_decision``;
+# planner.py uses the same function in strict mode for its own
+# decision logic.
 
 
 def _extract_planner_decision(text: str) -> dict | None:
     """Pull the ``{action, target_url, reasoning, ...}`` dict out of an
-    AIMessage emitted by the planner. The supervisor wraps it in a
-    fenced ```json ...``` block; we also accept a bare ``{...}`` body.
-    Returns ``None`` if nothing parseable is found.
+    AIMessage emitted by the planner.
+
+    Lax mode: accepts any JSON object containing an ``action`` key,
+    cleans up trailing commas before parsing. Returns ``None`` if
+    nothing parseable is found.
     """
-    if not text:
-        return None
-    m = _JSON_FENCE.search(text)
-    candidate = m.group(1) if m else None
-    if candidate is None:
-        # fall back: look for the first {...} block that contains "action"
-        idx = text.find("{")
-        if idx < 0:
-            return None
-        candidate = text[idx:]
-    # tolerate trailing commas: trim to the last `}`
-    last = candidate.rfind("}")
-    if last >= 0:
-        candidate = candidate[: last + 1]
-    try:
-        data = json.loads(candidate)
-    except json.JSONDecodeError:
-        try:
-            # second chance: drop trailing commas
-            cleaned = re.sub(r",\s*([}\]])", r"\1", candidate)
-            data = json.loads(cleaned)
-        except json.JSONDecodeError:
-            return None
-    return data if isinstance(data, dict) and "action" in data else None
+    from src.observability.decision_parser import parse_planner_decision
+    return parse_planner_decision(text, strict=False)
 
 
 # ─────────────────────────── The renderer ────────────────────────────
@@ -229,10 +230,7 @@ class _Live:
         self._seen_msg_hashes.clear()
         head = _paint(f"◆ {bench_id}", _BOLD, _CYAN)
         target_part = f"target={target}" if target else "target=?"
-        flag_part = ""
-        if expected_flag:
-            short = expected_flag if len(expected_flag) <= 18 else expected_flag[:15] + "…}"
-            flag_part = f"  expected={short}"
+        flag_part = f"  expected={expected_flag}" if expected_flag else ""
         _emit(f"{_now()}  {head}  {target_part}{flag_part}")
 
     def bench_end(
@@ -440,12 +438,16 @@ class _Live:
             action = str(decision.get("action") or "?")
             target = decision.get("target_url") or ""
             reasoning = (decision.get("reasoning") or "").strip()
-            short = _clip(reasoning, 110)
 
             head = _paint("● planner ", _MAGENTA)
             arrow = _paint(f"→ {action}", _BOLD, _MAGENTA)
             target_part = f"  {target}" if target else ""
-            reason_part = f'  "{short}"' if short else ""
+            # Reasoning shown in full — newlines collapsed to ⏎ so the
+            # decision line stays single-row even when the planner's
+            # rationale spans paragraphs. No length cap.
+            reason_part = (
+                f'  "{_inline_newlines(reasoning)}"' if reasoning else ""
+            )
             _emit(f"{_now()}  {head}{arrow}{target_part}"
                   f"{reason_part}  ({_fmt_ms(duration_ms)})")
             rendered_any = True
@@ -562,9 +564,12 @@ class _Live:
         # compact — bash command (mechanics) is dim; the LLM's reasoning
         # underneath is bold so it stands out, since *why* the LLM ran the
         # command is the higher-signal information for the operator.
+        # Command shown in full — newlines collapsed to ⏎ glyph so a
+        # multi-line heredoc still fits on one logical row, but no
+        # length cap.
         head = _paint("$ ", _DIM, _WHITE)
         ag = _paint(_agent_tag(agent), _CYAN)
-        cmd_text = _paint(_clip(cmd, _MAX_CMD), _DIM)
+        cmd_text = _paint(_inline_newlines(cmd), _DIM)
         _emit(f"{_now()}  {head}{ag} {cmd_text}")
         if reasoning and reasoning.strip():
             # Indent under the timestamp column so the reasoning visually
@@ -647,7 +652,11 @@ class _Live:
         if url:
             bits.append(_paint(url, _DIM))
         if payload:
-            bits.append(_paint(f'payload="{_clip(payload, 60)}"', _DIM))
+            # Full payload shown — no length cap; newlines collapsed
+            # so the finding line stays single-row.
+            bits.append(_paint(
+                f'payload="{_inline_newlines(payload)}"', _DIM,
+            ))
         _emit(f"{_now()}  " + "  ".join(bits))
 
     def warning(self, text: str, *, kind: str = "warning") -> None:
@@ -687,10 +696,16 @@ class _Live:
 
         Mode behaviour:
           - silent: no output, no heartbeat.
-          - compact: header + heartbeat (deltas suppressed; the
-            heartbeat is the user's only mid-call signal).
-          - verbose: header + per-delta streaming + heartbeat
-            fallback when no delta has arrived for HEARTBEAT_SECS.
+          - compact / verbose: header + per-delta streaming of the
+            model's chain-of-thought summary as it arrives, plus a
+            heartbeat fallback when no delta has been seen for
+            ``_HEARTBEAT_SECS`` (catches calls where Codex batches the
+            summary at the end rather than streaming it mid-flight).
+
+        ``model`` and ``reasoning_effort`` are accepted for back-compat
+        but no longer rendered — the startup banner shows both, and
+        repeating them on every call was pure noise. Re-add a glyph
+        here if you ever start mixing models within a single run.
 
         Idempotent — calling twice with the same ``run_id`` cancels
         the previous heartbeat and starts fresh.
@@ -705,9 +720,8 @@ class _Live:
         self._cancel_heartbeat(run_id)
 
         ag = _agent_tag(agent)
-        effort = f", {reasoning_effort}" if reasoning_effort else ""
         head = _paint("🧠 ", _DIM, _CYAN)
-        body = _paint(f"thinking ({model}{effort})…", _DIM)
+        body = _paint("thinking…", _DIM)
         _emit(f"{_now()}  {head}{ag} {body}")
 
         # Record state for delta routing + heartbeat.
@@ -778,18 +792,22 @@ class _Live:
         live as the model produces them.
 
         Mode behaviour:
-          - silent / compact: suppressed. Compact users get the
-            header + heartbeat + done line, but not the live text.
-          - verbose: dim cyan, written directly without ``_now()``
-            timestamp so successive deltas concatenate into a
-            running paragraph rather than fragmenting per chunk.
+          - silent: suppressed (delta-seen still recorded so the
+            silent-mode heartbeat — if any — self-suppresses).
+          - compact / verbose: dim cyan, written directly without a
+            ``_now()`` timestamp prefix so successive deltas
+            concatenate into a running paragraph rather than
+            fragmenting per chunk. The first delta after the header
+            (or after a heartbeat / cross-call interruption) gets a
+            12-column indent so the streamed paragraph aligns under
+            the timestamp gutter.
         """
         if not text:
             return
-        if _mode() != "verbose":
-            # Even when not rendered, mark delta-seen so the
-            # heartbeat suppresses itself — we know the call is
-            # alive even if we're not painting it.
+        if _mode() == "silent":
+            # Silent mode renders nothing, but we still record the
+            # delta so the heartbeat suppresses itself — keeps the
+            # state machine consistent across modes.
             state = self._think_state.get(run_id)
             if state is not None:
                 state["delta_seen"] = True
@@ -1000,6 +1018,7 @@ class _Live:
                 ("nodes.jsonl",          "1 line per node finish — duration, summary, full state diff (before / after / delta with new msgs)"),
                 ("llm_calls.jsonl",      "2 lines per LLM call — phase=start (full prompt) + phase=end (tokens, response). Live."),
                 ("terminal_events.jsonl","1 line per shell command — populates live"),
+                ("worker_traces.jsonl",  "1 line per worker LangChain message — tagged by agent_id + dispatch_ts for filtering"),
                 ("final_state.json",     "final agent_state at run end"),
                 ("summary.md",           "human entry point — open this first; per-node detail collapsed"),
             ]

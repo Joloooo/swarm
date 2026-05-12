@@ -10,7 +10,8 @@ which had refused under every other variant in v1/v2/v3.
 
 This module is the production-side analogue of v4's ``vocab_filter``
 variant. It is invoked as a TIER-2 RETRY in
-``src/nodes/base.py:run_skill_agent`` after plain retries exhaust.
+``src/refusals/retry.py:astream_with_refusal_retry`` after plain
+retries exhaust.
 
 Single source of truth: the ``CLAUDE.md`` Skill Vocabulary Policy
 table is mechanically transcribed below. Any update to that table

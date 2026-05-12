@@ -32,7 +32,7 @@ gets one line in ``logs/run-<id>/llm_calls.jsonl``. Nothing is
 truncated — disk is cheap; thesis analysis needs the full record.
 
 A running per-agent total is also published via :data:`TOKEN_TOTALS`
-so the live renderer (``src/live.py``) can show "▸ vulntype-sqli
+so the live renderer (``src/observability/live.py``) can show "▸ vulntype-sqli
 finished — 12 LLM calls, 187k in / 9.4k out / 22k reasoning" when a
 worker exits. That makes the context-rot risk visible without having
 to grep the log file mid-run.
@@ -149,45 +149,20 @@ def reset_totals() -> None:
 
 
 # ── Disk path resolution ────────────────────────────────────────────────
+#
+# The actual writer (and lock) live in ``src/observability/writers.py``
+# alongside every other JSONL appender. Here we just bind a local name
+# so the existing call sites in this file (and the back-compat
+# ``_append_request_event`` alias) keep working without changes.
 
 
 def _llm_log_path(run_id: str) -> "pathlib.Path":  # noqa: F821 — string annot
-    """Where ``llm_calls.jsonl`` for ``run_id`` lives.
-
-    Co-located with ``nodes.jsonl`` and ``terminal_events.jsonl`` so the
-    three files form a self-contained per-run log bundle that's easy to
-    archive or analyze together.
-    """
+    """Where ``logs/run-<id>/llm_calls.jsonl`` lives. Convenience wrapper."""
     return run_dir(run_id) / "llm_calls.jsonl"
 
 
-_LOG_LOCK = threading.Lock()
-
-
-def _append_llm_event(run_id: str | None, event: dict) -> None:
-    """Append one JSON line to ``logs/run-<id>/llm_calls.jsonl``.
-
-    Both ``phase=start`` (full prompt) and ``phase=end`` /
-    ``phase=error`` (usage tokens, duration) rows land in the **same
-    file**. This is the consolidated writer — prior to merging
-    ``llm_requests.jsonl`` into ``llm_calls.jsonl``, the start rows
-    went to a sister file. Sharing the file means one ``tail -f`` on
-    the calls log shows both sides of every round-trip.
-
-    Failures are swallowed — observability must never break a graph
-    run. The lock keeps parallel worker calls from interleaving
-    half-lines (the executor fans out 4-way for ``custom-attack``).
-    """
-    if not run_id:
-        return
-    try:
-        path = _llm_log_path(run_id)
-        line = json.dumps(event, default=str, ensure_ascii=False) + "\n"
-        with _LOG_LOCK, path.open("a", encoding="utf-8") as f:
-            f.write(line)
-    except Exception:  # noqa: BLE001 — observability must not break runs
-        pass
-
+# Forward to the central writer — single grep target for the file.
+from src.observability.writers import append_llm_event as _append_llm_event
 
 # Back-compat alias — the start-side event builder still calls
 # ``_append_request_event``; redirect it to the unified writer so
@@ -583,7 +558,7 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         # "🧠 done" line on stderr appears alongside the same fields
         # that just landed in llm_calls.jsonl.
         try:
-            from src.live import LIVE  # lazy — avoid import cycle
+            from src.observability import LIVE  # lazy — avoid import cycle
             LIVE.thinking_finished(
                 agent=agent_id,
                 run_id=run_id,
@@ -652,7 +627,7 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         # this call so an error doesn't leave a "🧠 thinking…" header
         # hanging without a closer.
         try:
-            from src.live import LIVE  # lazy — avoid import cycle
+            from src.observability import LIVE  # lazy — avoid import cycle
             LIVE.thinking_finished(
                 agent=agent_id,
                 run_id=run_id,
@@ -802,7 +777,7 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         """Tell the live renderer to draw the "🧠 thinking…" header
         and start a heartbeat. Best-effort; never raises."""
         try:
-            from src.live import LIVE  # lazy — avoid import cycle
+            from src.observability import LIVE  # lazy — avoid import cycle
         except Exception:  # noqa: BLE001
             return
         ident = cls._resolve_identity(metadata=metadata, serialized=serialized)

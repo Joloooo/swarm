@@ -37,7 +37,8 @@ import subprocess
 
 import pytest
 
-from src.tools.shell.tmux import cleanup_session, shell
+from src.tools.shell import get_shell_manager
+from src.tools.shell.tmux import shell
 
 
 SSH_HOST = "jolocorpagent"
@@ -83,12 +84,17 @@ pytestmark = [
 
 
 @pytest.fixture
-def clean_tmux():
-    """Wipe any stale session before AND after the test, so leftover
-    panes from a previous run can't poison this one and vice versa."""
-    cleanup_session()
+async def clean_tmux():
+    """Wipe this test's tmux session before AND after the test.
+
+    Each agent now gets a UUID-suffixed session
+    (``swarm-{AGENT_ID}-{uuid}``) so stale sessions from prior runs
+    no longer collide on a global name. We still kill THIS test's
+    session on entry/exit so ``tmux ls`` stays clean post-suite.
+    """
+    await get_shell_manager().cleanup_agent(AGENT_ID)
     yield
-    cleanup_session()
+    await get_shell_manager().cleanup_agent(AGENT_ID)
 
 
 async def test_tmux_can_open_ssh_and_read_remote_file(clean_tmux):
@@ -131,8 +137,8 @@ async def test_tmux_can_open_ssh_and_read_remote_file(clean_tmux):
         f"remote host. Got:\n{cat_output!r}"
     )
 
-    # Step 3 — leave the SSH session cleanly so cleanup_session()
-    # does not have to kill an in-flight ssh process.
+    # Step 3 — leave the SSH session cleanly so the post-test
+    # cleanup_agent() does not have to kill an in-flight ssh process.
     await shell(
         "exit",
         agent_id=AGENT_ID,

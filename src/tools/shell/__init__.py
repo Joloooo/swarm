@@ -9,8 +9,11 @@ Two LLM-facing tools live here:
 - ``run_command`` — interactive tmux pane. Use only for things that
   need a real TTY (msfconsole, ssh shells, ``nc -lvnp`` listeners).
 
-Plus shared helpers (``read_file``, ``shell``) and lifecycle hooks
-(``cleanup_shell``, ``set_log_file``, ``set_run_id``).
+Session lifecycle (creating sessions, killing them on process exit or
+Ctrl+C) is owned by :mod:`src.tools.shell.manager` — a module-level
+singleton that registers ``atexit`` + signal handlers at import time.
+Callers that need explicit per-agent cleanup call
+``get_shell_manager().cleanup_agent(agent_id)``.
 """
 
 from __future__ import annotations
@@ -24,7 +27,12 @@ from src.tools.shell._common import (
     set_workspace_root,
     workspace_for,
 )
-from src.tools.shell.bash import bash, bash_exec, cleanup_bash_sessions
+from src.tools.shell.bash import bash, bash_exec
+from src.tools.shell.manager import (
+    BashSession,
+    ShellManager,
+    get_shell_manager,
+)
 from src.tools.shell.safety import (
     check_attacker_host_safety,
     check_scope,
@@ -32,7 +40,6 @@ from src.tools.shell.safety import (
     strip_wrappers,
 )
 from src.tools.shell.tmux import (
-    cleanup_session,
     read_file,
     run_command,
     shell,
@@ -40,14 +47,15 @@ from src.tools.shell.tmux import (
 
 
 async def cleanup_shell() -> None:
-    """Tear down both bash subprocesses and the tmux session.
+    """Tear down every bash subprocess and tmux session this process owns.
 
-    Call from ``cli.py`` / graph teardown / pytest fixtures so an
-    interrupted run doesn't leave background bash processes or stale
-    tmux state behind.
+    Thin wrapper around :meth:`ShellManager.cleanup_all` kept under the
+    historical name so callers (CLI, benchmark teardown, pytest
+    fixtures) don't need to update. The singleton's ``atexit`` hook
+    also runs this on interpreter shutdown — calling it explicitly
+    from the runner is belt-and-suspenders, never required.
     """
-    await cleanup_bash_sessions()
-    cleanup_session()
+    await get_shell_manager().cleanup_all()
 
 
 __all__ = [
@@ -59,8 +67,9 @@ __all__ = [
     "shell",
     # lifecycle
     "cleanup_shell",
-    "cleanup_bash_sessions",
-    "cleanup_session",
+    "get_shell_manager",
+    "ShellManager",
+    "BashSession",
     "set_log_file",
     "set_run_id",
     "set_workspace_root",

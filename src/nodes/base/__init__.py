@@ -1,6 +1,6 @@
 """BaseNode — the framework every LangGraph node in SwarmAttacker inherits.
 
-Every concrete node (PlannerNode, ReconNode, ReportNode, InitializeNode,
+Every concrete node (PlannerNode, ReconNode, ReportNode, SummarizerNode,
 WebSearchNode, ExecutorNode) inherits directly from ``BaseNode``.
 There is no intermediate class. Cross-cutting capabilities — per-node
 logger, skill lookup, the LLM-agent loop that used to live in

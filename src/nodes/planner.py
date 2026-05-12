@@ -1075,7 +1075,8 @@ class PlannerNode(BaseNode):
 
         # Pull the run_id once so every LLM call below logs into the
         # same llm_calls.jsonl. The state always carries run_id by the
-        # time the planner runs (initialize_node sets it on entry).
+        # time the planner runs — the runner (CLI / xbow_runner) seeds
+        # it into the initial state passed to ``graph.ainvoke``.
         run_id = state.get("run_id")
 
         # Hard cap — force report rather than loop forever.

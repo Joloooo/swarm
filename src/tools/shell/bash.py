@@ -53,7 +53,6 @@ import shlex
 import signal
 import time
 import uuid
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -63,8 +62,8 @@ from src.tools.shell._common import (
     format_bash_result,
     log_event as _log_event,
     truncate_output,
-    workspace_for,
 )
+from src.tools.shell.manager import BashSession, get_shell_manager
 from src.tools.shell.safety import (
     check_attacker_host_safety,
     check_scope,
@@ -74,10 +73,16 @@ from src.tools.shell.safety import (
 logger = logging.getLogger(__name__)
 
 
-# Default timeout for a single command. Pentest tools (full nmap,
-# wordlist gobuster) can legitimately take a while, so this is generous
-# compared to the OpenCode default. The LLM can override per-call.
-_DEFAULT_TIMEOUT_S = 120
+# Per-agent bash subprocess lifecycle (creation, registry, cleanup) lives
+# in :mod:`src.tools.shell.manager`. This module owns only command
+# execution against an existing :class:`BashSession`: the wrapper-script
+# build, the sentinel-driven readback, and the LangChain-facing tool
+# wrappers below. All session lookups go through
+# ``get_shell_manager().get_or_create_bash(agent_id)``.
+
+# Default timeout was previously ``_DEFAULT_TIMEOUT_S`` here. It now lives
+# on the manager (``ShellManager.DEFAULT_TIMEOUT_S``) so all shell-tool
+# defaults sit in one place.
 _MAX_TIMEOUT_S = 60 * 30  # 30 minutes hard ceiling
 
 # How often to check the bash stdout pipe for the sentinel. 100 ms is
@@ -90,84 +95,11 @@ _POLL_INTERVAL_S = 0.1
 _MAX_BYTES_PER_STREAM = 256_000
 
 
-# -- Session ----------------------------------------------------------------
-
-@dataclass
-class BashSession:
-    """One long-running bash subprocess for one agent.
-
-    The lock serialises commands sent to *this* bash; different agents
-    have different sessions and run in parallel.
-    """
-    agent_id: str
-    proc: asyncio.subprocess.Process
-    workspace: Path
-    cwd: str
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-
-_REGISTRY: dict[str, BashSession] = {}
-_REGISTRY_LOCK = asyncio.Lock()
-
-
 def _current_scope() -> list[str]:
     raw = os.getenv("SWARM_SCOPE", "").strip()
     if not raw:
         return []
     return [p.strip() for p in raw.split(",") if p.strip()]
-
-
-async def _spawn_bash(agent_id: str) -> BashSession:
-    """Start a fresh bash subprocess for *agent_id* and cd into its workspace."""
-    workspace = workspace_for(agent_id)
-    # ``bash --noprofile --norc`` keeps the shell deterministic across
-    # operator machines (no user .bashrc with custom aliases or PATH
-    # tweaks affecting agent runs). Add -i would give a TTY-ish shell
-    # but we don't want that — interactive things go through tmux.
-    proc = await asyncio.create_subprocess_exec(
-        "bash", "--noprofile", "--norc",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=str(workspace),
-        # Important: a process group of its own. Lets us SIGINT the
-        # *child* command on timeout without killing bash itself.
-        start_new_session=True,
-    )
-    sess = BashSession(
-        agent_id=agent_id,
-        proc=proc,
-        workspace=workspace,
-        cwd=str(workspace),
-    )
-    _log_event(
-        "bash_spawn",
-        agent=agent_id,
-        pid=proc.pid,
-        workspace=str(workspace),
-    )
-    return sess
-
-
-async def _get_or_create_session(agent_id: str) -> BashSession:
-    """Look up the agent's bash session, creating it if missing.
-
-    Also re-spawns if a prior session has died (e.g. someone killed
-    the bash process out from under us, or a previous run crashed).
-    """
-    async with _REGISTRY_LOCK:
-        sess = _REGISTRY.get(agent_id)
-        if sess is not None and sess.proc.returncode is None:
-            return sess
-        if sess is not None:
-            _log_event(
-                "bash_session_dead",
-                agent=agent_id,
-                returncode=sess.proc.returncode,
-            )
-        sess = await _spawn_bash(agent_id)
-        _REGISTRY[agent_id] = sess
-        return sess
 
 
 # -- The wrapper script -----------------------------------------------------
@@ -387,7 +319,9 @@ def _check_safety(command: str, *, agent_id: str) -> str | None:
 async def bash(
     reasoning: str,
     command: str,
-    timeout: int = _DEFAULT_TIMEOUT_S,
+    # Default kept as a literal so @tool can introspect it statically;
+    # MUST match ShellManager.DEFAULT_TIMEOUT_S in src/tools/shell/manager.py.
+    timeout: int = 120,
     agent_id: str = "default",
 ) -> str:
     """Run a one-shot non-interactive shell command.
@@ -427,7 +361,7 @@ async def bash(
     if block:
         return block
 
-    sess = await _get_or_create_session(agent_id)
+    sess = await get_shell_manager().get_or_create_bash(agent_id)
 
     _log_event(
         "bash_command",
@@ -472,7 +406,10 @@ async def bash_exec(
     *,
     agent_id: str = "default",
     reasoning: str = "",
-    timeout: int = _DEFAULT_TIMEOUT_S,
+    # Mirror the @tool default so internal callers and LLM-facing
+    # callers behave identically; canonical home is
+    # ShellManager.DEFAULT_TIMEOUT_S.
+    timeout: int = 120,
 ) -> str:
     """Run a one-shot command and return its raw stdout.
 
@@ -494,7 +431,7 @@ async def bash_exec(
     if block:
         return block
 
-    sess = await _get_or_create_session(agent_id)
+    sess = await get_shell_manager().get_or_create_bash(agent_id)
 
     _log_event(
         "bash_command",
@@ -532,40 +469,8 @@ async def bash_exec(
     return truncate_output(out)
 
 
-async def cleanup_bash_sessions() -> None:
-    """Tear down every persistent bash subprocess.
-
-    Sends ``exit\\n`` to each session's stdin, waits briefly, then
-    kills if still alive. Called on graph teardown alongside
-    ``cleanup_session`` (tmux) by ``cleanup_shell()`` in
-    ``shell/__init__.py``.
-    """
-    async with _REGISTRY_LOCK:
-        sessions = list(_REGISTRY.items())
-        _REGISTRY.clear()
-
-    for agent_id, sess in sessions:
-        try:
-            if sess.proc.stdin and not sess.proc.stdin.is_closing():
-                sess.proc.stdin.write(b"exit\n")
-                await sess.proc.stdin.drain()
-                sess.proc.stdin.close()
-        except Exception:
-            pass
-        try:
-            await asyncio.wait_for(sess.proc.wait(), timeout=1.0)
-        except (asyncio.TimeoutError, ProcessLookupError):
-            try:
-                sess.proc.kill()
-                await sess.proc.wait()
-            except (ProcessLookupError, OSError):
-                pass
-        _log_event("bash_cleanup", agent=agent_id, returncode=sess.proc.returncode)
-
-
 __all__ = [
     "bash",
     "bash_exec",
-    "cleanup_bash_sessions",
-    "BashSession",
+    "BashSession",  # re-exported (defined in manager.py) for back-compat
 ]

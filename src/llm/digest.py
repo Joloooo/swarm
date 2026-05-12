@@ -581,8 +581,9 @@ def _stub_report(
         + (f" — {error}" if error else "")
         + f"\n\n## Target\n(summariser failed; trace not available to planner)"
         f"\n\n## Inputs tried\n(summariser unavailable — see "
-        f"`logs/run-<id>/worker-{agent_id}-*/trace.jsonl` on disk for "
-        f"the full {iteration_count}-step trace)"
+        f"`logs/run-<id>/worker_traces.jsonl` on disk for the full "
+        f"{iteration_count}-step trace; filter by "
+        f"`.agent_id == \"{agent_id}\"`)"
         f"\n\n## Server responses\n(unavailable)"
         f"\n\n## Inferred server-side behaviour\n(unavailable)"
         f"\n\n## NOT tried\n(unavailable)"
@@ -602,7 +603,7 @@ def find_prior_worker_report(
     """Return the most recent ``worker_report`` ``AIMessage`` whose
     ``additional_kwargs.agent_id`` matches ``agent_id``, or ``None``.
 
-    Used by ``_collect_prior_skill_history`` (in ``src/nodes/base.py``)
+    Used by ``_collect_prior_skill_history`` (in ``src/nodes/base/skill_runner.py``)
     to seed a re-dispatched worker with what the previous dispatch did.
     Walks the list in reverse so the FIRST hit is the most recent — this
     matters because a long benchmark may have many prior reports for the

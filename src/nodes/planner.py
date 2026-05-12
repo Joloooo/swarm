@@ -55,8 +55,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 from src.nodes.base import (
     IDENTITY_PREAMBLE,
     BaseNode,
-    _looks_like_refusal,
 )
+from src.refusals.detect import looks_like_refusal
 from src.skills.loader import (
     list_dispatchable_skills,
     load_skill,
@@ -385,33 +385,22 @@ SUPERVISOR_SYSTEM_PROMPT = SUPERVISOR_SYSTEM_PROMPT.replace(
 SUPERVISOR_SYSTEM_PROMPT = IDENTITY_PREAMBLE + "\n\n" + SUPERVISOR_SYSTEM_PROMPT
 
 
-# Extracts a fenced ```json { ... } ``` block from the LLM's final
-# message. We are lenient: also accept an un-fenced trailing object.
-_JSON_BLOCK = re.compile(
-    r"```(?:json)?\s*(\{.*?\})\s*```|(\{[^{}]*\"action\"[^{}]*\})",
-    re.DOTALL,
-)
+# JSON-decision parsing was unified with the live-renderer parser into
+# ``src.observability.decision_parser.parse_planner_decision`` —
+# strict mode here (``action`` must be one of ``VALID_ACTIONS``); the
+# live renderer uses the lax mode of the same function.
+from src.observability.decision_parser import parse_planner_decision
 
 
 def _parse_decision(text: str) -> dict | None:
     """Extract the supervisor's JSON decision from its final message.
 
-    Returns None if no well-formed block is found. Uses a forgiving
-    two-pass regex — fenced block first, bare object as fallback.
+    Strict mode: requires ``action`` to be one of ``VALID_ACTIONS``.
+    Returns None if no well-formed block is found. Forwarded to the
+    shared implementation in
+    ``src/observability/decision_parser.py``.
     """
-    if not text:
-        return None
-    for match in _JSON_BLOCK.finditer(text):
-        raw = match.group(1) or match.group(2)
-        if not raw:
-            continue
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict) and parsed.get("action") in VALID_ACTIONS:
-            return parsed
-    return None
+    return parse_planner_decision(text, strict=True)
 
 
 def _fallback_decision(state: SwarmGraphState) -> dict:
@@ -1273,7 +1262,7 @@ class PlannerNode(BaseNode):
         # early in the run) and re-emphasize authorization to recover.
         if (
             decision.get("action") == "report"
-            and _looks_like_refusal(final_text)
+            and looks_like_refusal(final_text)
             and iters <= 3
         ):
             findings_count = len(state.get("findings") or [])
@@ -1330,7 +1319,7 @@ class PlannerNode(BaseNode):
                     recovery_decision is not None
                     and (
                         recovery_decision.get("action") != "report"
-                        or not _looks_like_refusal(recovery_text)
+                        or not looks_like_refusal(recovery_text)
                     )
                 ):
                     decision = recovery_decision

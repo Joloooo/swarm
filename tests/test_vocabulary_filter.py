@@ -1,4 +1,4 @@
-"""Tier-1 unit tests for ``src/llm/vocabulary_filter.py``.
+"""Tier-1 unit tests for ``src/refusals/vocabulary.py``.
 
 Pure-function tests, no LLM, no network. Verify the regex mapping
 table behaves correctly on the inputs we care about: skill bodies,
@@ -16,7 +16,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from src.llm.vocabulary_filter import filter_messages, filter_text
+from src.refusals.vocabulary import filter_messages, filter_text
 
 
 def test_filter_text_replaces_offensive_verbs() -> None:

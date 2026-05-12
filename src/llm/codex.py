@@ -999,7 +999,7 @@ def _build_reasoning_sink() -> Callable[[str], None] | None:
 
     def _sink(text: str) -> None:
         try:
-            from src.live import LIVE  # lazy — never break the LLM call
+            from src.observability import LIVE  # lazy — never break the LLM call
             LIVE.thinking_delta(agent=agent_id, run_id=run_id, text=text)
         except Exception:  # noqa: BLE001
             pass

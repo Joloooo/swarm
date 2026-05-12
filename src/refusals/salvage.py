@@ -1,13 +1,15 @@
-"""Salvage findings from a crashed worker.
+"""Post-crash salvage — extract a Finding from a worker that died mid-task.
 
 Why this exists
 ---------------
 
 When a worker (``recon`` / ``executor``'s ``run_skill_agent``) hits the
-LangGraph ``recursion_limit`` mid-loop, the LangChain ``create_agent``
-graph raises and the parent's ``except`` returns ``0 findings, 0/1
-agents ok``. From the planner's point of view, the worker contributed
-nothing — even if its scratchpad demonstrably popped the box.
+LangGraph ``recursion_limit`` mid-loop, or its provider raises a
+refusal once every retry tier in :mod:`src.refusals.retry` has
+exhausted, the LangChain ``create_agent`` graph raises and the parent's
+``except`` returns ``0 findings, 0/1 agents ok``. From the planner's
+point of view, the worker contributed nothing — even if its scratchpad
+demonstrably popped the box.
 
 Concrete example from a real run (XBEN-006-24, 2026-05-04 08:12):
 
@@ -30,6 +32,19 @@ schema." Anything that comes back gets merged into the worker's
 human reading the report can tell the finding was reconstructed
 post-hoc rather than emitted by the worker itself.
 
+Why this lives in ``refusals/``
+-------------------------------
+
+In production, the dominant trigger for the partial-trace path is the
+refusal cascade — Codex ``cyber_policy`` refusals exhausting the tier
+ladder, or recursion limits hit because the model kept stalling under
+refusal pressure. The recursion-limit example above is real but
+uncommon; refusal-driven crashes are the default. Co-locating the
+salvage logic with the rest of the refusal-handling package keeps the
+post-failure recovery path together: ``recover.py`` for mid-flight
+rescue (proposing the next probe), ``salvage.py`` for post-crash
+recovery (extracting impact from what was already done).
+
 Cost model
 ----------
 
@@ -46,7 +61,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
@@ -57,6 +72,9 @@ from langchain_core.messages import (
 )
 
 from src.state import Finding, Severity
+
+if TYPE_CHECKING:
+    from src.nodes.base import AgentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -330,3 +348,59 @@ async def salvage_finding(
         agent_id, severity.value, title_raw[:140],
     )
     return finding
+
+
+async def try_salvage(
+    *,
+    config: "AgentConfig",
+    partial_messages: list,
+    target_url: str,
+    log: logging.Logger,
+    run_id: str | None = None,
+) -> Finding | None:
+    """Attempt to extract a Finding from a crashed worker's trace.
+
+    Thin wrapper around :func:`salvage_finding` that:
+
+    1. Instantiates a *fresh* LLM (each Codex call is already stateless
+       on the wire, but instantiating a clean model here keeps the
+       abstraction tidy if we ever swap providers per-task).
+    2. Swallows any sub-LLM call failure so the crash path stays
+       graceful regardless of whether the salvage attempt succeeded.
+
+    Args:
+        config: the worker's AgentConfig — used for ``agent_id``,
+            ``methodology``, and ``config_name``.
+        partial_messages: the worker's message scratchpad at the
+            moment of the crash. Empty list short-circuits to None.
+        target_url: pentest target, included as context in the
+            salvage prompt.
+        log: per-node logger so the warning landed here appears
+            under the right node namespace.
+        run_id: forwarded through to the LLM callback so the
+            salvage call lands in ``llm_calls.jsonl``.
+
+    Returns:
+        The salvaged Finding on success, or None if the trace was
+        empty, the salvage sub-LLM crashed, or no impact was found.
+    """
+    if not partial_messages:
+        return None
+    try:
+        from src.llm.provider import get_llm
+        llm = get_llm()
+        return await salvage_finding(
+            messages=partial_messages,
+            agent_id=config.agent_id,
+            methodology=config.methodology,
+            config_name=config.config_name,
+            llm=llm,
+            target_url=target_url,
+            run_id=run_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "[%s] salvage attempt itself crashed (%s): %s",
+            config.agent_id, type(e).__name__, str(e)[:200],
+        )
+        return None

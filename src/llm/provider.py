@@ -156,7 +156,7 @@ def _log_provider_diagnostic(config: LLMConfig, base_url: str | None) -> None:
 def current_default_config() -> dict[str, Any]:
     """Return a small display dict describing the active LLM defaults.
 
-    Used by the startup banner in ``src/live.py:LIVE.startup_banner``
+    Used by the startup banner in ``src/observability/live.py:LIVE.startup_banner``
     so the user sees provider / model / reasoning settings up front
     without having to grep ``logs/`` after the fact. Reads the
     ``LLMConfig()`` defaults — which are themselves driven by

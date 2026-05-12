@@ -10,6 +10,10 @@
 #   - nikto     (web-server vulnerability sweep)
 #   - curl      (HTTP requests — usually pre-installed)
 #
+# Plus the Playwright Chromium browser binary (~150 MB, used by
+# src/tools/crawler.py when raw HTTP fails). The Playwright Python
+# wrapper itself is already installed via `uv sync`.
+#
 # Supports macOS (Homebrew) and Linux (apt / dnf / pacman).
 # Idempotent: safe to run multiple times.
 #
@@ -46,6 +50,14 @@ REQUIRED_TOOLS=(
     "nikto:web-server vulnerability sweep"
     "curl:HTTP requests"
 )
+
+# Playwright cache directory — Microsoft uses different paths per OS.
+# `playwright install chromium` writes the headless-shell + chromium build
+# subdirs here; we look for any `chromium*` dir to decide if it's installed.
+case "$(uname -s)" in
+    Darwin) PLAYWRIGHT_CACHE="$HOME/Library/Caches/ms-playwright" ;;
+    *)      PLAYWRIGHT_CACHE="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}" ;;
+esac
 
 # --- OS detection ---
 
@@ -122,6 +134,24 @@ install_pacman() {
     sudo pacman -S --needed --noconfirm "${tools[@]}"
 }
 
+# --- Playwright Chromium ---
+
+check_playwright_browser() {
+    # Returns 0 if a Chromium build exists in the Playwright cache.
+    if [[ -d "$PLAYWRIGHT_CACHE" ]] && \
+       find "$PLAYWRIGHT_CACHE" -maxdepth 2 -type d -name 'chromium*' 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    return 1
+}
+
+install_playwright_browser() {
+    info "Installing Playwright Chromium (~150 MB, downloads from Microsoft CDN)..."
+    local repo_root
+    repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    (cd "$repo_root" && uv run playwright install chromium)
+}
+
 # --- Main ---
 
 main() {
@@ -136,7 +166,7 @@ main() {
     os=$(detect_os)
     info "Detected OS: $os"
 
-    # Check what's missing (parse the output)
+    # ---- CLI tools ----
     local missing=()
     local in_missing=false
     while IFS= read -r line; do
@@ -152,57 +182,80 @@ main() {
         fi
     done < <(check_tools)
 
-    # Nothing missing — done
-    if [[ ${#missing[@]} -eq 0 ]]; then
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        if $check_only; then
+            printf "\n"
+            warn "Missing CLI tools: ${missing[*]}"
+            warn "Re-run without --check to install."
+        else
+            printf "\n"
+            info "Missing CLI tools: ${missing[*]}"
+            case "$os" in
+                macos)         install_macos "${missing[@]}" ;;
+                linux-apt)     install_apt "${missing[@]}" ;;
+                linux-dnf)     install_dnf "${missing[@]}" ;;
+                linux-pacman)  install_pacman "${missing[@]}" ;;
+                *)
+                    error "Unsupported OS or package manager. Install these manually: ${missing[*]}"
+                    exit 1
+                    ;;
+            esac
+
+            printf "\n"
+            info "Verifying installation..."
+            local failed=()
+            for tool in "${missing[@]}"; do
+                if command -v "$tool" >/dev/null 2>&1; then
+                    success "$tool installed"
+                else
+                    error "$tool still missing after install"
+                    failed+=("$tool")
+                fi
+            done
+
+            if [[ ${#failed[@]} -gt 0 ]]; then
+                printf "\n"
+                error "Some tools failed to install: ${failed[*]}"
+                exit 1
+            fi
+        fi
+    fi
+
+    # ---- Playwright Chromium ----
+    printf "\n%sChecking Playwright browser:%s\n" "$BOLD" "$RESET"
+    local pw_missing=false
+    if check_playwright_browser; then
+        success "$(printf "%-10s %s" "chromium" "Playwright browser binary (crawler fallback)")"
+    else
+        error "$(printf "%-10s %s" "chromium" "Playwright browser binary  [MISSING]")"
+        pw_missing=true
+        if $check_only; then
+            warn "Re-run without --check to install."
+        else
+            printf "\n"
+            install_playwright_browser
+            if check_playwright_browser; then
+                success "Playwright Chromium installed"
+                pw_missing=false
+            else
+                error "Playwright Chromium install reported success but binary not found in $PLAYWRIGHT_CACHE"
+                exit 1
+            fi
+        fi
+    fi
+
+    # ---- Final ----
+    if $check_only; then
+        if [[ ${#missing[@]} -gt 0 ]] || $pw_missing; then
+            exit 1
+        fi
         printf "\n"
-        success "All required tools are installed. You're good to go."
+        success "Everything is in place."
         exit 0
     fi
 
-    # Check-only mode: report and exit
-    if $check_only; then
-        printf "\n"
-        warn "Missing: ${missing[*]}"
-        warn "Re-run without --check to install."
-        exit 1
-    fi
-
-    # Install missing tools using the right package manager
     printf "\n"
-    info "Missing tools: ${missing[*]}"
-
-    case "$os" in
-        macos)         install_macos "${missing[@]}" ;;
-        linux-apt)     install_apt "${missing[@]}" ;;
-        linux-dnf)     install_dnf "${missing[@]}" ;;
-        linux-pacman)  install_pacman "${missing[@]}" ;;
-        *)
-            error "Unsupported OS or package manager. Install these manually: ${missing[*]}"
-            exit 1
-            ;;
-    esac
-
-    # Verify installation
-    printf "\n"
-    info "Verifying installation..."
-    local failed=()
-    for tool in "${missing[@]}"; do
-        if command -v "$tool" >/dev/null 2>&1; then
-            success "$tool installed"
-        else
-            error "$tool still missing after install"
-            failed+=("$tool")
-        fi
-    done
-
-    if [[ ${#failed[@]} -gt 0 ]]; then
-        printf "\n"
-        error "Some tools failed to install: ${failed[*]}"
-        exit 1
-    fi
-
-    printf "\n"
-    success "All tools installed. SwarmAttacker is ready to run."
+    success "Setup complete. SwarmAttacker is ready to run."
     printf "\nNext steps:\n"
     printf "  1. Authenticate Codex (one time):  %scodex%s\n" "$BOLD" "$RESET"
     printf "  2. Start the dev server:           %slanggraph dev --no-browser --no-reload%s\n" "$BOLD" "$RESET"

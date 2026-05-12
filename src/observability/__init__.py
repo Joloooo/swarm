@@ -53,6 +53,7 @@ from src.observability.writers import (
     run_dir,
     set_terminal_log_file,
     terminal_log_path,
+    write_terminal_chunk,
     write_terminal_line,
 )
 
@@ -75,5 +76,6 @@ __all__ = [
     "run_dir",
     "set_terminal_log_file",
     "terminal_log_path",
+    "write_terminal_chunk",
     "write_terminal_line",
 ]

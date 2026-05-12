@@ -976,16 +976,23 @@ def _build_reasoning_sink() -> Callable[[str], None] | None:
     """Build a per-call sink that forwards reasoning deltas to the live
     renderer.
 
-    The sink resolves the calling agent_id and run_id from the
-    ``CURRENT_LLM_CALL`` ContextVar (set by
+    The sink resolves the calling agent_id and the LangChain run UUID
+    from the ``CURRENT_LLM_CALL`` ContextVar (set by
     :class:`src.llm.callbacks.TokenLoggingCallback` on
     ``on_chat_model_start``) and routes each delta to
     ``LIVE.thinking_delta``. When called outside an instrumented LLM
     invocation (e.g. tests, ``ask_focused`` paths that don't go
-    through the callback) the ContextVar is empty and we return None
-    so the parser short-circuits the streaming hook entirely — that
-    keeps non-streaming callers byte-for-byte equivalent to the old
-    parser API.
+    through the callback) the ContextVar is empty and we return ``None``
+    so the parser short-circuits the streaming hook entirely.
+
+    Important: the LIVE renderer keys its per-call state by the
+    LangChain run UUID (``lc_run_id`` in the ContextVar dict) —
+    that's the same key ``thinking_started`` / ``thinking_finished``
+    use. Reading ``ctx["run_id"]`` here (the SwarmAttacker run-id
+    string) instead would silently drop every delta because the
+    renderer's state lookup would miss. The bug was in place for
+    months; if you "fix" this back to ``run_id`` streaming will
+    stop again.
     """
     try:
         from src.llm.callbacks import CURRENT_LLM_CALL  # lazy — circular guard
@@ -995,12 +1002,14 @@ def _build_reasoning_sink() -> Callable[[str], None] | None:
     if not ctx:
         return None
     agent_id = ctx.get("agent_id") or "_unknown"
-    run_id = ctx.get("run_id")
+    # MUST use lc_run_id (LangChain UUID), not run_id (SwarmAttacker
+    # run-id string) — see docstring above.
+    lc_run_id = ctx.get("lc_run_id")
 
     def _sink(text: str) -> None:
         try:
             from src.observability import LIVE  # lazy — never break the LLM call
-            LIVE.thinking_delta(agent=agent_id, run_id=run_id, text=text)
+            LIVE.thinking_delta(agent=agent_id, run_id=lc_run_id, text=text)
         except Exception:  # noqa: BLE001
             pass
 

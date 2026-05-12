@@ -86,10 +86,28 @@ def _emit(line: str) -> None:
     has configured a sink via :func:`writers.set_terminal_log_file`.
     The sink is a no-op when unset (e.g. langgraph Studio sessions),
     so this function stays cheap on the hot path.
+
+    Closes any in-flight reasoning-stream line first so the new
+    line lands cleanly on its own row. Without this guard a normal
+    ``LIVE.shell_command(...)`` printed mid-stream would concatenate
+    onto whatever ``thinking_delta`` was writing.
     """
+    # Lazy import — module-load ordering guarantees this is available
+    # by the time _emit fires, but the try/except keeps tests that
+    # mock the writers module safe.
+    try:
+        with _STREAM_LOCK:
+            if (
+                _STREAM_FOCUS["current_agent"] is not None
+                and not _STREAM_FOCUS["at_line_start"]
+            ):
+                _stream_write("\n")
+                _STREAM_FOCUS["at_line_start"] = True
+                _STREAM_FOCUS["current_agent"] = None
+    except Exception:  # noqa: BLE001
+        pass
+
     print(line, file=sys.stderr, flush=True)
-    # Lazy import — avoids the ``observability -> writers -> ...`` cycle
-    # at module load and lets tests that monkey-patch writers still work.
     try:
         from src.observability.writers import write_terminal_line
         write_terminal_line(line)
@@ -202,6 +220,104 @@ def _extract_planner_decision(text: str) -> dict | None:
 # ─────────────────────────── The renderer ────────────────────────────
 
 
+# ── Streaming-reasoning focus state ─────────────────────────────────
+#
+# The "focus-follows-most-recent" stream model: at any moment one
+# agent's reasoning has "the open line" on the terminal. When another
+# agent emits a delta we close the open line with ``\n``, open a new
+# line with that agent's prefix, and start streaming its chunks
+# inline. Within an agent's open line, chunks concatenate word-by-word
+# as the model emits them.
+#
+# All access to these globals MUST go through ``_STREAM_LOCK`` —
+# parallel fan-out workers stream concurrently and a partial-write
+# from one would otherwise interleave at the byte level into another's
+# in-progress line.
+#
+# ``current_agent`` — agent_id that currently owns the open line, or
+#                    ``None`` if no line is currently open.
+# ``at_line_start`` — True when the next chunk must emit a prefix
+#                    first (after a focus switch or a natural \n in
+#                    the model's reasoning output).
+import threading as _threading  # local alias — top-level threading is used elsewhere
+_STREAM_LOCK = _threading.Lock()
+_STREAM_FOCUS: dict[str, Any] = {
+    "current_agent": None,
+    "at_line_start": True,
+}
+
+
+def _stream_write(text: str) -> None:
+    """Write `text` to stderr AND tee it (ANSI-stripped) to the file
+    sink in ``displayed_terminal_logs.log``. No newline is added.
+
+    This is the only path that should touch stderr during reasoning
+    streaming — going through ``print(... flush=True)`` would
+    auto-append ``\n`` and break the mid-line chunk concatenation.
+    """
+    if not text:
+        return
+    try:
+        sys.stderr.write(text)
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001
+        pass
+    # Lazy import — avoids ``observability → writers → live → ...``
+    # cycle at module load time.
+    try:
+        from src.observability.writers import write_terminal_chunk
+        write_terminal_chunk(text)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _stream_open_line(agent: str) -> None:
+    """Emit the line-opening prefix ``HH:MM:SS  💭 <agent>  `` for a
+    new streaming line owned by ``agent``. Caller must hold
+    :data:`_STREAM_LOCK`.
+    """
+    ag = _agent_tag(agent)
+    head = _paint("💭 ", _DIM, _CYAN)
+    tag = _paint(f"{ag} ", _DIM, _CYAN)
+    _stream_write(f"{_now()}  {head}{tag}")
+
+
+def _stream_close_line() -> None:
+    """If there's an open streaming line, terminate it with ``\n`` and
+    clear the focus. Caller must hold :data:`_STREAM_LOCK`.
+    """
+    if _STREAM_FOCUS["current_agent"] is not None and not _STREAM_FOCUS["at_line_start"]:
+        _stream_write("\n")
+    _STREAM_FOCUS["current_agent"] = None
+    _STREAM_FOCUS["at_line_start"] = True
+
+
+def _stream_split_keep_newlines(text: str) -> list[str]:
+    """Split ``text`` so each ``\n`` becomes its own token.
+
+    Example: ``"abc\ndef\n"`` → ``["abc", "\n", "def", "\n"]``. Used
+    by :meth:`_Live.thinking_delta` to interleave content writes with
+    line-boundary handling — every natural newline in the model's
+    reasoning closes the current prefixed line and re-opens a fresh
+    prefixed continuation line under the same agent.
+    """
+    if not text:
+        return []
+    out: list[str] = []
+    buf = ""
+    for ch in text:
+        if ch == "\n":
+            if buf:
+                out.append(buf)
+                buf = ""
+            out.append("\n")
+        else:
+            buf += ch
+    if buf:
+        out.append(buf)
+    return out
+
+
 class _Live:
     """Singleton — call methods on the module-level ``LIVE`` instance.
 
@@ -214,21 +330,14 @@ class _Live:
         # Per-node dedup of duplicated AIMessage content (planner emits
         # the same JSON twice across retry+repaired-parse path).
         self._seen_msg_hashes: set[int] = set()
-        # Per-LLM-call thinking state, keyed by the LangChain run_id
-        # UUID. Each entry holds:
-        #   started   — perf_counter timestamp
-        #   agent     — agent_id label for the header
-        #   model     — display string
-        #   delta_seen— True once any reasoning delta has arrived
-        #               (suppresses heartbeat — deltas already prove
-        #               liveness and the heartbeat would race them)
-        #   last_delta— perf_counter of the most recent delta
-        #   on_new_line — True when the next delta needs to start on a
-        #                 fresh line (after the header, after a "still
-        #                 thinking" heartbeat). Guards against deltas
-        #                 appearing concatenated on the same line as
-        #                 prior emit() output.
-        #   heartbeat_task — asyncio.Task or None
+        # Per-LLM-call thinking state, keyed by the LangChain run UUID.
+        # Each entry just records the start time + agent_id so
+        # ``thinking_finished`` can compute duration and verify the
+        # ``thinking_delta`` calls have a known matching open call.
+        # The old heartbeat machinery was removed — reasoning deltas
+        # ARE the liveness signal now.
+        #
+        # Shape: ``{"started": float, "agent": str, "model": str}``.
         self._think_state: dict[Any, dict[str, Any]] = {}
         # Startup banner runs once per process even if the runner
         # invokes the renderer multiple times (e.g. langgraph dev).
@@ -690,14 +799,6 @@ class _Live:
     # bar.
     _CONTEXT_WARN_INPUT_TOKENS = 100_000
 
-    # Heartbeat cadence — how often to print "…still thinking" while
-    # the model is producing zero reasoning deltas. 30 s lands between
-    # "too noisy" and "useful pulse" for the typical xhigh-effort
-    # 30 s – 3 min Codex thinking phase.
-    _HEARTBEAT_SECS = float(os.environ.get(
-        "SWARM_LIVE_THINK_HEARTBEAT_SECS", "30",
-    ))
-
     def thinking_started(
         self,
         *,
@@ -706,93 +807,32 @@ class _Live:
         model: str,
         reasoning_effort: str = "",
     ) -> None:
-        """Print the "🧠 thinking…" header for a new LLM call and
-        schedule a heartbeat task.
+        """Record that an LLM call has begun for this run_id.
 
-        Mode behaviour:
-          - silent: no output, no heartbeat.
-          - compact / verbose: header + per-delta streaming of the
-            model's chain-of-thought summary as it arrives, plus a
-            heartbeat fallback when no delta has been seen for
-            ``_HEARTBEAT_SECS`` (catches calls where Codex batches the
-            summary at the end rather than streaming it mid-flight).
+        NO screen output — the previous design printed a
+        ``🧠 thinking…`` header and ran a 30 s heartbeat ("…still
+        thinking (Xs elapsed)") if no reasoning deltas arrived. Both
+        were removed because the new streaming flow IS the liveness
+        signal: as soon as the model produces reasoning chunks, the
+        delta sink writes them inline (see :meth:`thinking_delta`).
+        If a call produces zero reasoning chunks (e.g. quick
+        zero-reasoning replies, errors), the user just sees the
+        ``thinking_finished`` done-line when the call returns.
 
-        ``model`` and ``reasoning_effort`` are accepted for back-compat
-        but no longer rendered — the startup banner shows both, and
-        repeating them on every call was pure noise. Re-add a glyph
-        here if you ever start mixing models within a single run.
-
-        Idempotent — calling twice with the same ``run_id`` cancels
-        the previous heartbeat and starts fresh.
+        We still keep a small per-run_id state record so
+        :meth:`thinking_delta` and :meth:`thinking_finished` can
+        validate that the run_id is known and compute the call
+        duration. ``reasoning_effort`` is accepted for back-compat
+        with existing call sites; not rendered.
         """
-        mode = _mode()
-        if mode == "silent":
+        del reasoning_effort  # accepted for back-compat, not rendered
+        if _mode() == "silent":
             return
-
-        # Cancel any pre-existing state for this run_id (LangChain
-        # doesn't normally re-emit start with the same UUID, but
-        # defensive — leaked tasks would race the heartbeat).
-        self._cancel_heartbeat(run_id)
-
-        ag = _agent_tag(agent)
-        head = _paint("🧠 ", _DIM, _CYAN)
-        body = _paint("thinking…", _DIM)
-        _emit(f"{_now()}  {head}{ag} {body}")
-
-        # Record state for delta routing + heartbeat.
         self._think_state[run_id] = {
-            "started":     time.perf_counter(),
-            "agent":       agent,
-            "model":       model,
-            "delta_seen":  False,
-            "last_delta":  time.perf_counter(),
-            "on_new_line": True,  # next delta starts on its own line
-            "heartbeat_task": None,
+            "started": time.perf_counter(),
+            "agent":   agent,
+            "model":   model,
         }
-        # Schedule the heartbeat. If we're not running inside an event
-        # loop (sync ChatCodex._generate path, tests), skip it — the
-        # heartbeat is a quality-of-life feature, not load-bearing.
-        try:
-            loop = asyncio.get_running_loop()
-            self._think_state[run_id]["heartbeat_task"] = loop.create_task(
-                self._heartbeat_loop(run_id),
-            )
-        except RuntimeError:
-            # No running loop — skip heartbeat. Done line still fires.
-            pass
-
-    async def _heartbeat_loop(self, run_id: Any) -> None:
-        """Per-call heartbeat. Emits "…still thinking (Xs elapsed)"
-        every ``_HEARTBEAT_SECS`` *if* no reasoning delta has arrived
-        in that window. Cancelled by ``thinking_finished``.
-        """
-        try:
-            while True:
-                await asyncio.sleep(self._HEARTBEAT_SECS)
-                state = self._think_state.get(run_id)
-                if state is None:
-                    return  # call finished while we slept
-                # If a delta arrived recently, the user already has
-                # mid-call signal — skip this beat.
-                quiet_for = time.perf_counter() - state["last_delta"]
-                if quiet_for < self._HEARTBEAT_SECS:
-                    continue
-                elapsed = time.perf_counter() - state["started"]
-                ag = _agent_tag(state["agent"])
-                head = _paint("🧠 ", _DIM, _CYAN)
-                body = _paint(
-                    f"…still thinking ({elapsed:.0f}s elapsed)", _DIM,
-                )
-                # If a delta was streaming on a continuation line,
-                # break to a fresh line BEFORE the heartbeat so we
-                # don't concatenate it onto in-progress text. Mark
-                # ``on_new_line`` so the next delta also starts fresh.
-                if not state["on_new_line"]:
-                    print("", file=sys.stderr, flush=True)
-                state["on_new_line"] = True
-                _emit(f"{_now()}  {head}{ag} {body}")
-        except asyncio.CancelledError:
-            return
 
     def thinking_delta(
         self,
@@ -801,58 +841,66 @@ class _Live:
         run_id: Any,
         text: str,
     ) -> None:
-        """Stream a chunk of the model's chain-of-thought summary to
-        stderr. Called from inside the SSE parser (via the closure
-        built in ``ChatCodex._build_reasoning_sink``) so deltas land
-        live as the model produces them.
+        """Stream one chunk of the model's chain-of-thought to stderr
+        and to ``displayed_terminal_logs.log``.
 
-        Mode behaviour:
-          - silent: suppressed (delta-seen still recorded so the
-            silent-mode heartbeat — if any — self-suppresses).
-          - compact / verbose: dim cyan, written directly without a
-            ``_now()`` timestamp prefix so successive deltas
-            concatenate into a running paragraph rather than
-            fragmenting per chunk. The first delta after the header
-            (or after a heartbeat / cross-call interruption) gets a
-            12-column indent so the streamed paragraph aligns under
-            the timestamp gutter.
+        Concurrency model — "focus follows most-recent". At any moment
+        one agent's reasoning has the open terminal line. When a chunk
+        arrives from a different agent we terminate the current open
+        line with ``\\n``, open a new prefixed line with the new
+        agent's tag, and start streaming the new chunks inline. Within
+        an agent's open line, successive chunks concatenate
+        word-by-word as the model emits them. Natural ``\\n`` characters
+        inside the model's reasoning also close the current line and
+        open a continuation line under the same agent — that's how
+        Codex separates "thoughts" in the summary.
+
+        The lock + focus dance is required because fan-out runs N
+        parallel workers, all of which can call this method
+        concurrently. Without serialisation their chunks would
+        interleave at the byte level inside ``sys.stderr.write`` and
+        the output would be illegible.
+
+        Silent mode is a complete no-op (no state mutation either —
+        the previous heartbeat-suppression bookkeeping is gone with
+        the heartbeat).
         """
-        if not text:
+        if not text or _mode() == "silent":
             return
-        if _mode() == "silent":
-            # Silent mode renders nothing, but we still record the
-            # delta so the heartbeat suppresses itself — keeps the
-            # state machine consistent across modes.
-            state = self._think_state.get(run_id)
-            if state is not None:
-                state["delta_seen"] = True
-                state["last_delta"] = time.perf_counter()
+        # Unknown run_id (e.g. late delta after thinking_finished, or
+        # uninitialised call sites) → drop silently. Without this
+        # guard a stray late delta could open a line that never
+        # closes.
+        if self._think_state.get(run_id) is None:
             return
 
-        state = self._think_state.get(run_id)
-        if state is None:
-            # Late delta after thinking_finished — drop silently.
-            return
-        state["delta_seen"] = True
-        state["last_delta"] = time.perf_counter()
+        with _STREAM_LOCK:
+            # On focus change, close whatever line is currently open
+            # (if any), then mark that the next write needs to emit
+            # the new agent's line-opening prefix.
+            if _STREAM_FOCUS["current_agent"] != agent:
+                if (
+                    _STREAM_FOCUS["current_agent"] is not None
+                    and not _STREAM_FOCUS["at_line_start"]
+                ):
+                    _stream_write("\n")
+                _STREAM_FOCUS["current_agent"] = agent
+                _STREAM_FOCUS["at_line_start"] = True
 
-        # If we're starting a fresh continuation block (right after
-        # the header or after a heartbeat broke the line), emit an
-        # indent prefix so the streaming text aligns under the
-        # header column.
-        if state["on_new_line"]:
-            indent = " " * 12  # matches the existing 💭 hanging indent
-            sys.stderr.write(_paint(indent, _DIM, _CYAN))
-            state["on_new_line"] = False
-
-        # Write the raw delta. Trailing newlines split the stream
-        # across multiple visual lines — preserve them but reset
-        # on_new_line so the next delta re-indents.
-        out = _paint(text, _DIM, _CYAN)
-        sys.stderr.write(out)
-        if text.endswith("\n"):
-            state["on_new_line"] = True
-        sys.stderr.flush()
+            # Walk the incoming text, emitting prefix on each fresh
+            # line and a trailing ``\n`` whenever the text crosses a
+            # line boundary. Empty strings between consecutive ``\n``
+            # are handled correctly (they emit an empty content
+            # segment between two newlines, producing a blank line).
+            for token in _stream_split_keep_newlines(text):
+                if token == "\n":
+                    _stream_write("\n")
+                    _STREAM_FOCUS["at_line_start"] = True
+                    continue
+                if _STREAM_FOCUS["at_line_start"]:
+                    _stream_open_line(agent)
+                    _STREAM_FOCUS["at_line_start"] = False
+                _stream_write(_paint(token, _DIM, _CYAN))
 
     def thinking_finished(
         self,
@@ -868,36 +916,42 @@ class _Live:
         peak_input: int = 0,
         error: str | None = None,
     ) -> None:
-        """Close the streaming thinking line for ``run_id`` and emit
-        the per-call "done" summary. Always cancels the heartbeat.
+        """Close the streaming line (if this agent currently holds
+        focus) and emit a one-line done summary with token counts.
 
-        Compact and verbose both get the done line; only the format
-        differs slightly. Silent mode still cancels the heartbeat
-        (it must, to avoid leaking asyncio tasks) but emits nothing.
+        The done summary keeps the previous shape:
+        ``HH:MM:SS  ✓ <agent>  done (Xms, in=… out=… think=…)`` —
+        useful for grep'ing total cost / call rate per agent in the
+        saved log. On error it's painted red; on
+        ``peak_input >= _CONTEXT_WARN_INPUT_TOKENS`` it's painted
+        yellow with the context-rot warning.
         """
-        # Cancel heartbeat first so it can't fire after the done
-        # line is painted.
-        self._cancel_heartbeat(run_id)
+        del model  # banner already shows it; per-call repetition is noise
         state = self._think_state.pop(run_id, None)
-
+        del state  # presence-only check; no fields are read here
         mode = _mode()
         if mode == "silent":
             return
 
-        # If a delta was mid-line in verbose mode, flush a newline
-        # so the done line lands cleanly.
-        if state is not None and not state.get("on_new_line", True):
-            print("", file=sys.stderr, flush=True)
+        # If this agent was holding the open streaming line, close it
+        # so the done-summary doesn't get appended to the running
+        # reasoning paragraph.
+        with _STREAM_LOCK:
+            if _STREAM_FOCUS["current_agent"] == agent:
+                if not _STREAM_FOCUS["at_line_start"]:
+                    _stream_write("\n")
+                _STREAM_FOCUS["current_agent"] = None
+                _STREAM_FOCUS["at_line_start"] = True
 
         ag = _agent_tag(agent)
         rot = peak_input >= self._CONTEXT_WARN_INPUT_TOKENS
 
         if error:
-            head = _paint("🧠 ", _BOLD, _RED)
+            head = _paint("✗ ", _BOLD, _RED)
             body = _paint(
-                f"failed ({_fmt_ms(duration_ms)}, {error})", _RED,
+                f"{ag} failed ({_fmt_ms(duration_ms)}, {error})", _RED,
             )
-            _emit(f"{_now()}  {head}{ag} {body}")
+            _emit(f"{_now()}  {head}{body}")
             return
 
         tokens_part = (
@@ -909,37 +963,19 @@ class _Live:
             tokens_part += f" running_in={_fmt_tokens(running_input)}"
 
         if rot:
-            head = _paint("🧠 ", _BOLD, _YELLOW)
+            head = _paint("✓ ", _BOLD, _YELLOW)
             tail = _paint(
-                f"done ({_fmt_ms(duration_ms)}, {tokens_part})  "
+                f"{ag} done ({_fmt_ms(duration_ms)}, {tokens_part})  "
                 f"⚠ context-rot at peak={_fmt_tokens(peak_input)}",
                 _BOLD, _YELLOW,
             )
-            _emit(f"{_now()}  {head}{ag} {tail}")
+            _emit(f"{_now()}  {head}{tail}")
         else:
-            head = _paint("🧠 ", _DIM, _CYAN)
+            head = _paint("✓ ", _DIM, _CYAN)
             body = _paint(
-                f"done ({_fmt_ms(duration_ms)}, {tokens_part})", _DIM,
+                f"{ag} done ({_fmt_ms(duration_ms)}, {tokens_part})", _DIM,
             )
-            _emit(f"{_now()}  {head}{ag} {body}")
-
-    def _cancel_heartbeat(self, run_id: Any) -> None:
-        """Cancel and forget the heartbeat task for ``run_id`` if any.
-
-        Idempotent — safe to call when no task exists or after the
-        task has already completed.
-        """
-        state = self._think_state.get(run_id)
-        if state is None:
-            return
-        task = state.get("heartbeat_task")
-        if task is None:
-            return
-        try:
-            if not task.done():
-                task.cancel()
-        except Exception:  # noqa: BLE001
-            pass
+            _emit(f"{_now()}  {head}{body}")
 
     # -------- Back-compat shim ----------
     #

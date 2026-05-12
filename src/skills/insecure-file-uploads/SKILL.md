@@ -15,7 +15,7 @@ finding upload surfaces that fail to enforce content, extension,
 MIME, or path constraints.
 
 Upload surfaces are high-risk: server-side execution (RCE), stored
-XSS, malware distribution, storage takeover, DoS. Modern stacks mix
+XSS, hosting unwanted binaries, storage takeover, DoS. Modern stacks mix
 direct-to-cloud uploads, background processors, and CDNs —
 authorization and validation must hold across every step.
 
@@ -43,7 +43,7 @@ authorization and validation must hold across every step.
    (Content-Type override, key path traversal, expiry-window replay,
    ACL upgrade through metadata).
 
-## Attack Surface
+## input surface
 
 - Web / mobile / API uploads, direct-to-cloud (S3 / GCS / Azure)
   presigned flows, resumable / multipart protocols (tus, S3 MPU).

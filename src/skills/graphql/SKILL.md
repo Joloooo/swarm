@@ -41,7 +41,7 @@ every argument as a potential injection sink.
    roles, payments, files, or settings — test IDOR and missing
    authorization.
 
-## Attack Surface
+## input surface
 
 GraphQL bugs live wherever the client controls query shape, arguments,
 or operation type. Don't only look at top-level queries — most real

@@ -33,7 +33,7 @@ channels. Treat every string concatenation into SQL as suspect.
 5. **Second-order SQLi**: Check if input stored in one place is used unsanitized
    in queries elsewhere.
 
-## Attack Surface
+## input surface
 
 Injection lives wherever user input meets SQL construction. Don't only look
 at the obvious `WHERE id = ?` shape — modern apps leak through several

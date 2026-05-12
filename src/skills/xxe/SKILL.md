@@ -24,7 +24,7 @@ the parser is proven hardened.
 2. **Probe entity expansion**: send a tiny doc with an internal entity
    first to confirm the parser expands entities at all.
 3. **External DTD probe**: if internal entities work, escalate to an
-   external DTD pointing at an attacker-controlled host (parameter
+   external DTD pointing at an user-controlled host (parameter
    entities are the high-yield variant — they often work where ordinary
    external entities are blocked).
 4. **File disclosure**: `file://` (or `php://filter` on PHP) on a
@@ -36,7 +36,7 @@ the parser is proven hardened.
    HTTP callbacks using parameter entities chained through an external
    DTD.
 
-## Attack Surface
+## input surface
 
 **Capabilities**:
 - File disclosure — read server files and configuration.

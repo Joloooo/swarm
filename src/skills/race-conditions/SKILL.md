@@ -37,7 +37,7 @@ and multi-step workflow as adversarially concurrent.
 6. **Quantify**: a race needs evidence — confirm the same outcome
    succeeded N>1 times when it should only have succeeded once.
 
-## Attack Surface
+## input surface
 
 - **Read-modify-write** sequences without atomicity or proper
   locking.

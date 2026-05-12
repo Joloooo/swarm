@@ -27,7 +27,7 @@ often leading directly to RCE.
 5. Produce a non-destructive PoC (e.g. `touch /tmp/ssti_poc.txt`) and
    document engine, payload, and exploitation path.
 
-## Attack Surface
+## input surface
 Inject into every user-controlled input that may reach a template:
 - URL query parameters and path segments
 - POST form fields, JSON keys and values, XML bodies

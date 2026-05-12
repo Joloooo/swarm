@@ -37,7 +37,7 @@ shells only when needed.
 5. **Stabilize**: only after a quiet oracle confirms execution, escalate
    to an interactive shell — and only if the engagement scope allows it.
 
-## Attack Surface
+## input surface
 
 - **Command execution** — OS command execution via wrappers (shells,
   system utilities, CLIs).
@@ -205,7 +205,7 @@ Overwrite executable / auto-loaded paths via writable upload or PUT:
 Pollute `Object.prototype` via JSON `__proto__` or query
 `?__proto__[x]=y`, then escalate when sink reads polluted properties:
 - `child_process` options: set `shell` and `argv0` so spawned processes
-  inherit attacker-controlled command.
+  inherit user-controlled command.
 - `NODE_OPTIONS=--require /tmp/x.js` if a downstream `spawn` honors env.
 
 ### File upload → RCE
@@ -254,7 +254,7 @@ Pollute `Object.prototype` via JSON `__proto__` or query
   (busybox, sh, env); Windows variations (PowerShell vs. CMD);
   constrained-language bypasses.
 
-## Post-exploitation
+## post-access
 
 - **Privilege escalation** — `sudo -l`; SUID binaries; capabilities
   (`getcap -r / 2>/dev/null`).

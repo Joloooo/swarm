@@ -2,7 +2,10 @@
 name: edr-evasion
 description: Use when an engagement requires post-exploitation persistence on a Windows / Linux endpoint and EDR / AV is in the way — userland AMSI / ETW / NTDLL unhooking, syscall-direct invocation, sleep obfuscation (Ekko, Foliage), in-memory loaders, encrypted payload staging, parent-PID spoofing, indirect-syscall stubs, BYOVD (Bring-Your-Own-Vulnerable-Driver), Cobalt-Strike / Sliver / Mythic profile hardening, network-IDS evasion (domain fronting, jitter, TLS fingerprint cloning). Out of normal web-pentest scope — only relevant when the engagement explicitly authorizes endpoint compromise.
 metadata:
-  agent_id: techniques-edr-evasion
+  # Reference-only — out of normal SwarmAttacker scope (web-focused).
+  # Removed from the planner's dispatchable menu by dropping ``agent_id``;
+  # body stays on disk for cross-skill lookup. Restore the line to make
+  # it dispatchable again.
   methodology: custom
   config_name: edr-evasion
   tools: [bash]

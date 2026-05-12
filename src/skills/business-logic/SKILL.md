@@ -29,7 +29,7 @@ payloads.
 5. **Race conditions**: Test for TOCTOU issues by sending concurrent
    requests (e.g., double-spending, duplicate actions).
 
-## Attack Surface
+## input surface
 
 - **Financial logic** — pricing, discounts, payments, refunds, credits,
   chargebacks.

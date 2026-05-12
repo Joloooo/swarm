@@ -41,7 +41,7 @@ bind subject × action AT the service that performs the action.
    API specs, OpenAPI docs, GraphQL schema for actions that aren't
    in the visible UI.
 
-## Attack Surface
+## input surface
 
 - **Vertical authz** — privileged / admin / staff-only actions
   reachable by basic users.

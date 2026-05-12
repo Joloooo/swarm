@@ -2,7 +2,9 @@
 name: crash-analysis
 description: Use when triaging a crash for exploitability — interpreting GDB / WinDbg / lldb output, identifying primitive (read / write / overflow / UAF / type-confusion), determining attacker-controlled state at crash time (registers, memory contents), exploitability scoring (e.g., MSEC / "exploitable" classifier criteria), reproduction-minimization (delta debugging, AFL crash trimming), and pivoting from crash to a working PoC. Bridges fuzzing output to the exploit-development skill.
 metadata:
-  agent_id: vulntype-crash-analysis
+  # Reference-only — out of normal SwarmAttacker scope. Removed from the
+  # dispatchable menu by dropping ``agent_id``. Restore the line to
+  # re-enable.
   methodology: custom
   config_name: crash-analysis
   tools: [bash]

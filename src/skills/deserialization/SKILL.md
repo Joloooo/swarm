@@ -48,7 +48,7 @@ gadget chain, and magic-method abuse.
 6. **Chain to impact** — RCE, file write, SSRF, auth bypass via
    tampered identity fields, downstream injection via tainted fields.
 
-## Attack Surface
+## input surface
 
 Every place an application accepts opaque bytes that a deserializer
 must touch is a candidate. Don't only look at HTTP bodies.

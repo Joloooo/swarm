@@ -36,7 +36,7 @@ planes — turn one fetch into credentials, lateral movement, or RCE.
 5. **Blind SSRF**: If no response body, use time-based detection or
    out-of-band DNS/HTTP callbacks.
 
-## Attack Surface
+## input surface
 
 **Direct fetchers**: outbound HTTP/HTTPS proxies, link previewers,
 importers, webhook testers, Open Graph/preview generators.

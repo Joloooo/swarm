@@ -53,7 +53,7 @@ from uuid import UUID
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.outputs import LLMResult
 
-from src.observability import run_dir
+from src.observability.writers import append_event
 
 logger = logging.getLogger(__name__)
 
@@ -150,23 +150,43 @@ def reset_totals() -> None:
 
 # ── Disk path resolution ────────────────────────────────────────────────
 #
-# The actual writer (and lock) live in ``src/observability/writers.py``
-# alongside every other JSONL appender. Here we just bind a local name
-# so the existing call sites in this file (and the back-compat
-# ``_append_request_event`` alias) keep working without changes.
+# Every LLM event lands in ``logs/run-<id>/full_logs.jsonl`` via
+# :func:`src.observability.writers.append_event`. The phase-keyed event
+# dicts produced by the start / end / error helpers below get translated
+# into ``type="llm_start" | "llm_end" | "llm_error"`` rows.
 
 
-def _llm_log_path(run_id: str) -> "pathlib.Path":  # noqa: F821 — string annot
-    """Where ``logs/run-<id>/llm_calls.jsonl`` lives. Convenience wrapper."""
-    return run_dir(run_id) / "llm_calls.jsonl"
+def _append_llm_event(run_id: str | None, event: dict) -> None:
+    """Adapter — translate a phase-keyed event dict into ``append_event``.
 
+    Existing call sites in this file build a dict with ``phase`` plus
+    ``run_id`` / ``agent_id`` / ``node`` / token usage / etc. The unified
+    writer expects ``type`` and ``run_id`` separately, so we pop those
+    out and forward the rest as kwargs.
 
-# Forward to the central writer — single grep target for the file.
-from src.observability.writers import append_llm_event as _append_llm_event
+    Tolerates ``run_id=None`` by no-op'ing (matches the prior writer's
+    contract, which mattered for callbacks that fire before the run id
+    is propagated).
+    """
+    if not event:
+        return
+    phase = event.pop("phase", "end")
+    # Drop the locally-stamped ts — append_event adds its own with
+    # millisecond precision so we don't double-stamp.
+    event.pop("ts", None)
+    # Also drop the bare run_id key from the row body (it's the first
+    # arg below) so it doesn't appear twice.
+    rid = event.pop("run_id", None) or run_id
+    type_name = {
+        "start": "llm_start",
+        "end":   "llm_end",
+        "error": "llm_error",
+    }.get(phase, f"llm_{phase}")
+    append_event(rid, type_name, **event)
+
 
 # Back-compat alias — the start-side event builder still calls
-# ``_append_request_event``; redirect it to the unified writer so
-# callers don't all need updating in this commit.
+# ``_append_request_event``; the adapter handles both halves of the call.
 _append_request_event = _append_llm_event
 
 

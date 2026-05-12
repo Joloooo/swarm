@@ -79,8 +79,23 @@ def _now() -> str:
 
 
 def _emit(line: str) -> None:
-    """Single stderr write — keeps every line atomic across threads."""
+    """Single stderr write — keeps every line atomic across threads.
+
+    Also tees the line (ANSI-stripped) to
+    ``logs/run-<run_id>/displayed_terminal_logs.log`` if the runner
+    has configured a sink via :func:`writers.set_terminal_log_file`.
+    The sink is a no-op when unset (e.g. langgraph Studio sessions),
+    so this function stays cheap on the hot path.
+    """
     print(line, file=sys.stderr, flush=True)
+    # Lazy import — avoids the ``observability -> writers -> ...`` cycle
+    # at module load and lets tests that monkey-patch writers still work.
+    try:
+        from src.observability.writers import write_terminal_line
+        write_terminal_line(line)
+    except Exception:
+        # The screen got the data; never let a missing sink crash a run.
+        pass
 
 
 # ─────────────── Helpers for extracting text ──────────────────────────

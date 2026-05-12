@@ -1,67 +1,59 @@
-"""Per-run observability: one folder per graph invocation.
+"""Per-run observability — two artefacts per graph invocation.
 
-For each run we write everything under ``logs/run-<run_id>/``:
+Layout under ``logs/run-<run_id>/``:
 
-    nodes.jsonl           one line per BaseNode.__call__ — duration, summary,
-                          full state shape before/after, full text of every
-                          newly added message/finding/agent_result. This is
-                          the file you read when answering "what did node X
-                          do?" — both the timeline and the per-node forensic
-                          replay live here.
-    llm_calls.jsonl       two lines per LLM call: one ``phase=start`` row
-                          with the full prompt sent, and one ``phase=end``
-                          row (or ``phase=error``) with usage tokens,
-                          duration, and response. Same file so live tail
-                          shows both sides of every round-trip.
-    terminal_events.jsonl tool-call log (redirected from src/tools/shell/)
-    refusals.jsonl        one row per cyber_policy refusal, flagged as a
-                          deletion candidate — see writers.py:append_refusal
-    worker_traces.jsonl   one row per LangChain message in a worker's trace
-    final_state.json      graph.ainvoke() return value, in full
-    summary.md            human-readable digest of the whole run
+  ``full_logs.jsonl``
+      Every LLM call (start + end / error) and every shell event,
+      chronologically interleaved. One row per event with a ``type``
+      field so consumers can filter:
+        * ``llm_start``  — full prompt sent to the model
+        * ``llm_end``    — response + token usage + duration
+        * ``llm_error``  — refusal / network error / timeout
+        * ``shell_*``    — bash + tmux events (command, output, blocked,
+                           spawn, …) emitted by ``src/tools/shell/``.
+      ``jq 'select(.type == "llm_error")' full_logs.jsonl`` is the fast
+      path to "why did the model refuse".
 
-The run_id embeds the benchmark id (or target host) so that ``ls logs/``
+  ``displayed_terminal_logs.log``
+      Plain-text verbatim mirror of the LIVE ticker output, ANSI-stripped
+      so it opens cleanly in any editor and ``grep`` works without
+      regex tricks. Whatever you saw on the terminal during a run is
+      what's in this file.
+
+The run_id embeds the benchmark id (or target host) so ``ls logs/``
 tells you immediately which run hit which target.
-
-Nothing is truncated. Disk is cheap; thesis analysis needs the full record.
 
 Package layout:
 
-  * ``writers.py``       — every JSONL appender + the final state writer.
-                           One function per artefact, sharing one
-                           ``_JsonlWriter`` helper.
-  * ``state.py``         — pure functions that compute the per-node state
-                           shape and diff (consumed by writers.append_node_event).
-  * ``live.py``          — the ``LIVE`` singleton: stderr rendering with
-                           silent / compact / verbose modes.
+  * ``writers.py``         — ``append_event`` (full_logs.jsonl) +
+                             ``write_terminal_line`` / ``set_terminal_log_file``
+                             (displayed_terminal_logs.log).
+  * ``live.py``            — the ``LIVE`` singleton: silent / compact /
+                             verbose stderr rendering, tees through to
+                             the terminal-log sink in ``writers.py``.
   * ``decision_parser.py`` — shared planner-JSON extractor used by both
                              ``live.py`` and ``src/nodes/planner.py``.
-  * ``summary/``         — the post-run summary.md generator, split into
-                           four small files. Public surface is
-                           ``summary.write_summary``.
 
-History note: prior to the consolidation in 2026-05 we wrote separate
-``state_diffs.jsonl`` (per-node shape diff) and ``llm_requests.jsonl``
-(per-call prompts). Both were folded into the files above so the run
-dir has 6 artefacts instead of 8. The shape-diff data is still there
-under each ``nodes.jsonl`` row's ``before`` / ``after`` / ``delta``
-keys; the request bodies are still there under ``llm_calls.jsonl``
-``phase=start`` rows.
+History — the pre-refactor dir had seven artefacts plus a
+``summary/`` markdown builder. Five never got read in practice
+(``nodes.jsonl``, ``worker_traces.jsonl``, ``refusals.jsonl``,
+``final_state.json``, ``summary.md``). The two artefacts above are
+the survivors that actually answer debugging questions.
 """
 
 from __future__ import annotations
 
-# Disk writers — one function per artefact.
+# Disk writers — unified event log + terminal log sink.
 from src.observability.writers import (
     LOGS_ROOT,
-    append_llm_event,
-    append_node_event,
-    append_refusal,
-    append_terminal_event,
-    append_worker_trace,
+    append_event,
+    full_logs_path,
+    get_terminal_log_file,
     make_run_id,
     run_dir,
-    write_final_state,
+    set_terminal_log_file,
+    terminal_log_path,
+    write_terminal_line,
 )
 
 # Live stderr renderer + stdlib logging adapters.
@@ -71,22 +63,17 @@ from src.observability.live import (
     LiveLogHandler,
 )
 
-# Summary builder.
-from src.observability.summary import count_refusals, write_summary
-
 __all__ = [
     "HttpxQuietFilter",
     "LIVE",
     "LOGS_ROOT",
     "LiveLogHandler",
-    "append_llm_event",
-    "append_node_event",
-    "append_refusal",
-    "append_terminal_event",
-    "append_worker_trace",
-    "count_refusals",
+    "append_event",
+    "full_logs_path",
+    "get_terminal_log_file",
     "make_run_id",
     "run_dir",
-    "write_final_state",
-    "write_summary",
+    "set_terminal_log_file",
+    "terminal_log_path",
+    "write_terminal_line",
 ]

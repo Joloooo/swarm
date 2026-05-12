@@ -12,10 +12,14 @@ This module defines ``RefusalError`` — the typed exception raised by
 the retry layer (``src/refusals/retry.py``) once every plain and
 vocabulary-filtered retry tier has exhausted. It carries enough
 structured context (agent_id, skill_name, iteration, request size,
-attempts made, last tier attempted, raw refusal message) for the
-observability writer (``src/observability/writers.py:append_refusal``)
-to produce a useful diagnostic JSONL row without any further state
-inspection.
+attempts made, last tier attempted, raw refusal message) to identify
+the worker / call site at the point of failure. Pre-refactor a
+dedicated ``refusals.jsonl`` writer consumed these fields; that
+artefact was removed in the 2026-05 log consolidation because the
+same information already appears on the ``llm_error`` row in
+``full_logs.jsonl`` produced by the LangChain callback. The
+``RefusalError`` type is still useful for shaping which retry tier
+runs next in ``src/refusals/retry.py``.
 
 Provider-agnostic: the catch site translates whatever provider-
 specific refusal exception (today ``CodexCyberPolicyError``) into a

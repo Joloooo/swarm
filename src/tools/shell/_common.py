@@ -2,28 +2,26 @@
 
 Both ``bash.py`` and ``tmux.py`` need the same plumbing:
 
-- A JSONL run-event log (``terminal_events.jsonl``) with locking so
-  parallel agents don't interleave half-lines.
-- A live-stream "watch the agent think" stderr printer gated on
-  ``SWARM_VERBOSE=1``.
+- One row per shell event in the shared ``full_logs.jsonl`` (via
+  :func:`src.observability.writers.append_event` — same file the LLM
+  events land in, interleaved chronologically).
+- A live-stream "watch the agent think" stderr printer.
 - Head-and-tail truncation that keeps output the LLM sees bounded.
 - A per-run, per-agent workspace directory under
   ``~/swarm-workspace/<run_id>/<agent_id>/`` where files produced by
   the agent (``nmap -oX scan.xml``, sqlmap session dirs, ...) land
   with predictable relative paths.
 
-Keeping these here means both shell tools log into the same file with
-the same shape, so jq queries work uniformly. It also lets you swap
-backends per tool without touching the observability layer.
+Keeping these here means both shell tools log via the same writer with
+the same shape, so ``jq 'select(.type == "bash_output")'`` works
+uniformly. It also lets you swap backends per tool without touching
+the observability layer.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import sys
-import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -86,85 +84,41 @@ def workspace_for(agent_id: str) -> Path:
 
 
 # -- JSONL event log ---------------------------------------------------------
-
-
-def _init_log_file() -> Path:
-    """Pick a log file path, falling back to /tmp if the preferred dir is unwritable."""
-    ts = datetime.now().strftime("%Y-%m-%d_%Hh%Mm%Ss")
-    preferred = Path(os.getenv("SWARM_LOG_DIR", "logs"))
-    for base in (preferred, Path("/tmp/swarmattacker-logs")):
-        try:
-            base.mkdir(parents=True, exist_ok=True)
-            return base / f"run-{ts}.jsonl"
-        except Exception:
-            continue
-    # Last resort: a flat file in /tmp with a unique name.
-    return Path(f"/tmp/swarmattacker-run-{ts}.jsonl")
-
-
-_LOG_FILE: Path = _init_log_file()
-_LOG_LOCK = threading.Lock()
-
-
-def _verbose_mode_at_import() -> bool:
-    """Best-effort check of config.verbosity.mode at module-load time.
-
-    Returns False if config isn't loaded yet (the conservative default —
-    suppress the chatty banner when in doubt).
-    """
-    try:
-        from src.graph import config
-        return config.verbosity.mode == "verbose"
-    except Exception:
-        return False
-
-
-# Tell the user where the temp log lives. Only useful in verbose mode —
-# in compact/silent mode the runner immediately redirects this, so the
-# temp path is misleading. Skip the banner there.
-if _verbose_mode_at_import():
-    print(
-        f"[swarmattacker] terminal event log → {_LOG_FILE.resolve()}\n"
-        f"[swarmattacker] live-tail with:  tail -f {_LOG_FILE} | jq",
-        file=sys.stderr,
-        flush=True,
-    )
+#
+# Pre-refactor we wrote shell events to a standalone ``terminal_events.jsonl``
+# with its own log-file plumbing (set_log_file / get_log_file). The unified
+# log layout collapses that into ``logs/run-<run_id>/full_logs.jsonl`` via
+# :func:`src.observability.writers.append_event` — same file the LLM events
+# land in, interleaved chronologically.
+#
+# ``set_log_file`` / ``get_log_file`` are kept as no-op shims for any
+# remaining call sites in third-party / older harnesses. The runner does
+# not call them any more.
 
 
 def set_log_file(path: Path) -> Path:
-    """Redirect terminal event logging to *path* for the rest of the process.
-
-    Used by the benchmark runner to land all artifacts of a run under a
-    shared ``logs/run-<run_id>/`` directory. The parent directory is
-    created if missing. Returns the new path so callers can confirm.
-
-    Safe to call multiple times across a multi-benchmark sweep — each
-    benchmark sets its own log file before invoking the graph.
+    """No-op shim. Shell events now go to ``full_logs.jsonl`` via the
+    central writer; the path argument is ignored. Retained so existing
+    benchmark harnesses can call it without breaking.
     """
-    global _LOG_FILE
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _LOG_FILE = path
-    # Only announce the redirect in verbose mode. In compact/silent the
-    # path is also visible at the end of the run via ``summary →`` and
-    # ``terminal_events.jsonl`` lives next to it, so the up-front line
-    # is just noise.
-    try:
-        from src.graph import config
-        is_verbose = config.verbosity.mode == "verbose"
-    except Exception:
-        is_verbose = False
-    if is_verbose:
-        print(
-            f"[swarmattacker] terminal event log → {_LOG_FILE.resolve()}",
-            file=sys.stderr,
-            flush=True,
-        )
-    return _LOG_FILE
+    return Path(path)
 
 
 def get_log_file() -> Path:
-    return _LOG_FILE
+    """Compatibility shim — there is no longer a single shell log file.
+
+    Returns a placeholder path inside the most recent run dir so a
+    caller printing the value still sees something sensible. For the
+    real artefacts, look under ``logs/run-<run_id>/``.
+    """
+    try:
+        from src.observability.writers import LOGS_ROOT, get_terminal_log_file
+        sink = get_terminal_log_file()
+        if sink is not None:
+            return sink
+        return LOGS_ROOT
+    except Exception:
+        return Path("logs")
 
 
 def _verbose_print(event: str, *, agent: str | None, payload: dict) -> None:
@@ -204,32 +158,55 @@ def _verbose_print(event: str, *, agent: str | None, payload: dict) -> None:
 
 
 def log_event(event: str, *, agent: str | None = None, **payload: Any) -> None:
-    """Append one JSON event to the run log. Failures are swallowed.
+    """Append one shell event to ``full_logs.jsonl`` via the unified writer.
 
     Never raises — logging is observability, not a hard dependency. If
-    the disk is full or the file gets unlinked mid-run, the graph should
-    still finish. Writes are serialised through a lock so parallel
-    agents don't produce interleaved half-lines.
+    the writer can't open its file, the graph still finishes.
 
-    When ``SWARM_VERBOSE=1`` is set we also stream a human-readable
-    rendering of ``command`` / ``output`` events to stderr so the user
-    can watch the agent live without a second ``tail -f`` window.
+    Also streams a human-readable rendering of ``command`` / ``output``
+    events to stderr via the LIVE renderer so the user can watch the
+    agent live (mode-gated by ``config.verbosity.mode``).
     """
     _verbose_print(event, agent=agent, payload=payload)
     try:
-        record: dict = {
-            "ts": datetime.now().isoformat(timespec="milliseconds"),
-            "event": event,
-        }
+        # Lazy import — keeps this module dependency-light and avoids
+        # any chance of an import-time cycle with ``src.observability``.
+        from src.observability.writers import append_event
+
+        fields: dict[str, Any] = dict(payload)
         if agent is not None:
-            record["agent"] = agent
-        record.update(payload)
-        line = json.dumps(record, default=str, ensure_ascii=False) + "\n"
-        with _LOG_LOCK, _LOG_FILE.open("a", encoding="utf-8") as f:
-            f.write(line)
+            fields["agent"] = agent
+        # The shell backends use bare event names like ``bash_command``,
+        # ``bash_output``, ``session_kill_noop``. Prefix with ``shell_``
+        # is unnecessary — bash/tmux events are already distinctive.
+        # Consumers filter with e.g. ``jq 'select(.type == "bash_output")'``.
+        append_event(_RUN_ID_for_logging(), event, **fields)
     except Exception:
         # Intentionally swallow. Do NOT let a log failure interrupt a run.
         pass
+
+
+def _RUN_ID_for_logging() -> str | None:
+    """Best-effort lookup of the active run_id for the unified writer.
+
+    The shell tools have always derived their workspace path from the
+    in-process ``_RUN_ID`` (see ``set_run_id`` at the top of this file).
+    The unified writer expects a different shape — the same id the
+    observability layer was initialised with. Pull it from the
+    terminal-log sink path if the runner set one; fall back to the
+    shell ``_RUN_ID``.
+    """
+    try:
+        from src.observability.writers import get_terminal_log_file
+        sink = get_terminal_log_file()
+        if sink is not None:
+            # Path shape: logs/run-<run_id>/displayed_terminal_logs.log
+            parent = sink.parent.name  # "run-<run_id>"
+            if parent.startswith("run-"):
+                return parent[len("run-"):]
+    except Exception:
+        pass
+    return _RUN_ID
 
 
 # Legacy alias — terminal.py used a leading underscore. We expose both so

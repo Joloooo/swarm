@@ -153,7 +153,7 @@ config = SimpleNamespace(
         web_search_max_crawled_chars = _env_int("SWARM_WEB_MAX_CHARS",          8000),
         # ── Codex model + reasoning controls (GPT-5.x family) ──
         # Model slug. Override with SWARM_MODEL=<slug>.
-        model                        = _env_str("SWARM_MODEL", "gpt-5.4-mini",
+        model                        = _env_str("SWARM_MODEL", "gpt-5.5",
                                                 choices=("gpt-5.5", "gpt-5.4",
                                                          "gpt-5.4-mini",
                                                          "gpt-5.3-codex",
@@ -165,7 +165,7 @@ config = SimpleNamespace(
         # in nodes.jsonl for benchmark debugging. Trade-off: 2-4x cost vs
         # medium. Drop to "high" or "medium" via SWARM_REASONING_EFFORT
         # for cheaper development runs.
-        reasoning_effort             = _env_str("SWARM_REASONING_EFFORT", "xhigh",
+        reasoning_effort             = _env_str("SWARM_REASONING_EFFORT", "medium",
                                                 choices=("none", "minimal", "low",
                                                          "medium", "high", "xhigh")),
         # Summary: whether human-readable chain-of-thought is returned.

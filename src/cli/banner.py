@@ -26,8 +26,13 @@ _LOGO = """\
    ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝
 """
 
-_NAME    = "               SWARM"
-_TAGLINE = "        Autonomous Swarm Pentesting Agent"
+# Centered visually under the ~48-column-wide ASCII art:
+#   - "SWARMATTACKER" (13 chars) ⇒ ~18-space indent puts it under the
+#     midpoint of the logo block.
+#   - "Fully autonomous Pentesting agent" (33 chars) ⇒ ~8-space indent
+#     so it sits roughly centered too.
+_NAME    = "                  SWARMATTACKER"
+_TAGLINE = "        Fully autonomous Pentesting agent"
 
 
 def show(config_path: Path) -> None:
@@ -47,10 +52,11 @@ def show(config_path: Path) -> None:
     console.print()
     # Logo: bold cyan reads well on both light and dark terminals.
     console.print(Text(_LOGO, style="bold cyan"), end="")
-    # Project name: bold magenta, makes "SWARM" pop under the art.
+    # Project name: bold magenta, makes "SWARMATTACKER" pop under the art.
     console.print(Text(_NAME, style="bold magenta"))
-    # Tagline: dim italic so it sits as a subtitle without competing.
-    console.print(Text(_TAGLINE, style="dim italic"))
+    # Tagline: plain white so the one-line description reads cleanly
+    # without competing with the magenta title above.
+    console.print(Text(_TAGLINE, style="white"))
     console.print()
     # Config path: useful when debugging "why didn't my edit stick?".
     cfg_line = Text.assemble(

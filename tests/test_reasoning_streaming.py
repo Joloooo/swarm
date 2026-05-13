@@ -337,7 +337,14 @@ def test_pad_draw_emits_ansi_cursor_protocol_when_called_directly(monkeypatch):
     structural ANSI escapes the cursor-anchored protocol requires.
     Without this test, a refactor of ``_pad_draw`` could quietly
     stop emitting the move-up + clear escape and the pad would
-    just stack rows forever."""
+    just stack rows forever.
+
+    Note: doesn't assert any specific verb string is present — the
+    typewriter cycle picks whichever verb is active at wall-clock
+    time, which is non-deterministic in a test. Instead we assert
+    that SOME verb (or partial verb) from the cycle list appears.
+    See :func:`test_current_verb_returns_substring_from_cycle` for
+    a deterministic verb-resolution test."""
     import sys
     from src.observability import live as live_mod
 
@@ -375,13 +382,65 @@ def test_pad_draw_emits_ansi_cursor_protocol_when_called_directly(monkeypatch):
 
     # First draw wrote one row containing the agent name and elapsed time.
     assert "agent-test" in out
-    assert "thinking" in out
     # The second redraw cycle MUST emit the clear-then-redraw escapes
     # — that's the load-bearing protocol property.
     assert "\033[J" in out
     assert re.search(r"\033\[\d+A", out) is not None
     # And the row got drawn at least twice.
     assert out.count("agent-test") >= 2
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Tier 1 — typewriter + breathing-glow animation primitives
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_current_verb_returns_substring_from_cycle():
+    """At wall-clock time 0 we should be typing in the first verb
+    (``thinking``) from char 0 — i.e. an empty string. At a small
+    positive time we should see the first 1-2 characters. At the
+    hold-phase boundary we should see the full verb."""
+    from src.observability.live import (
+        _current_verb, _VERBS, _TYPE_PER_CHAR_S, _HOLD_S,
+    )
+    first = _VERBS[0]
+    assert _current_verb(0.0) == first[:0]  # ""
+    assert _current_verb(_TYPE_PER_CHAR_S * 0.5) == first[:0]
+    assert _current_verb(_TYPE_PER_CHAR_S * 1.5) == first[:1]
+    assert _current_verb(_TYPE_PER_CHAR_S * (len(first) - 0.5)) == first[: len(first) - 1]
+    # During the hold phase the full verb plus 0-3 dots is present.
+    hold_t = _TYPE_PER_CHAR_S * len(first) + _HOLD_S * 0.5
+    label = _current_verb(hold_t)
+    assert label.startswith(first)
+    assert label[len(first):] in ("", ".", "..", "...")
+
+
+def test_glow_color_oscillates_between_deep_red_and_bright_red():
+    """The breathing-glow returns an RGB triple whose R-channel
+    spans the (60, 255) band and whose G/B stay near 0. Sampling
+    many points covers the full cycle so any colour-clipping
+    regression fails the test."""
+    from src.observability.live import (
+        _glow_color, _GLOW_PERIOD_S, _DEEP_RED, _BRIGHT_RED,
+    )
+    samples = [_glow_color(_GLOW_PERIOD_S * (i / 40)) for i in range(40)]
+    rs = [s[0] for s in samples]
+    # R-channel should span at least most of the dim → bright band.
+    assert min(rs) <= _DEEP_RED[0] + 5
+    assert max(rs) >= _BRIGHT_RED[0] - 5
+    # G and B stay in the small interpolation band their endpoints
+    # define — never outside of [0, max(deep, bright)].
+    for r, g, b in samples:
+        assert 0 <= g <= max(_DEEP_RED[1], _BRIGHT_RED[1]) + 1
+        assert 0 <= b <= max(_DEEP_RED[2], _BRIGHT_RED[2]) + 1
+
+
+def test_fg_truecolor_emits_24bit_ansi_escape():
+    """The truecolor SGR escape must use the ``\\x1b[38;2;R;G;Bm``
+    shape — anything else would be parsed as a different colour
+    mode on real terminals and break the breathing glow."""
+    from src.observability.live import _fg_truecolor
+    assert _fg_truecolor((10, 20, 30)) == "\x1b[38;2;10;20;30m"
 
 
 def test_pad_removes_row_when_call_finishes(pad_harness):

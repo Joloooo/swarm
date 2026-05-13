@@ -23,6 +23,7 @@ import json
 import logging
 import re
 import time
+from contextlib import aclosing, closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -972,39 +973,37 @@ def _convert_tools_to_responses_format(tools: list[dict]) -> list[dict]:
     return converted
 
 
-def _build_reasoning_sink() -> Callable[[str], None] | None:
+def _build_reasoning_sink(
+    agent_id: str,
+    lc_run_id: Any,
+) -> Callable[[str], None] | None:
     """Build a per-call sink that forwards reasoning deltas to the live
-    renderer.
+    renderer for ``agent_id`` / ``lc_run_id``.
 
-    The sink resolves the calling agent_id and the LangChain run UUID
-    from the ``CURRENT_LLM_CALL`` ContextVar (set by
-    :class:`src.llm.callbacks.TokenLoggingCallback` on
-    ``on_chat_model_start``) and routes each delta to
-    ``LIVE.thinking_delta``. When called outside an instrumented LLM
-    invocation (e.g. tests, ``ask_focused`` paths that don't go
-    through the callback) the ContextVar is empty and we return ``None``
-    so the parser short-circuits the streaming hook entirely.
+    ``agent_id`` and ``lc_run_id`` are caller-supplied and read from the
+    ``run_manager`` parameter of ``_generate`` / ``_agenerate`` — NOT
+    from a ContextVar.
 
-    Important: the LIVE renderer keys its per-call state by the
-    LangChain run UUID (``lc_run_id`` in the ContextVar dict) —
-    that's the same key ``thinking_started`` / ``thinking_finished``
-    use. Reading ``ctx["run_id"]`` here (the SwarmAttacker run-id
-    string) instead would silently drop every delta because the
-    renderer's state lookup would miss. The bug was in place for
-    months; if you "fix" this back to ``run_id`` streaming will
-    stop again.
+    Historical note: a prior version of this function read the calling
+    identity from a ``CURRENT_LLM_CALL`` ContextVar populated by
+    ``TokenLoggingCallback.on_chat_model_start``. The ContextVar
+    appeared empty at every read site because LangChain dispatches
+    async callbacks in a child task — its ``set`` mutated the child's
+    context copy, never the parent's. The reasoning sink in the parent
+    (``_agenerate``) saw ``None`` on every call and short-circuited;
+    no reasoning summary ever reached the terminal. Verified by
+    instrumenting both call sites with ``id(asyncio.current_task())``
+    — the IDs always differed. Reading identity directly from
+    ``run_manager`` avoids the cross-task isolation entirely. See
+    ``tests/FAILURES.md`` 2026-05-13 for the full diagnosis.
+
+    Returns ``None`` when ``agent_id`` is empty (caller didn't supply
+    identity, e.g. salvage / ``ask_focused`` paths) so the parser
+    short-circuits its streaming hook entirely. ``lc_run_id`` may be
+    ``None`` — the live renderer tolerates it.
     """
-    try:
-        from src.llm.callbacks import CURRENT_LLM_CALL  # lazy — circular guard
-    except Exception:  # noqa: BLE001
+    if not agent_id:
         return None
-    ctx = CURRENT_LLM_CALL.get()
-    if not ctx:
-        return None
-    agent_id = ctx.get("agent_id") or "_unknown"
-    # MUST use lc_run_id (LangChain UUID), not run_id (SwarmAttacker
-    # run-id string) — see docstring above.
-    lc_run_id = ctx.get("lc_run_id")
 
     def _sink(text: str) -> None:
         try:
@@ -1014,6 +1013,28 @@ def _build_reasoning_sink() -> Callable[[str], None] | None:
             pass
 
     return _sink
+
+
+def _identity_from_run_manager(run_manager: Any) -> tuple[str, Any]:
+    """Pull ``(agent_id, lc_run_id)`` out of a LangChain run_manager.
+
+    Both fields are read directly from the run_manager (which lives in
+    the same async task as ``_generate`` / ``_agenerate``) rather than
+    from a ContextVar — see :func:`_build_reasoning_sink` for the
+    history of why the ContextVar route was broken.
+
+    Returns ``("", None)`` when the run_manager is absent or lacks
+    metadata (sync-test paths, direct ``ChatCodex._generate`` calls
+    that bypass LangChain's callback pipeline).
+    """
+    if run_manager is None:
+        return "", None
+    meta = getattr(run_manager, "metadata", None) or {}
+    agent_id = str(
+        meta.get("agent_id") or meta.get("ls_agent") or ""
+    )
+    lc_run_id = getattr(run_manager, "run_id", None)
+    return agent_id, lc_run_id
 
 
 def _build_additional_kwargs(resp: CodexResponse) -> dict[str, Any]:
@@ -1168,20 +1189,45 @@ class ChatCodex(BaseChatModel):
 
         req = self._build_request_kwargs(messages, tools, tool_choice)
 
-        # Build the reasoning-delta sink. Forwards each
-        # chain-of-thought summary chunk to the live renderer as it
-        # arrives, attributed to whichever agent_id is currently active
-        # (read from a ContextVar set by TokenLoggingCallback).
-        reasoning_sink = _build_reasoning_sink()
+        # Build the reasoning-delta sink. Identity comes directly from
+        # the run_manager (same async task as this method) — NOT from a
+        # ContextVar, because async-callback dispatch puts the
+        # ContextVar set in a child task whose mutation never reaches
+        # the parent. See ``_build_reasoning_sink`` docstring.
+        agent_id, lc_run_id = _identity_from_run_manager(run_manager)
+        reasoning_sink = _build_reasoning_sink(agent_id, lc_run_id)
 
         for attempt in range(MAX_API_ATTEMPTS):
             try:
-                events = stream_codex(tokens, **req)
-                resp = parse_stream_to_response(
-                    events, on_reasoning_delta=reasoning_sink,
-                )
+                # ``closing`` guarantees the SSE generator's ``with
+                # httpx.Client() as client`` / ``client.stream(...) as
+                # resp`` blocks unwind on every exit path — normal
+                # return, break, and (the case that matters here)
+                # exceptions raised by the parser when it sees a
+                # ``response.failed`` event mid-stream. Without it,
+                # CPython would close the generator via refcount on
+                # the next line, but PyPy / cycle-creating callbacks
+                # could defer that to GC. See ``_agenerate`` for the
+                # async-path counterpart where this is not optional.
+                with closing(stream_codex(tokens, **req)) as events:
+                    resp = parse_stream_to_response(
+                        events, on_reasoning_delta=reasoning_sink,
+                    )
                 break
             except CodexStreamError as e:
+                # Attach the request payload to policy-refusal errors
+                # so ``src/refusals/retry.py`` can dump it to the live
+                # renderer for debugging. Defensive try/except: some
+                # exception subclasses use ``__slots__`` and setattr
+                # fails silently — that's acceptable since the dump
+                # path is opt-in / best-effort.
+                if isinstance(
+                    e, (CodexCyberPolicyError, CodexInvalidPromptError),
+                ):
+                    try:
+                        e._swarm_request = req  # type: ignore[attr-defined]
+                    except (AttributeError, TypeError):
+                        pass
                 if not e.retryable or attempt == MAX_API_ATTEMPTS - 1:
                     raise
                 delay = _retry_delay(e, attempt)
@@ -1226,18 +1272,50 @@ class ChatCodex(BaseChatModel):
 
         req = self._build_request_kwargs(messages, tools, tool_choice)
 
-        # Live-streaming sink for reasoning deltas — see _generate for
-        # rationale.
-        reasoning_sink = _build_reasoning_sink()
+        # Live-streaming sink for reasoning deltas — see ``_generate`` and
+        # ``_build_reasoning_sink`` for why we read identity from
+        # ``run_manager`` here instead of from a ContextVar.
+        agent_id, lc_run_id = _identity_from_run_manager(run_manager)
+        reasoning_sink = _build_reasoning_sink(agent_id, lc_run_id)
 
         for attempt in range(MAX_API_ATTEMPTS):
             try:
-                events = astream_codex(tokens, **req)
-                resp = await aparse_stream_to_response(
-                    events, on_reasoning_delta=reasoning_sink,
-                )
+                # ``aclosing`` is the real fix here. ``astream_codex``
+                # is an async generator holding open ``async with
+                # httpx.AsyncClient(...)`` and ``async with
+                # client.stream(...) as resp`` contexts at its
+                # suspended ``yield``. When ``aparse_stream_to_response``
+                # raises mid-stream (e.g. on a ``response.failed`` event
+                # carrying a ``cyber_policy`` refusal), Python's async
+                # iteration protocol does NOT auto-close the producer —
+                # cleanup is purely GC-driven. Without ``aclosing`` the
+                # generator stayed alive until shutdown, and the
+                # asyncgen finalizer hook ran ``aclose()`` against an
+                # already-tearing-down event loop, producing the
+                # ``error: an error occurred during closing of
+                # asynchronous generator <astream_codex / AsyncClient.
+                # stream>`` warning wall at end-of-run. ``aclosing``
+                # awaits ``events.aclose()`` deterministically on every
+                # exit path (success, exception, break) so the httpx
+                # contexts unwind on the same task that opened them,
+                # while the loop is still healthy.
+                async with aclosing(astream_codex(tokens, **req)) as events:
+                    resp = await aparse_stream_to_response(
+                        events, on_reasoning_delta=reasoning_sink,
+                    )
                 break
             except CodexStreamError as e:
+                # Same pattern as the sync path — stash the request
+                # payload on policy-refusal exceptions so the live
+                # renderer can dump it. See ``_generate`` comment for
+                # rationale.
+                if isinstance(
+                    e, (CodexCyberPolicyError, CodexInvalidPromptError),
+                ):
+                    try:
+                        e._swarm_request = req  # type: ignore[attr-defined]
+                    except (AttributeError, TypeError):
+                        pass
                 if not e.retryable or attempt == MAX_API_ATTEMPTS - 1:
                     raise
                 delay = _retry_delay(e, attempt)

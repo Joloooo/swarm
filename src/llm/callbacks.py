@@ -58,21 +58,25 @@ from src.observability.writers import append_event
 logger = logging.getLogger(__name__)
 
 
-# ── Per-call context (read by ChatCodex's reasoning-stream sink) ────────
+# ── Per-call context (legacy — kept for read-only external consumers) ────
 #
-# When the renderer needs to attribute an in-flight reasoning delta to a
-# specific agent — without plumbing agent_id through every parser call —
-# we stash the call's identity on a ContextVar that the LLM provider
-# reads when building its delta closure. This avoids needing to extend
-# parser signatures with kwargs that mean nothing to non-Codex providers.
+# NOTE: ChatCodex no longer reads this ContextVar — its reasoning-stream
+# sink now pulls agent_id and lc_run_id directly from the run_manager
+# parameter of ``_generate`` / ``_agenerate``. The ContextVar route was
+# broken because LangChain dispatches async callbacks in a child task,
+# so the ``CURRENT_LLM_CALL.set(...)`` below mutates the child's context
+# copy and the parent (where ``_agenerate`` runs) never sees the value.
+# See ``src/llm/codex.py::_build_reasoning_sink`` docstring and
+# ``tests/FAILURES.md`` 2026-05-13 for the full diagnosis.
+#
+# We still populate the ContextVar at start time and clear it at end /
+# error so any external consumer that has come to depend on its
+# contents keeps working. It's effectively dead code from the
+# perspective of reasoning streaming and can be removed once a search
+# confirms no third-party code reads it.
 #
 # Shape: {"agent_id": str, "run_id": str | None, "node": str | None,
 #         "model": str | None, "lc_run_id": UUID}
-#
-# The ContextVar is set in ``on_chat_model_start`` / ``on_llm_start`` and
-# reset in ``on_llm_end`` / ``on_llm_error``. ContextVars copy correctly
-# across asyncio.create_task boundaries, so parallel fan-out workers
-# each see their own agent_id without collision.
 
 CURRENT_LLM_CALL: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "swarm_current_llm_call", default=None,

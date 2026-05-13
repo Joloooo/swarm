@@ -47,6 +47,7 @@ _BLUE    = "\033[34m"
 _MAGENTA = "\033[35m"
 _CYAN    = "\033[36m"
 _WHITE   = "\033[37m"
+_BR_RED  = "\033[91m"  # bright (light) red — used for refused-prompt dumps
 
 
 def _color_enabled() -> bool:
@@ -81,22 +82,27 @@ def _now() -> str:
 def _emit(line: str) -> None:
     """Single stderr write — keeps every line atomic across threads.
 
-    Also tees the line (ANSI-stripped) to
-    ``logs/run-<run_id>/displayed_terminal_logs.log`` if the runner
-    has configured a sink via :func:`writers.set_terminal_log_file`.
-    The sink is a no-op when unset (e.g. langgraph Studio sessions),
-    so this function stays cheap on the hot path.
+    Steps under :data:`_STREAM_LOCK`:
 
-    Closes any in-flight reasoning-stream line first so the new
-    line lands cleanly on its own row. Without this guard a normal
-    ``LIVE.shell_command(...)`` printed mid-stream would concatenate
-    onto whatever ``thinking_delta`` was writing.
+      1. If a reasoning stream is mid-line, terminate it with ``\\n`` so
+         the new line lands cleanly on its own row instead of getting
+         appended to the streaming paragraph.
+      2. Erase any drawn "thinking pad" rows so the new line replaces
+         the cursor row they used to anchor to.
+      3. Print the line to stderr and tee it (ANSI-stripped) to
+         ``displayed_terminal_logs.log`` via :func:`writers.write_terminal_line`.
+         The tee is a no-op when no sink is configured (e.g. langgraph
+         Studio).
+      4. Redraw the thinking pad below the new line so concurrent
+         in-flight LLM calls stay visible.
+
+    All four steps run while holding :data:`_STREAM_LOCK`; without
+    that, parallel writers in the swarm corrupt each other's lines and
+    pad clear/draw can race against the ticker thread.
     """
-    # Lazy import — module-load ordering guarantees this is available
-    # by the time _emit fires, but the try/except keeps tests that
-    # mock the writers module safe.
     try:
         with _STREAM_LOCK:
+            # Step 1 — close an in-flight reasoning stream.
             if (
                 _STREAM_FOCUS["current_agent"] is not None
                 and not _STREAM_FOCUS["at_line_start"]
@@ -104,15 +110,28 @@ def _emit(line: str) -> None:
                 _stream_write("\n")
                 _STREAM_FOCUS["at_line_start"] = True
                 _STREAM_FOCUS["current_agent"] = None
-    except Exception:  # noqa: BLE001
-        pass
 
-    print(line, file=sys.stderr, flush=True)
-    try:
-        from src.observability.writers import write_terminal_line
-        write_terminal_line(line)
-    except Exception:
-        # The screen got the data; never let a missing sink crash a run.
+            # Step 2 — erase pad rows so the new line lands in their spot.
+            _pad_clear()
+
+            # Step 3 — atomic stderr write + disk tee.
+            print(line, file=sys.stderr, flush=True)
+            try:
+                from src.observability.writers import write_terminal_line
+                write_terminal_line(line)
+            except Exception:
+                # The screen got the data; never let a missing sink
+                # crash a run.
+                pass
+
+            # Step 4 — redraw the pad under the new content.
+            _pad_draw()
+    except Exception:  # noqa: BLE001
+        # Defensive: if anything in the lock-held block raises (a
+        # ``print`` to a closed pipe, etc.) we still want the rest of
+        # the run to continue. The user already saw the line on the
+        # first attempt — at worst the pad state ends up stale and
+        # corrects itself on the next emit.
         pass
 
 
@@ -245,6 +264,243 @@ _STREAM_FOCUS: dict[str, Any] = {
     "current_agent": None,
     "at_line_start": True,
 }
+
+
+# ── Multi-row "thinking pad" anchored below the live stream ────────────
+#
+# The pad solves the question "is anything happening?" during the gap
+# between an LLM request firing and the response arriving — a window
+# that can stretch from a few seconds (low effort, simple prompt) to
+# several minutes (xhigh effort, big context, parallel fan-out). Without
+# a visible indicator the terminal looks frozen and the operator can't
+# tell whether the run is stuck, throttled, or simply thinking.
+#
+# Mental model: the cursor sits just below the most recent normal-output
+# line. The pad lives BELOW the cursor — one row per in-flight Codex
+# call. On every state-change (new line emitted, call started, call
+# finished) and every 200 ms (background ticker), we:
+#
+#   1. Move cursor up ``_PAD_LINES_DRAWN`` rows and clear from there to
+#      the end of screen — this erases the previous pad rendering.
+#   2. Emit normal output (or just stay where we are for the ticker).
+#   3. Re-render the pad below the new cursor position.
+#
+# The result: pad rows visually "stick" to the bottom of the live
+# stream, scrolling up only as new normal-output lines push them.
+#
+# Constraints / non-goals:
+#   - Disabled on non-TTY stderr (file redirects, pipes, CI). Falls back
+#     to silent — the disk artefact ``displayed_terminal_logs.log``
+#     contains every normal-output line so no information is lost.
+#   - The pad itself is NEVER teed to disk — it's ephemeral UI, and
+#     teeing the 5 Hz redraws would balloon the log without adding
+#     anything not already covered by ``thinking_started`` /
+#     ``thinking_finished`` lines.
+#   - Skipped while a reasoning-summary stream is mid-line — the
+#     streaming text is itself a liveness signal, and drawing the pad
+#     beneath it would split the paragraph across pad redraws.
+#
+# All access to ``_PAD`` and ``_PAD_LINES_DRAWN`` is serialised by
+# ``_STREAM_LOCK`` — the same lock that already serialises ``_emit`` and
+# ``_stream_write``, which means the pad code never deadlocks against
+# other live-output paths.
+
+# Braille spinner — same frame set Codex CLI / many Rich progress bars
+# use. 10 frames cycled at 200 ms gives a 2 s period; readable at a
+# glance without being seizure-inducing during heavy concurrent thinking.
+_SPINNER_FRAMES: tuple[str, ...] = (
+    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+)
+
+# Pad refresh cadence. 200 ms is the standard "feels live" interval used
+# by tqdm / Rich. Faster (50 ms) wastes CPU on terminals that won't
+# update faster than ~60 Hz anyway; slower (500 ms+) makes the spinner
+# feel laggy.
+_PAD_TICK_S: float = 0.2
+
+# Active call registry. Key is the LangChain run_id (UUID) so the keys
+# match those passed to ``thinking_started`` / ``thinking_finished``.
+# Value carries everything we need to render one row.
+_PAD: dict[Any, dict[str, Any]] = {}
+
+# How many pad rows are currently drawn below the cursor. Updated under
+# ``_STREAM_LOCK`` by ``_pad_clear`` / ``_pad_draw``.
+_PAD_LINES_DRAWN: int = 0
+
+# Daemon ticker thread + its stop signal. Spun up lazily on the first
+# ``thinking_started`` call so the pad never costs anything in non-LLM
+# scripts (importing live.py shouldn't start a thread).
+_PAD_TICKER_THREAD: _threading.Thread | None = None
+_PAD_TICKER_STOP: _threading.Event = _threading.Event()
+
+
+def _pad_enabled() -> bool:
+    """Return True iff we should render the pad to this stderr.
+
+    Three conditions: stderr is a real TTY (otherwise cursor-move
+    escapes corrupt the file), live mode is not silent, and the
+    operator hasn't disabled it via ``SWARM_LIVE_THINKING_PAD=0``.
+    """
+    if os.environ.get("SWARM_LIVE_THINKING_PAD") == "0":
+        return False
+    if _mode() == "silent":
+        return False
+    try:
+        return bool(sys.stderr.isatty())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _pad_clear() -> None:
+    """Erase the currently-drawn pad from screen.
+
+    Caller MUST hold :data:`_STREAM_LOCK`. After this returns the cursor
+    sits at column 0 of the first row the pad used to occupy, ready for
+    normal-output writes that will land cleanly above where the pad
+    will redraw.
+
+    The ANSI sequence is ``\\r`` (cursor to col 0) + ``\\033[NA`` (up N
+    rows) + ``\\033[J`` (clear from cursor to end of screen). On
+    terminals without these escapes nothing visibly bad happens — they
+    are no-ops on dumb TTYs — but pad rendering will look broken there
+    anyway, which is why ``_pad_enabled`` gates the whole feature.
+    """
+    global _PAD_LINES_DRAWN
+    n = _PAD_LINES_DRAWN
+    if n <= 0:
+        return
+    if _pad_enabled():
+        try:
+            sys.stderr.write(f"\r\033[{n}A\033[J")
+            sys.stderr.flush()
+        except Exception:  # noqa: BLE001
+            pass
+    _PAD_LINES_DRAWN = 0
+
+
+def _pad_draw() -> None:
+    """Render the pad below the current cursor position.
+
+    Caller MUST hold :data:`_STREAM_LOCK`. Skipped when the pad is
+    disabled, when the active set is empty, or while a reasoning-summary
+    stream is currently mid-line (the stream's own text already serves
+    as the liveness indicator and the pad would split it). Sets
+    ``_PAD_LINES_DRAWN`` so the next clear knows how many rows to
+    erase.
+    """
+    global _PAD_LINES_DRAWN
+    if not _pad_enabled() or not _PAD:
+        _PAD_LINES_DRAWN = 0
+        return
+    # Mid-line streaming reasoning: skip. The streaming text itself
+    # proves the call is alive, and the pad would interleave with it.
+    if (
+        _STREAM_FOCUS["current_agent"] is not None
+        and not _STREAM_FOCUS["at_line_start"]
+    ):
+        _PAD_LINES_DRAWN = 0
+        return
+
+    # Pick the spinner frame from wall-clock so concurrent rows stay in
+    # phase — visually calmer than each row having its own counter.
+    frame = _SPINNER_FRAMES[int(time.time() / _PAD_TICK_S) % len(_SPINNER_FRAMES)]
+    try:
+        cols = shutil.get_terminal_size((100, 24)).columns
+    except Exception:  # noqa: BLE001
+        cols = 100
+
+    now = time.perf_counter()
+    rows: list[str] = []
+    # Snapshot the dict — entries may change between this read and the
+    # write loop on slow terminals; copy is cheap.
+    for entry in list(_PAD.values()):
+        elapsed = now - entry.get("started", now)
+        ag = _agent_tag(entry.get("agent", "?"))
+        model = entry.get("model") or ""
+        effort = entry.get("reasoning_effort") or ""
+        spin = _paint(frame, _BOLD, _CYAN)
+        # Elapsed time gets bold past 30 s so a stuck call stands out.
+        time_part = f"{elapsed:5.1f}s"
+        if elapsed > 30:
+            time_part = _paint(time_part, _BOLD, _YELLOW)
+        else:
+            time_part = _paint(time_part, _DIM)
+        label = _paint("thinking", _DIM, _CYAN)
+        meta_bits = []
+        if model:
+            meta_bits.append(_paint(model, _DIM))
+        if effort:
+            meta_bits.append(_paint(f"effort={effort}", _DIM))
+        meta = "  ".join(meta_bits)
+        line = f"  {spin} {ag} {label} {time_part}"
+        if meta:
+            line += f"   {meta}"
+        # Approximate trim to terminal width by ANSI-stripping for length
+        # math — we deliberately keep the colored line unmodified when
+        # it fits, since splitting in the middle of an escape sequence
+        # would corrupt the terminal's state machine.
+        from src.observability.writers import _ANSI_RE
+        visible = _ANSI_RE.sub("", line)
+        if len(visible) > cols:
+            # Hard clip on visible chars by walking forward; keep ANSI
+            # codes intact. Simple and good enough — the only place that
+            # ever overflows is very-long model names on narrow terminals.
+            line = visible[: cols - 1] + "…"
+        rows.append(line)
+
+    if not rows:
+        _PAD_LINES_DRAWN = 0
+        return
+
+    try:
+        sys.stderr.write("\n".join(rows) + "\n")
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001
+        pass
+    _PAD_LINES_DRAWN = len(rows)
+
+
+def _pad_redraw_locked() -> None:
+    """Clear + draw in one atomic operation. Caller MUST hold the lock."""
+    _pad_clear()
+    _pad_draw()
+
+
+def _pad_ticker_main() -> None:
+    """Daemon thread: redraw the pad every :data:`_PAD_TICK_S` seconds.
+
+    Stops only on process exit (the thread is a daemon) or when the
+    stop event is set, which never happens in normal operation —
+    SwarmAttacker runs one process per benchmark and lets it die.
+    """
+    while not _PAD_TICKER_STOP.is_set():
+        time.sleep(_PAD_TICK_S)
+        if not _PAD:
+            continue
+        try:
+            with _STREAM_LOCK:
+                _pad_redraw_locked()
+        except Exception:  # noqa: BLE001 — never crash the daemon
+            pass
+
+
+def _ensure_pad_ticker() -> None:
+    """Start the ticker thread on first use.
+
+    Lazy-start keeps the pad zero-cost in scripts that import live.py
+    but never call ``thinking_started`` (tests, ad-hoc tools).
+    """
+    global _PAD_TICKER_THREAD
+    if _PAD_TICKER_THREAD is not None and _PAD_TICKER_THREAD.is_alive():
+        return
+    _PAD_TICKER_STOP.clear()
+    t = _threading.Thread(
+        target=_pad_ticker_main,
+        name="swarm-thinking-pad",
+        daemon=True,
+    )
+    _PAD_TICKER_THREAD = t
+    t.start()
 
 
 def _stream_write(text: str) -> None:
@@ -807,32 +1063,52 @@ class _Live:
         model: str,
         reasoning_effort: str = "",
     ) -> None:
-        """Record that an LLM call has begun for this run_id.
+        """Register an in-flight LLM call so the pad shows a spinner row.
 
-        NO screen output — the previous design printed a
-        ``🧠 thinking…`` header and ran a 30 s heartbeat ("…still
-        thinking (Xs elapsed)") if no reasoning deltas arrived. Both
-        were removed because the new streaming flow IS the liveness
-        signal: as soon as the model produces reasoning chunks, the
-        delta sink writes them inline (see :meth:`thinking_delta`).
-        If a call produces zero reasoning chunks (e.g. quick
-        zero-reasoning replies, errors), the user just sees the
-        ``thinking_finished`` done-line when the call returns.
+        The pad sits below the cursor and ticks every 200 ms while at
+        least one call is active. Each row reads
+        ``⠋ <agent> thinking 12.3s   gpt-5.5  effort=medium`` and turns
+        bold-yellow on the time once the call has been alive for >30 s
+        so stuck calls are visually obvious without scrolling.
 
-        We still keep a small per-run_id state record so
-        :meth:`thinking_delta` and :meth:`thinking_finished` can
-        validate that the run_id is known and compute the call
-        duration. ``reasoning_effort`` is accepted for back-compat
-        with existing call sites; not rendered.
+        Background: a prior version of this method printed a one-shot
+        ``🧠 thinking…`` header line plus a 30 s heartbeat task that
+        emitted ``…still thinking`` periodically. That worked but
+        cluttered the log: every call added 1-N lines of indicator
+        text to ``displayed_terminal_logs.log``. The pad approach
+        keeps the indicator ephemeral (TTY-only, never teed to disk)
+        and shows ALL concurrent calls at once — which the heartbeat
+        couldn't because each heartbeat ran in its own task and they
+        had no shared rendering surface.
+
+        Silent mode is a no-op. Non-TTY stderr (file redirects, CI)
+        also skips the pad render — the call is still tracked so
+        ``thinking_finished`` can compute duration, but no spinner row
+        is drawn. ``reasoning_effort`` is rendered as a meta chip in
+        the pad row when set.
         """
-        del reasoning_effort  # accepted for back-compat, not rendered
         if _mode() == "silent":
             return
+        now = time.perf_counter()
         self._think_state[run_id] = {
-            "started": time.perf_counter(),
+            "started": now,
             "agent":   agent,
             "model":   model,
         }
+        # Add to the pad registry under the SAME lock that protects
+        # render-state transitions, then redraw so the new row appears
+        # immediately (the ticker would catch it within 200 ms anyway,
+        # but immediate feedback is nicer when an operator just
+        # dispatched a worker).
+        with _STREAM_LOCK:
+            _PAD[run_id] = {
+                "started":          now,
+                "agent":            agent,
+                "model":            model,
+                "reasoning_effort": reasoning_effort,
+            }
+            _pad_redraw_locked()
+        _ensure_pad_ticker()
 
     def thinking_delta(
         self,
@@ -875,6 +1151,13 @@ class _Live:
             return
 
         with _STREAM_LOCK:
+            # Erase the thinking pad so the streaming reasoning paragraph
+            # lands where the spinner row used to sit. The streaming
+            # text is itself a liveness signal — drawing the pad while
+            # text streams below it would interleave a spinner with
+            # the model's words on every tick.
+            _pad_clear()
+
             # On focus change, close whatever line is currently open
             # (if any), then mark that the next write needs to emit
             # the new agent's line-opening prefix.
@@ -931,17 +1214,27 @@ class _Live:
         del state  # presence-only check; no fields are read here
         mode = _mode()
         if mode == "silent":
+            # Even silent mode must deregister the call from the pad —
+            # otherwise a phantom row would linger forever on a future
+            # switch back to compact mode (we don't support live mode
+            # switches today, but defending against stale state is free).
+            _PAD.pop(run_id, None)
             return
 
         # If this agent was holding the open streaming line, close it
         # so the done-summary doesn't get appended to the running
-        # reasoning paragraph.
+        # reasoning paragraph. While holding the same lock, drop the
+        # call from the pad so the spinner row disappears before the
+        # done line is printed — otherwise the operator sees "done…"
+        # followed by a flickering row that immediately vanishes.
         with _STREAM_LOCK:
             if _STREAM_FOCUS["current_agent"] == agent:
                 if not _STREAM_FOCUS["at_line_start"]:
                     _stream_write("\n")
                 _STREAM_FOCUS["current_agent"] = None
                 _STREAM_FOCUS["at_line_start"] = True
+            _PAD.pop(run_id, None)
+            _pad_redraw_locked()
 
         ag = _agent_tag(agent)
         rot = peak_input >= self._CONTEXT_WARN_INPUT_TOKENS
@@ -988,6 +1281,129 @@ class _Live:
         """Deprecated — see ``thinking_started`` /
         ``thinking_finished``. Kept as a no-op for back-compat."""
         return
+
+    # -------- Refused-prompt dump ----------
+
+    def refused_prompt(
+        self,
+        *,
+        agent: str,
+        tier: str,
+        request: dict,
+    ) -> None:
+        """Dump the full Codex request that triggered a policy refusal.
+
+        Rendered in bright (light) red to stderr in ``compact`` and
+        ``verbose`` modes so the operator can read exactly what the
+        model was given and identify the phrase / message / fragment
+        tripping the cyber-policy classifier. Silent mode suppresses.
+
+        ``request`` is the dict produced by
+        ``ChatCodex._build_request_kwargs`` and attached to refusal
+        exceptions as ``e._swarm_request`` (see ``src/llm/codex.py``
+        and ``src/refusals/retry.py``). Keys we display:
+
+          - ``model``, ``reasoning_effort``, ``reasoning_summary``
+            (a single context line)
+          - ``instructions`` (full system prompt)
+          - ``input_items`` (every user / assistant / tool item)
+          - ``tools`` (names only; schemas would dominate the dump)
+
+        Caller is responsible for rate-limiting — this method dumps
+        unconditionally each time it's called. ``retry.py`` only
+        invokes it on the FIRST refusal of each tier so the same
+        input is not re-rendered across tier-1 plain retries.
+        """
+        if _mode() == "silent":
+            return
+
+        on = _color_enabled()
+        lr = _BR_RED if on else ""
+        rs = _RESET if on else ""
+
+        def paint(text: str) -> str:
+            return f"{lr}{text}{rs}"
+
+        rule = "─" * 72
+        _emit(paint(rule))
+        _emit(paint(
+            f"REFUSED INPUT — {agent} (tier={tier}) "
+            f"— what Codex saw before it refused:"
+        ))
+        _emit(paint(rule))
+
+        # One context line — model + reasoning controls.
+        model = request.get("model", "?")
+        effort = request.get("reasoning_effort", "—")
+        rsum = request.get("reasoning_summary", "—")
+        _emit(paint(
+            f"  model={model}   effort={effort}   summary={rsum}"
+        ))
+
+        # System prompt — full.
+        instr = request.get("instructions") or ""
+        _emit(paint(f"─── SYSTEM ({len(instr)} chars) ───"))
+        if instr:
+            for line in instr.splitlines() or [""]:
+                _emit(paint(f"  {line}"))
+        else:
+            _emit(paint("  (empty)"))
+
+        # Input items — full.
+        items = request.get("input_items") or []
+        _emit(paint(f"─── INPUT_ITEMS ({len(items)}) ───"))
+        for i, item in enumerate(items, 1):
+            if not isinstance(item, dict):
+                _emit(paint(f"  [{i}] {item!r}"))
+                continue
+            itype = item.get("type", "?")
+            if itype == "message":
+                role = item.get("role", "?")
+                content = item.get("content") or []
+                _emit(paint(f"  [{i}] message  role={role}"))
+                for block in content:
+                    if isinstance(block, dict):
+                        btype = block.get("type", "?")
+                        text = (
+                            block.get("text")
+                            or block.get("output_text")
+                            or ""
+                        )
+                        if text:
+                            _emit(paint(f"      ({btype})"))
+                            for line in text.splitlines() or [""]:
+                                _emit(paint(f"      {line}"))
+                        else:
+                            _emit(paint(f"      ({btype}) {block!r}"))
+                    else:
+                        _emit(paint(f"      {block!r}"))
+            elif itype == "function_call":
+                name = item.get("name", "?")
+                args = item.get("arguments", "")
+                _emit(paint(f"  [{i}] function_call  name={name}"))
+                for line in str(args).splitlines() or [""]:
+                    _emit(paint(f"      {line}"))
+            elif itype == "function_call_output":
+                cid = item.get("call_id", "?")
+                output = item.get("output", "")
+                _emit(paint(f"  [{i}] function_call_output  call_id={cid}"))
+                for line in str(output).splitlines() or [""]:
+                    _emit(paint(f"      {line}"))
+            else:
+                _emit(paint(f"  [{i}] {itype}: {item!r}"))
+
+        # Tool names — schemas are noise.
+        tools = request.get("tools") or []
+        if tools:
+            names: list[str] = []
+            for t in tools:
+                if isinstance(t, dict):
+                    names.append(str(t.get("name") or t.get("type") or "?"))
+            _emit(paint(
+                f"─── TOOLS ({len(names)}) ───  {', '.join(names)}"
+            ))
+
+        _emit(paint(rule))
 
     # -------- Startup banner ----------
 

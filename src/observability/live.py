@@ -437,26 +437,52 @@ def _current_verb(now_wall: float) -> str:
         for v in _VERBS
     )
     t = now_wall % one_pass
+    # Sub-tick fudge for floating-point boundary stickiness. Without
+    # it, ``4.6 - 4.5 = 0.0999999999999996`` and
+    # ``int(0.0999.../0.10) = 0`` — the type-in's first character
+    # stays empty for one extra tick at every verb transition
+    # because the integer step count rounds down a sliver early.
+    # 1 ns is far below any human-perceivable phase shift and
+    # firmly inside the safe rounding margin for the 100 ms char
+    # step / 400 ms dot beat used here.
+    eps = 1e-9
     for verb in _VERBS:
         v_in = len(verb) * _TYPE_PER_CHAR_S
         v_hold = _HOLD_S
         v_out = len(verb) * _TYPE_PER_CHAR_S  # symmetric
         v_total = v_in + v_hold + v_out + _PAUSE_S
         if t < v_in:
-            # Typing in, left → right.
-            return verb[: int(t / _TYPE_PER_CHAR_S)]
+            # Typing in, left → right. ``t`` can be NEGATIVE here when
+            # the previous verb's slot fell through with a residual
+            # pause (see ``t -= v_total`` below) — that's how we model
+            # the inter-verb gap. ``int(negative / step)`` returns a
+            # negative number, and Python slicing with a negative
+            # ``stop`` keeps all chars EXCEPT the last ``|n|``
+            # ("attacking"[:-3] == "attack"), so without the
+            # ``max(0, …)`` clamp the pause would show the next verb
+            # growing backwards from its END for 400 ms — appearing
+            # as "attac" → "attack" → "attacki" → "attackin" → flash
+            # blank → "a" → "at" → … Real users saw this as the next
+            # verb popping in for a split-second between every
+            # transition. The clamp turns the pause back into a true
+            # blank gap so each verb types in cleanly from scratch.
+            n = int(t / _TYPE_PER_CHAR_S + eps)
+            return verb[: max(0, n)]
         if t < v_in + v_hold:
             # Holding with pulsing trailing dots.
-            dots = int((t - v_in) / _DOT_BEAT_S) % 4
+            dots = int((t - v_in) / _DOT_BEAT_S + eps) % 4
             return verb + "." * dots
         if t < v_in + v_hold + v_out:
             # Typing out, right → left (chars vanish from the tail).
             chars_remaining = (
                 len(verb)
-                - int((t - v_in - v_hold) / _TYPE_PER_CHAR_S)
+                - int((t - v_in - v_hold) / _TYPE_PER_CHAR_S + eps)
             )
             return verb[: max(0, chars_remaining)]
-        # Otherwise: blank pause before the next verb.
+        # Otherwise: blank pause before the next verb. ``t`` goes
+        # negative for the next iteration; the clamp above handles
+        # that correctly so we don't need to special-case the pause
+        # explicitly.
         t -= v_total
     return ""
 

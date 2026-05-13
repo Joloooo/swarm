@@ -415,6 +415,68 @@ def test_current_verb_returns_substring_from_cycle():
     assert label[len(first):] in ("", ".", "..", "...")
 
 
+def test_current_verb_pause_phase_renders_blank_not_partial_next_verb():
+    """Pin the 2026-05-13 visual bug: during the 400 ms inter-verb
+    pause, the label MUST be empty. Before the ``max(0, n)`` clamp
+    in the type-in branch, ``int(negative / 0.10)`` would slice the
+    NEXT verb's letters off its end — Python's
+    ``"attacking"[:-3] == "attack"`` semantics — so the operator
+    briefly saw the next verb pop in for a few frames before the
+    proper type-in started. The fix turns the pause back into a
+    real blank gap.
+
+    We sample several points within the first verb's pause window
+    (between its type-out finishing and the next verb's type-in
+    starting) and assert every sample is the empty string.
+    """
+    from src.observability.live import (
+        _current_verb, _VERBS, _TYPE_PER_CHAR_S, _HOLD_S, _PAUSE_S,
+    )
+    first = _VERBS[0]
+    # End of type-out for the first verb is at:
+    #   v_in + v_hold + v_out = len*type + hold + len*type
+    type_out_ends = (
+        len(first) * _TYPE_PER_CHAR_S
+        + _HOLD_S
+        + len(first) * _TYPE_PER_CHAR_S
+    )
+    # Sample 4 points strictly inside the pause window.
+    for fraction in (0.05, 0.25, 0.5, 0.75, 0.95):
+        t = type_out_ends + _PAUSE_S * fraction
+        label = _current_verb(t)
+        assert label == "", (
+            f"pause-phase label at t={t:.3f}s should be empty, got {label!r}"
+        )
+
+
+def test_current_verb_next_verb_starts_from_empty_after_pause():
+    """Companion to the pause-phase test: right after the pause ends
+    the NEXT verb must start typing in from char 0, NOT mid-word.
+
+    Without the clamp, the transition from pause → next type-in
+    would jump from "attackin" (8 chars) → "" → "a" (1 char). With
+    the clamp it goes "" → "" → "" → "" → "a" cleanly."""
+    from src.observability.live import (
+        _current_verb, _VERBS, _TYPE_PER_CHAR_S, _HOLD_S, _PAUSE_S,
+    )
+    first = _VERBS[0]
+    second = _VERBS[1]
+    # First verb's full slot.
+    first_slot = (
+        len(first) * _TYPE_PER_CHAR_S
+        + _HOLD_S
+        + len(first) * _TYPE_PER_CHAR_S
+        + _PAUSE_S
+    )
+    # Just after pause ends → start of second verb's type-in.
+    assert _current_verb(first_slot + 0.0) == ""
+    # Half a char into type-in → still empty (haven't crossed step).
+    assert _current_verb(first_slot + _TYPE_PER_CHAR_S * 0.5) == ""
+    # One full char-step → first letter only.
+    assert _current_verb(first_slot + _TYPE_PER_CHAR_S * 1.0) == second[:1]
+    assert _current_verb(first_slot + _TYPE_PER_CHAR_S * 2.0) == second[:2]
+
+
 def test_glow_color_oscillates_between_deep_red_and_bright_red():
     """The breathing-glow returns an RGB triple whose R-channel
     spans the (60, 255) band and whose G/B stay near 0. Sampling

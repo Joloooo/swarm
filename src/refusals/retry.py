@@ -102,6 +102,33 @@ async def astream_with_refusal_retry(
     total_attempts = 0
     last_tier = "plain"
 
+    # Track per-tier "have we dumped yet" so the live refused-prompt
+    # render fires once per tier instead of once per retry. Tier-1
+    # plain retries reuse the same seed_msgs / system_msg, so the 3
+    # attempts produce near-identical inputs — dumping all of them
+    # would just spam the terminal with duplicate red walls.
+    tier_dumped = {"plain": False, "vocab_filter": False}
+
+    def _dump_to_live(exc: BaseException, tier: str) -> None:
+        if tier_dumped.get(tier):
+            return
+        req = getattr(exc, "_swarm_request", None)
+        if req is None:
+            return
+        tier_dumped[tier] = True
+        # Lazy import keeps the refusals package free of an
+        # observability dependency at module-load time.
+        try:
+            from src.observability.live import LIVE
+            LIVE.refused_prompt(
+                agent=config.agent_id, tier=tier, request=req,
+            )
+        except Exception:  # noqa: BLE001
+            # Observability is best-effort — never let a broken
+            # renderer mask the actual refusal exception we're
+            # about to re-raise.
+            pass
+
     # ── Tier 1: plain retry ─────────────────────────────────────
     agent = agent_factory(system_msg)
     for attempt in range(max_plain_retries + 1):
@@ -122,6 +149,10 @@ async def astream_with_refusal_retry(
                 config.agent_id, attempt + 1,
                 max_plain_retries + 1, str(e)[:160],
             )
+            # Dump the offending request payload on the FIRST refusal
+            # of this tier — see ``tier_dumped`` comment above for why
+            # we don't repeat it on subsequent identical retries.
+            _dump_to_live(e, "plain")
             if attempt < max_plain_retries:
                 await asyncio.sleep(1.5)
                 continue
@@ -162,6 +193,12 @@ async def astream_with_refusal_retry(
             "[%s] worker refused (tier=vocab_filter, attempt=%d): %s",
             config.agent_id, total_attempts, str(e)[:160],
         )
+        # Dump the vocab-filtered payload too — its substitutions can
+        # be the difference between a refusal and a success, so seeing
+        # the actual filtered text in the terminal lets the operator
+        # judge whether the policy is being trained against neutral
+        # wording or whether more rewrites are needed.
+        _dump_to_live(e, "vocab_filter")
 
     # All tiers exhausted — surface the last refusal so the outer
     # except in ``run_skill_agent`` runs its existing logging /

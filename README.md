@@ -1,3 +1,12 @@
+errors to fix:
+planner not displaying thinking or any other one reasoning part.
+not possible physically
+recon should not even have failures
+whatweb issue(install or delete)
+
+
+
+
 # SwarmAttacker
 
 Multi-methodology swarm penetration testing agent built with LangGraph. Part of a master's thesis on autonomous LLM-based penetration testing.

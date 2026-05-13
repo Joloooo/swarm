@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -305,18 +306,67 @@ _STREAM_FOCUS: dict[str, Any] = {
 # ``_stream_write``, which means the pad code never deadlocks against
 # other live-output paths.
 
-# Braille spinner — same frame set Codex CLI / many Rich progress bars
-# use. 10 frames cycled at 200 ms gives a 2 s period; readable at a
-# glance without being seizure-inducing during heavy concurrent thinking.
-_SPINNER_FRAMES: tuple[str, ...] = (
-    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+# Verb-cycling typewriter + breathing-glow animation. Adapted verbatim
+# from the design preview at ``~/Downloads/preview_styles.py`` so the
+# pad's animated label matches the look the operator approved out of
+# band:
+#
+#   1. A pulsing red verb (thinking → attacking → scanning → exploiting
+#      → probing → pivoting → analyzing → repeat) types in left-to-right,
+#      holds with cycling trailing dots, types back out at the same
+#      speed, pauses briefly, then the next verb starts.
+#   2. The verb text itself breathes — a sine-squared interpolation
+#      between deep red (60,0,0) and bright red (255,50,30) over a
+#      1.8 s period, rendered in 24-bit truecolor. The sine-squared
+#      shape makes the dim half linger and the bright peak sharp,
+#      matching Claude Code's thinking shimmer.
+#   3. Refresh runs at 20 Hz so the glow looks smooth (slower rates
+#      make it strobe).
+#
+# Both clocks (verb cycle + glow phase) are shared across all in-flight
+# rows so concurrent fan-out workers stay visually in sync — every row
+# shows the same verb at the same character of the same animation
+# phase. Each row still labels itself with its own agent_id and
+# elapsed time so the operator can tell which call is which when 3+
+# run in parallel.
+_VERBS: tuple[str, ...] = (
+    "thinking",
+    "attacking",
+    "scanning",
+    "exploiting",
+    "probing",
+    "pivoting",
+    "analyzing",
 )
+# Per-character type-in / type-out cadence — verb appears letter by
+# letter at this rate, then disappears letter by letter at the SAME rate.
+_TYPE_PER_CHAR_S: float = 0.10
+# How long the full verb stays on screen (with cycling trailing dots).
+_HOLD_S: float = 2.50
+# Blank gap between one verb fully typing out and the next typing in.
+_PAUSE_S: float = 0.40
+# One trailing dot toggles every this many seconds during the hold phase.
+_DOT_BEAT_S: float = 0.40
 
-# Pad refresh cadence. 200 ms is the standard "feels live" interval used
-# by tqdm / Rich. Faster (50 ms) wastes CPU on terminals that won't
-# update faster than ~60 Hz anyway; slower (500 ms+) makes the spinner
-# feel laggy.
-_PAD_TICK_S: float = 0.2
+# Breathing-glow palette. Deep red is the dim trough; bright red is the
+# pulse peak.
+_DEEP_RED: tuple[int, int, int] = (60, 0, 0)
+_BRIGHT_RED: tuple[int, int, int] = (255, 50, 30)
+# Full breathing cycle period — 1.8 s feels alive without strobing.
+_GLOW_PERIOD_S: float = 1.8
+
+# Fixed-width verb column so the rest of the row (agent_id, elapsed,
+# model) doesn't jump around as the verb grows / shrinks. Longest verb
+# is "exploiting" (10) + 3 trailing dots = 13 chars; 14 leaves one
+# trailing space for visual breathing room.
+_VERB_FIELD_WIDTH: int = 14
+
+# Pad refresh cadence. 50 ms = 20 Hz, matches the breathing-glow's
+# sampling rate so the colour transitions look smooth. Faster wastes
+# CPU on terminals that won't repaint past ~60 Hz; slower makes the
+# pulse choppy. The frame budget per tick is ~few hundred bytes per
+# row, comfortably negligible.
+_PAD_TICK_S: float = 0.05
 
 # Active call registry. Key is the LangChain run_id (UUID) so the keys
 # match those passed to ``thinking_started`` / ``thinking_finished``.
@@ -332,6 +382,97 @@ _PAD_LINES_DRAWN: int = 0
 # scripts (importing live.py shouldn't start a thread).
 _PAD_TICKER_THREAD: _threading.Thread | None = None
 _PAD_TICKER_STOP: _threading.Event = _threading.Event()
+
+
+def _lerp_rgb(
+    a: tuple[int, int, int],
+    b: tuple[int, int, int],
+    t: float,
+) -> tuple[int, int, int]:
+    """Linear-interpolate between two RGB triples by ``t`` in [0, 1]."""
+    return (
+        round(a[0] + (b[0] - a[0]) * t),
+        round(a[1] + (b[1] - a[1]) * t),
+        round(a[2] + (b[2] - a[2]) * t),
+    )
+
+
+def _fg_truecolor(rgb: tuple[int, int, int]) -> str:
+    """Render a 24-bit truecolor foreground SGR escape.
+
+    24-bit ANSI is supported by every macOS terminal that matters
+    (Apple Terminal ≥ 2.10, iTerm2, Alacritty, kitty, WezTerm). On
+    legacy 256-color terminals the escape is parsed and clamped to the
+    nearest palette colour, so the verb still appears — just less
+    smoothly graded. We accept that trade-off because the pad's
+    explicit gate (``_pad_enabled``) already requires a TTY, and any
+    TTY old enough to lack truecolor parsing also can't render this
+    UI well in the first place.
+    """
+    r, g, b = rgb
+    return f"\x1b[38;2;{r};{g};{b}m"
+
+
+def _current_verb(now_wall: float) -> str:
+    """Return the verb label at wall-clock time ``now_wall``.
+
+    Implements the symmetric typewriter state machine: each verb types
+    in at ``_TYPE_PER_CHAR_S`` per character, holds for ``_HOLD_S``
+    with cycling 0-3 trailing dots, types out at the same per-char
+    rate, then pauses ``_PAUSE_S`` before the next verb starts. The
+    cycle repeats forever; using wall-clock time as input means every
+    in-flight pad row sees the same label at the same phase, so 3
+    concurrent rows render identical animations side by side instead
+    of drifting apart.
+
+    The function is total — for any ``t`` it returns the substring of
+    the active verb at that phase, or ``""`` during the inter-verb
+    pause. Adapted from ``preview_styles.py::current_label``.
+    """
+    one_pass = sum(
+        len(v) * _TYPE_PER_CHAR_S    # type in
+        + _HOLD_S                    # hold + dots
+        + len(v) * _TYPE_PER_CHAR_S  # type out (same speed)
+        + _PAUSE_S                   # gap
+        for v in _VERBS
+    )
+    t = now_wall % one_pass
+    for verb in _VERBS:
+        v_in = len(verb) * _TYPE_PER_CHAR_S
+        v_hold = _HOLD_S
+        v_out = len(verb) * _TYPE_PER_CHAR_S  # symmetric
+        v_total = v_in + v_hold + v_out + _PAUSE_S
+        if t < v_in:
+            # Typing in, left → right.
+            return verb[: int(t / _TYPE_PER_CHAR_S)]
+        if t < v_in + v_hold:
+            # Holding with pulsing trailing dots.
+            dots = int((t - v_in) / _DOT_BEAT_S) % 4
+            return verb + "." * dots
+        if t < v_in + v_hold + v_out:
+            # Typing out, right → left (chars vanish from the tail).
+            chars_remaining = (
+                len(verb)
+                - int((t - v_in - v_hold) / _TYPE_PER_CHAR_S)
+            )
+            return verb[: max(0, chars_remaining)]
+        # Otherwise: blank pause before the next verb.
+        t -= v_total
+    return ""
+
+
+def _glow_color(now_wall: float) -> tuple[int, int, int]:
+    """Breathing-glow colour at wall-clock time ``now_wall``.
+
+    Sine-squared in [0, 1] interpolating between ``_DEEP_RED`` and
+    ``_BRIGHT_RED`` over a ``_GLOW_PERIOD_S`` cycle. Squaring the
+    sine makes the dim half linger (verb spends more frames near the
+    deep colour) and the bright peak sharp (a brief flash at peak
+    intensity) — same shape as Claude Code's thinking shimmer.
+    """
+    s = (math.sin(now_wall * 2 * math.pi / _GLOW_PERIOD_S) + 1) / 2
+    s = s * s
+    return _lerp_rgb(_DEEP_RED, _BRIGHT_RED, s)
 
 
 def _pad_enabled() -> bool:
@@ -401,38 +542,53 @@ def _pad_draw() -> None:
         _PAD_LINES_DRAWN = 0
         return
 
-    # Pick the spinner frame from wall-clock so concurrent rows stay in
-    # phase — visually calmer than each row having its own counter.
-    frame = _SPINNER_FRAMES[int(time.time() / _PAD_TICK_S) % len(_SPINNER_FRAMES)]
+    # Both the typewriter cycle and the breathing-glow phase are
+    # driven off ``time.time()`` (wall clock) so that 1-N concurrent
+    # rows are rendered with the SAME verb at the SAME character of
+    # the SAME glow phase. Using ``time.perf_counter()`` would also
+    # work, but wall-clock keeps the animation phase predictable
+    # across process restarts within the same run — handy when
+    # comparing two side-by-side terminals.
+    now_wall = time.time()
+    verb_text = _current_verb(now_wall)
+    verb_padded = verb_text.ljust(_VERB_FIELD_WIDTH)
+    if _color_enabled():
+        verb_str = f"{_fg_truecolor(_glow_color(now_wall))}{verb_padded}{_RESET}"
+    else:
+        verb_str = verb_padded
+
     try:
         cols = shutil.get_terminal_size((100, 24)).columns
     except Exception:  # noqa: BLE001
         cols = 100
 
-    now = time.perf_counter()
+    now_perf = time.perf_counter()
     rows: list[str] = []
     # Snapshot the dict — entries may change between this read and the
     # write loop on slow terminals; copy is cheap.
     for entry in list(_PAD.values()):
-        elapsed = now - entry.get("started", now)
+        elapsed = now_perf - entry.get("started", now_perf)
         ag = _agent_tag(entry.get("agent", "?"))
         model = entry.get("model") or ""
         effort = entry.get("reasoning_effort") or ""
-        spin = _paint(frame, _BOLD, _CYAN)
-        # Elapsed time gets bold past 30 s so a stuck call stands out.
+        # Elapsed time gets bold past 30 s so a stuck call stands out
+        # without the operator having to read the verb.
         time_part = f"{elapsed:5.1f}s"
         if elapsed > 30:
             time_part = _paint(time_part, _BOLD, _YELLOW)
         else:
             time_part = _paint(time_part, _DIM)
-        label = _paint("thinking", _DIM, _CYAN)
+        agent_part = _paint(ag, _DIM, _CYAN)
         meta_bits = []
         if model:
             meta_bits.append(_paint(model, _DIM))
         if effort:
             meta_bits.append(_paint(f"effort={effort}", _DIM))
         meta = "  ".join(meta_bits)
-        line = f"  {spin} {ag} {label} {time_part}"
+        # Verb is the focal point — agent tag and elapsed are dim
+        # context. Pentest verbs cycling in pulsing red are what the
+        # operator's eye lands on.
+        line = f"  {agent_part}  {verb_str}  {time_part}"
         if meta:
             line += f"   {meta}"
         # Approximate trim to terminal width by ANSI-stripping for length

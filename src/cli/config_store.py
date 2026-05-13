@@ -27,7 +27,7 @@ are not budgets:
 
     [model]
     slug              = "gpt-5.5"
-    reasoning_effort  = "medium"
+    reasoning_effort  = "low"
     reasoning_summary = "detailed"
 
     [verbosity]
@@ -74,7 +74,7 @@ KEY_TO_ENV: dict[tuple[str, str], tuple[str, Any, str]] = {
     ("budgets", "llm_max_tokens"):               ("SWARM_LLM_MAX_TOKENS",         4096,     "int"),
     ("budgets", "web_search_max_crawled_chars"): ("SWARM_WEB_MAX_CHARS",          8000,     "int"),
     ("model",   "slug"):                         ("SWARM_MODEL",             "gpt-5.5",     "str"),
-    ("model",   "reasoning_effort"):             ("SWARM_REASONING_EFFORT",  "medium",      "str"),
+    ("model",   "reasoning_effort"):             ("SWARM_REASONING_EFFORT",     "low",      "str"),
     ("model",   "reasoning_summary"):            ("SWARM_REASONING_SUMMARY", "detailed",    "str"),
     ("verbosity", "mode"):                       ("SWARM_VERBOSITY",         "compact",     "str"),
 }

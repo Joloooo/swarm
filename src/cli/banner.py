@@ -13,26 +13,31 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# ASCII-art block intentionally kept as a single raw string so the
-# box-drawing characters line up perfectly when printed. Each line is
-# pre-indented by three spaces to give the logo breathing room
-# against the terminal's left edge.
+# ASCII-art block: full "SWARMATTACKER" rendered in the ANSI Shadow
+# figlet font, kept as a single raw string so the box-drawing
+# characters line up perfectly when printed. Each line is pre-indented
+# by three spaces to give the logo breathing room against the
+# terminal's left edge.
+#
+# Width: 114 cols of art + 3-space indent = 117 cols total. Fits any
+# modern terminal (typical Apple Terminal / iTerm2 width is ≥ 100
+# cols at a default font); will line-wrap on a strict 80-col window
+# but the project's CLI doesn't target that. Letters were assembled
+# from the canonical ANSI Shadow letterforms via
+# ``/tmp/build_banner.py``.
 _LOGO = """\
-   ███████╗██╗    ██╗ █████╗ ██████╗ ███╗   ███╗
-   ██╔════╝██║    ██║██╔══██╗██╔══██╗████╗ ████║
-   ███████╗██║ █╗ ██║███████║██████╔╝██╔████╔██║
-   ╚════██║██║███╗██║██╔══██║██╔══██╗██║╚██╔╝██║
-   ███████║╚███╔███╔╝██║  ██║██║  ██║██║ ╚═╝ ██║
-   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝
+   ███████╗██╗    ██╗ █████╗ ██████╗ ███╗   ███╗ █████╗ ████████╗████████╗ █████╗  ██████╗██╗  ██╗███████╗██████╗
+   ██╔════╝██║    ██║██╔══██╗██╔══██╗████╗ ████║██╔══██╗╚══██╔══╝╚══██╔══╝██╔══██╗██╔════╝██║ ██╔╝██╔════╝██╔══██╗
+   ███████╗██║ █╗ ██║███████║██████╔╝██╔████╔██║███████║   ██║      ██║   ███████║██║     █████╔╝ █████╗  ██████╔╝
+   ╚════██║██║███╗██║██╔══██║██╔══██╗██║╚██╔╝██║██╔══██║   ██║      ██║   ██╔══██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗
+   ███████║╚███╔███╔╝██║  ██║██║  ██║██║ ╚═╝ ██║██║  ██║   ██║      ██║   ██║  ██║╚██████╗██║  ██╗███████╗██║  ██║
+   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝      ╚═╝   ╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
 """
 
-# Centered visually under the ~48-column-wide ASCII art:
-#   - "SWARMATTACKER" (13 chars) ⇒ ~18-space indent puts it under the
-#     midpoint of the logo block.
-#   - "Fully autonomous Pentesting agent" (33 chars) ⇒ ~8-space indent
-#     so it sits roughly centered too.
-_NAME    = "                  SWARMATTACKER"
-_TAGLINE = "        Fully autonomous Pentesting agent"
+# Tagline: the project name is now in the ASCII art itself, so the
+# subtitle below just needs the one-line description. Indented to ~42
+# columns so it visually sits centered under the 117-column logo.
+_TAGLINE = "                                          Fully autonomous Pentesting agent"
 
 
 def show(config_path: Path) -> None:
@@ -50,12 +55,13 @@ def show(config_path: Path) -> None:
 
     # Spacer line above for separation from any earlier prompt output.
     console.print()
-    # Logo: bold cyan reads well on both light and dark terminals.
-    console.print(Text(_LOGO, style="bold cyan"), end="")
-    # Project name: bold magenta, makes "SWARMATTACKER" pop under the art.
-    console.print(Text(_NAME, style="bold magenta"))
+    # Logo: bold red — the project name itself is rendered in the ASCII
+    # art now, so colour does double duty as branding (matches the
+    # red-glow thinking pad below) and as the dominant visual element
+    # on the splash screen.
+    console.print(Text(_LOGO, style="bold red"), end="")
     # Tagline: plain white so the one-line description reads cleanly
-    # without competing with the magenta title above.
+    # under the red logo without competing.
     console.print(Text(_TAGLINE, style="white"))
     console.print()
     # Config path: useful when debugging "why didn't my edit stick?".

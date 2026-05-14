@@ -6,7 +6,6 @@
 #   - nmap      (port scanning, service detection)
 #   - gobuster  (directory/endpoint brute-forcing)
 #   - sqlmap    (SQL injection testing)
-#   - whatweb   (technology fingerprinting)
 #   - nikto     (web-server vulnerability sweep)
 #   - curl      (HTTP requests — usually pre-installed)
 #
@@ -14,12 +13,20 @@
 # src/tools/crawler.py when raw HTTP fails). The Playwright Python
 # wrapper itself is already installed via `uv sync`.
 #
+# Technology fingerprinting (was: whatweb) is now handled via `curl -sI`
+# plus the homepage HTML that fetch_page already pulls — whatweb was
+# dropped from Homebrew and added little over a header probe on our
+# target workload.
+#
 # Supports macOS (Homebrew) and Linux (apt / dnf / pacman).
 # Idempotent: safe to run multiple times.
 #
 # Usage:
-#   ./scripts/setup.sh          # install missing tools
-#   ./scripts/setup.sh --check  # just check what's missing, don't install
+#   ./scripts/setup.sh                  # install missing tools + Playwright
+#   ./scripts/setup.sh --check          # just check what's missing
+#   ./scripts/setup.sh --with-seclists  # ALSO clone SecLists (~1 GB) to
+#                                       # ~/.swarmattacker/seclists for the
+#                                       # gobuster "medium"/"big" presets
 
 set -euo pipefail
 
@@ -46,10 +53,15 @@ REQUIRED_TOOLS=(
     "nmap:port scanning and service detection"
     "gobuster:directory and endpoint brute-forcing"
     "sqlmap:SQL injection testing"
-    "whatweb:technology fingerprinting"
     "nikto:web-server vulnerability sweep"
     "curl:HTTP requests"
 )
+
+# SecLists clone target — user-home cache, not in the repo. Mirrors how
+# Playwright Chromium is handled (~/Library/Caches/...). Only populated
+# when the operator passes --with-seclists.
+SECLISTS_DIR="$HOME/.swarmattacker/seclists"
+SECLISTS_URL="https://github.com/danielmiessler/SecLists.git"
 
 # Playwright cache directory — Microsoft uses different paths per OS.
 # `playwright install chromium` writes the headless-shell + chromium build
@@ -152,13 +164,42 @@ install_playwright_browser() {
     (cd "$repo_root" && uv run playwright install chromium)
 }
 
+# --- SecLists (opt-in, --with-seclists) ---
+
+check_seclists() {
+    # 0 if a SecLists checkout exists at our cache path. We look for the
+    # Discovery/Web-Content folder specifically because that's what
+    # gobuster_dir actually reads — a partial / empty clone wouldn't.
+    [[ -d "$SECLISTS_DIR/Discovery/Web-Content" ]]
+}
+
+install_seclists() {
+    info "Cloning SecLists into $SECLISTS_DIR (~1 GB, shallow clone)..."
+    mkdir -p "$(dirname "$SECLISTS_DIR")"
+    if [[ -d "$SECLISTS_DIR/.git" ]]; then
+        info "SecLists checkout already present — pulling latest"
+        git -C "$SECLISTS_DIR" pull --ff-only --depth=1 || \
+            warn "git pull failed; leaving existing checkout in place"
+    else
+        git clone --depth=1 "$SECLISTS_URL" "$SECLISTS_DIR"
+    fi
+}
+
 # --- Main ---
 
 main() {
     local check_only=false
-    if [[ "${1:-}" == "--check" ]]; then
-        check_only=true
-    fi
+    local with_seclists=false
+    for arg in "$@"; do
+        case "$arg" in
+            --check)         check_only=true ;;
+            --with-seclists) with_seclists=true ;;
+            -h|--help)
+                grep '^# ' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+                exit 0 ;;
+            *)  error "Unknown flag: $arg"; exit 2 ;;
+        esac
+    done
 
     printf "%sSwarmAttacker setup%s\n" "$BOLD" "$RESET"
 
@@ -244,9 +285,33 @@ main() {
         fi
     fi
 
+    # ---- SecLists (opt-in) ----
+    printf "\n%sChecking SecLists (gobuster medium/big presets):%s\n" "$BOLD" "$RESET"
+    local seclists_missing=false
+    if check_seclists; then
+        success "$(printf "%-10s %s" "seclists" "SecLists at $SECLISTS_DIR")"
+    elif $with_seclists; then
+        error "$(printf "%-10s %s" "seclists" "SecLists missing  [MISSING]")"
+        seclists_missing=true
+        if ! $check_only; then
+            printf "\n"
+            install_seclists
+            if check_seclists; then
+                success "SecLists installed at $SECLISTS_DIR"
+                seclists_missing=false
+            else
+                error "SecLists clone reported success but Discovery/Web-Content/ not found"
+                exit 1
+            fi
+        fi
+    else
+        info "$(printf "%-10s %s" "seclists" "not installed (optional; pass --with-seclists to add ~1 GB)")"
+        info "       gobuster_dir(wordlist=\"common\") still works via the bundled wordlist"
+    fi
+
     # ---- Final ----
     if $check_only; then
-        if [[ ${#missing[@]} -gt 0 ]] || $pw_missing; then
+        if [[ ${#missing[@]} -gt 0 ]] || $pw_missing || ($with_seclists && $seclists_missing); then
             exit 1
         fi
         printf "\n"

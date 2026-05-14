@@ -36,7 +36,7 @@ from src.tools.shell import bash, read_file, run_command
 from src.tools.sqlmap import sqlmap_basic, sqlmap_dump_table, sqlmap_enum_dbs
 from src.tools.sslscan import sslscan_full
 from src.tools.testssl import testssl_full
-from src.tools.web_recon import fetch_page, gobuster_dir, nikto_scan, whatweb
+from src.tools.web_recon import fetch_page, gobuster_dir, nikto_scan
 
 
 _REGISTRY: dict[str, BaseTool] = {
@@ -74,7 +74,6 @@ _REGISTRY: dict[str, BaseTool] = {
     # Web recon (typed)
     "fetch_page":             fetch_page,
     "gobuster_dir":           gobuster_dir,
-    "whatweb":                whatweb,
     "nikto_scan":             nikto_scan,
 
     # Auth (typed)

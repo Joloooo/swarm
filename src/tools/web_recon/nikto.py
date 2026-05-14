@@ -26,7 +26,7 @@ async def nikto_scan(
     nikto checks for thousands of known issues: outdated server software,
     default files / directories, dangerous HTTP methods, mis-set headers,
     and CGI vulns. Loud — every check shows up in target logs. Use after
-    cheaper recon (whatweb, gobuster) has narrowed the surface.
+    cheaper recon (curl header probes, gobuster) has narrowed the surface.
 
     Args:
         reasoning: Required. Justify why nikto over a more targeted tool.

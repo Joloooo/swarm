@@ -174,8 +174,8 @@ async def validate_website(
     Args:
         reasoning: Required. Why does reachability evidence matter
             for this decision right now — e.g. "confirming target is
-            up before committing to recon", "diagnosing why whatweb
-            returned nothing". The ``reason`` field in the return dict
+            up before committing to recon", "diagnosing why a header
+            probe returned nothing". The ``reason`` field in the return dict
             is the HTTP failure reason and is unrelated to this input.
         url: The URL to probe.
         timeout_seconds: Request timeout (default 5s).

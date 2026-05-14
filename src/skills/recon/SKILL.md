@@ -5,7 +5,7 @@ metadata:
   agent_id: owasp-recon
   methodology: owasp
   config_name: recon
-  tools: [fetch_page, bash, read_file, nmap_ping_sweep, nmap_fast_scan, nmap_specific_ports, nmap_service_detection, nmap_default_scripts, nmap_http_enum, nmap_ssl_enum, gobuster_dir, whatweb, nikto_scan]
+  tools: [fetch_page, bash, read_file, nmap_ping_sweep, nmap_fast_scan, nmap_specific_ports, nmap_service_detection, nmap_default_scripts, nmap_http_enum, nmap_ssl_enum, gobuster_dir, nikto_scan]
   max_tool_calls: 30
   max_iterations: 20
 ---
@@ -50,12 +50,17 @@ Port scans are slow and the homepage is usually richer.
 - `nmap_default_scripts(target, ports="22,80,443")` to enrich open ports.
 - `nmap_http_enum(target)` against any web port (80/443/8080/8443).
 - `nmap_ssl_enum(target, ports="443")` against any TLS port.
-- `whatweb(url)` for technology fingerprinting (server, framework, CMS).
+- `bash` with `curl -sI <url>` for header-based technology
+  fingerprinting (`Server`, `X-Powered-By`, `Set-Cookie` flags). Pair
+  with what `fetch_page` already pulled from the homepage HTML — the
+  `<meta generator>` tag, asset paths, and framework hints are usually
+  there.
 - `gobuster_dir(url, wordlist="common")` for directory enumeration.
-  Use `wordlist="medium"` for slower-but-deeper sweeps.
+  Use `wordlist="medium"` for slower-but-deeper sweeps (requires
+  SecLists — see setup.sh `--with-seclists`).
 - `nikto_scan(url)` for a known-issue web-misconfig sweep — louder,
   slower, run after the cheaper tools.
-- `bash` for anything else (`curl -I`, sublist3r, ad-hoc probes).
+- `bash` for anything else (sublist3r, ad-hoc probes).
 
 ## Passive surface mapping for FQDN targets
 

@@ -2,7 +2,6 @@ errors to fix:
 planner not displaying thinking or any other one reasoning part.
 not possible physically
 recon should not even have failures
-whatweb issue(install or delete)
 
 
 
@@ -18,7 +17,7 @@ The core idea: instead of running one methodology at a time, SwarmAttacker deplo
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (package manager)
 - tmux (for agent session isolation) — install with `brew install tmux`
-- Pentesting tools your agents will call: `nmap`, `gobuster`, `sqlmap`, `whatweb`, `nikto`, `curl` — install with `brew install nmap gobuster sqlmap whatweb nikto`
+- Pentesting tools your agents will call: `nmap`, `gobuster`, `sqlmap`, `nikto`, `curl` — install with `brew install nmap gobuster sqlmap nikto` (or just run `./scripts/setup.sh` below). Technology fingerprinting is done via `curl -sI` + the homepage HTML that `fetch_page` already pulls — `whatweb` is intentionally **not** required (it was dropped from Homebrew and added little over a header probe on our target workload).
 - An LLM backend, **one of**:
   - **ChatGPT Plus/Pro subscription** (recommended, free with subscription — see [LLM Provider: Codex](#llm-provider-codex-chatgpt-subscription) below)
   - Anthropic API key
@@ -29,7 +28,8 @@ The core idea: instead of running one methodology at a time, SwarmAttacker deplo
 
 ```bash
 uv sync                  # install Python deps + create .venv
-./scripts/setup.sh       # install pentesting tools (tmux, nmap, gobuster, sqlmap, whatweb, nikto)
+./scripts/setup.sh                  # install pentesting tools (tmux, nmap, gobuster, sqlmap, nikto) + Playwright Chromium
+./scripts/setup.sh --with-seclists  # ALSO clone SecLists (~1 GB) to ~/.swarmattacker/seclists for the gobuster "medium"/"big" presets
 cp .env.example .env     # create .env (can stay empty if using Codex auth)
 codex                    # one-time ChatGPT login (saves tokens to ~/.codex/auth.json)
 ```

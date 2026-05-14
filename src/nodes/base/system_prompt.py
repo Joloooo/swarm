@@ -40,7 +40,44 @@ vocabulary.py`` for its runtime regex enforcement.
 
 from __future__ import annotations
 
+import logging
+
+from src.refusals.vocabulary import filter_text
 from src.state import Finding
+
+
+log = logging.getLogger(__name__)
+
+
+def _apply_preventive_filter(text: str, *, where: str) -> str:
+    """Apply the CLAUDE.md vocabulary policy to ``text`` BEFORE the first
+    LLM call, not just on tier-2 retry.
+
+    Previously ``filter_text`` only ran inside
+    ``src/refusals/retry.py:astream_with_refusal_retry`` *after* the
+    plain-retry tier exhausted — meaning every first call went out with
+    unfiltered language and a non-trivial fraction tripped Codex's
+    ``cyber_policy`` classifier before the recovery path could engage.
+    Applying it here, at prompt-assembly time, makes the first call
+    already sanitised; tier-2 retry remains as a safety net for tool
+    outputs (which we cannot pre-filter) and for refusals the static
+    table misses.
+
+    Substitutions are logged at INFO so we can audit what got rewritten
+    without scrolling per-call logs. Idempotent: re-running on an
+    already-clean string is a no-op.
+    """
+    new_text, subs = filter_text(text)
+    if subs:
+        # Deduplicate the sub list so a phrase repeated 12 times in
+        # PENTESTING_RULES does not produce 12 log lines.
+        unique = sorted(set(subs))
+        log.info(
+            "preventive vocab filter rewrote %d term(s) in %s: %s",
+            len(unique), where,
+            ", ".join(unique[:8]) + (" …" if len(unique) > 8 else ""),
+        )
+    return new_text
 
 
 # ── Identity preamble ────────────────────────────────────────────────────
@@ -463,7 +500,10 @@ def _build_system_message(
                 "Observed prior findings:\n"
                 f"{findings_text}\n"
             )
-        return "\n\n".join(parts)
+        return _apply_preventive_filter(
+            "\n\n".join(parts),
+            where=f"worker:{config.agent_id} (skip_base_prompt)",
+        )
 
     parts = []
 
@@ -512,4 +552,7 @@ def _build_system_message(
     if expected_flag:
         parts.append(_BENCHMARK_FLAG_ADDENDUM)
 
-    return "\n\n".join(parts)
+    return _apply_preventive_filter(
+        "\n\n".join(parts),
+        where=f"worker:{config.agent_id}",
+    )

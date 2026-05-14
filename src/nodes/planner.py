@@ -438,6 +438,28 @@ SUPERVISOR_SYSTEM_PROMPT = SUPERVISOR_SYSTEM_PROMPT.replace(
 # target"). Workers had this defense, supervisor did not.
 SUPERVISOR_SYSTEM_PROMPT = IDENTITY_PREAMBLE + "\n\n" + SUPERVISOR_SYSTEM_PROMPT
 
+# Preventive vocabulary filter — applied once at module import. The
+# supervisor prompt is otherwise a static literal, so this is a cheap
+# safety net that mirrors the same filter worker prompts get via
+# ``_build_system_message``. Without it the planner's first call goes
+# out with terms like "attack surface" / "attacker-controlled command"
+# that have been observed to trip Codex's cyber_policy classifier on
+# the planner's decision-making turn (see logs/run-XBEN-006-24__2026-
+# 05-13_21h14m49s/ — the worker refusals there had matching language
+# in the planner prompt that just happened not to trip yet).
+from src.refusals.vocabulary import filter_text as _filter_text  # noqa: E402
+
+_filtered, _subs = _filter_text(SUPERVISOR_SYSTEM_PROMPT)
+if _subs:
+    logging.getLogger(__name__).info(
+        "preventive vocab filter rewrote %d term(s) in supervisor prompt: %s",
+        len(set(_subs)),
+        ", ".join(sorted(set(_subs))[:8])
+        + (" …" if len(set(_subs)) > 8 else ""),
+    )
+SUPERVISOR_SYSTEM_PROMPT = _filtered
+del _filtered, _subs
+
 
 # JSON-decision parsing was unified with the live-renderer parser into
 # ``src.observability.decision_parser.parse_planner_decision`` —

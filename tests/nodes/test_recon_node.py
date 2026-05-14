@@ -77,7 +77,7 @@ def test_recon_system_prompt_has_no_whatweb_references():
     assert cfg is not None
     prompt = _build_system_message(
         cfg, target_url="http://localhost:8000",
-        phase1_findings=None, expected_flag="",
+        phase1_findings=None,
     )
     # Belt-and-braces: check the case-insensitive form too.
     lower = prompt.lower()
@@ -93,7 +93,7 @@ def test_recon_system_prompt_mentions_curl_replacement():
     assert cfg is not None
     prompt = _build_system_message(
         cfg, target_url="http://localhost:8000",
-        phase1_findings=None, expected_flag="",
+        phase1_findings=None,
     )
     # The SKILL.md was rewritten to point at `curl -sI` + the homepage
     # HTML for fingerprinting. The exact phrasing can drift, but at

@@ -1,29 +1,36 @@
 """Routing edges — translate the supervisor's decision into a transition.
 
-The single edge function in this module is :func:`route_after_planner`.
-It reads the supervisor's chosen action and returns either a node name
-(``recon`` / ``web_search`` / ``report``) or a list of :class:`Send`
-calls (for ``attack``, which fans out to parallel ``executor`` runs —
-one per entry in ``state["pending_dispatch"]``). It is ALSO the flag
-verifier — when the supervisor picks ``action="submit_flag"``, the
-edge reads the last entry of ``state["submission_attempts"]`` and
-compares it to ``state["expected_flag"]`` via
-:func:`src.flag.flags_match`. On a match the graph routes to ``END``;
-on a miss the planner runs again (with the rejected attempt visible
-in ``submission_attempts``).
+This module has two edge functions:
 
-The recon / executor / web_search nodes route into the summariser /
-planner via plain edges declared in ``src/graph.py``. There used to be
-a conditional ``route_after_summarizer`` here that did a
-benchmark-mode "scan messages for ``FLAG{...}``" early-exit; that
-function got deleted in the 2026-05 refactor after it produced false
-positives whenever a placeholder ``FLAG{...}`` appeared in the
-planner's narration. Flag verification now lives exclusively in the
-explicit submit-flag protocol above.
+  :func:`route_after_planner` — reads the supervisor's chosen action
+  and returns either a node name (``recon`` / ``web_search`` /
+  ``report``) or a list of :class:`Send` calls (for ``attack``, which
+  fans out to parallel ``executor`` runs — one per entry in
+  ``state["pending_dispatch"]``). Also the flag verifier for explicit
+  submissions — on ``action="submit_flag"``, compares
+  ``state["submission_attempts"][-1]`` to ``state["expected_flag"]``
+  via :func:`src.edges.flag_match.flags_match`. Match → ``END``,
+  miss → ``"planner"``.
+
+  :func:`route_after_summarizer` — runs after every worker fan-out's
+  digest. Reads ``state["captured_flag"]`` (set by
+  :class:`src.nodes.summarizer.SummarizerNode` when a worker tool
+  output contained a flag matching ``expected_flag``). On a non-empty
+  value → ``END``; otherwise → ``"planner"`` as in the plain edge it
+  replaced.
+
+  The 2026-05-14 reintroduction of summarizer-side flag detection is
+  narrower than the function deleted in 2026-05: the scan is scoped
+  to tool message content only (see
+  :func:`src.edges.flag_match.scan_trace_for_flag`), eliminating the
+  "FLAG{...} placeholder in planner narration triggers false
+  positive" failure mode that killed the old implementation. Workers
+  no longer carry benchmark-mode language in their system prompt
+  either — the success criterion lives entirely in this edge.
 
 The planner is responsible for populating ``pending_dispatch`` when
 it picks ``action="attack"`` and for populating ``submission_attempts``
-when it picks ``action="submit_flag"``; this edge only reads those
+when it picks ``action="submit_flag"``; these edges only read those
 fields.
 """
 
@@ -35,7 +42,7 @@ from typing import Union
 from langgraph.graph import END
 from langgraph.types import Send
 
-from src.flag import flags_match
+from src.edges.flag_match import flags_match
 from src.state import SwarmGraphState
 
 logger = logging.getLogger(__name__)
@@ -61,7 +68,7 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
 
     For ``submit_flag``: read the last entry of
     ``state["submission_attempts"]`` and compare it to
-    ``state["expected_flag"]`` via :func:`src.flag.flags_match`. On a
+    ``state["expected_flag"]`` via :func:`src.edges.flag_match.flags_match`. On a
     match → ``END``. On a miss → ``"planner"``. The planner runs again
     with the rejected attempt visible in its state so its system prompt
     can teach it not to re-submit the same string. Real pentest runs
@@ -141,5 +148,32 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
         action,
     )
     return _TERMINATE
+
+
+def route_after_summarizer(state: SwarmGraphState) -> str:
+    """Pick the next transition after the summarizer node finishes.
+
+    The summarizer sets ``state["captured_flag"]`` whenever any
+    pending worker's tool output contained a string that matched the
+    run's ``expected_flag`` (or a well-formed flag in real-pentest
+    mode — see :func:`src.edges.flag_match.flags_match`).
+
+    On a non-empty captured flag → ``END``. The benchmark verdict
+    (``xbow_runner.run_one``) reads the captured flag off
+    ``submission_attempts`` (the summarizer pushes it there) so no
+    additional handshake is required — the run simply finishes.
+
+    Otherwise hand control back to the planner exactly like the plain
+    edge this function replaced.
+    """
+    captured = (state.get("captured_flag") or "").strip()
+    if captured:
+        logger.info(
+            "route_after_summarizer: captured flag %r from worker tool "
+            "output; routing to END (bypassing planner submit_flag).",
+            captured[:80],
+        )
+        return END
+    return "planner"
 
 

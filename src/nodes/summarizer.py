@@ -87,6 +87,46 @@ class SummarizerNode(BaseNode):
             )
             return {}
 
+        # ── Flag detection on tool output ───────────────────────────────
+        #
+        # Before we hand the traces to the digest LLM, scan their tool
+        # messages for a string matching the run's expected flag. If
+        # any worker stumbled into the flag while probing — which is
+        # the typical path for benchmark-mode runs once recon + a
+        # specialist have done their job — surface it now so the
+        # conditional ``summarizer → planner / END`` edge can
+        # terminate without a planner round-trip and a redundant
+        # ``submit_flag`` call.
+        #
+        # Scoped to tool message content only (see
+        # ``scan_trace_for_flag``'s docstring) — the placeholder-in-
+        # narration false positive that killed the old auto-detector
+        # can't fire here.
+        captured_flag: str | None = None
+        expected = (state.get("expected_flag") or "").strip()
+        try:
+            from src.edges.flag_match import (
+                scan_pending_summary_inputs_for_flag,
+            )
+            captured_flag = scan_pending_summary_inputs_for_flag(
+                pending, expected=expected,
+            )
+        except Exception as e:  # noqa: BLE001
+            # Scanning is best-effort — never let a regex / parsing
+            # bug stop the digest from running. The agent can still
+            # submit the flag via the explicit ``submit_flag`` path.
+            self.log.warning(
+                "summarizer: flag scan crashed (%s) — continuing without "
+                "auto-capture", e,
+            )
+        if captured_flag:
+            self.log.info(
+                "summarizer: captured flag %r from worker tool output "
+                "(expected=%r) — appending to submission_attempts so the "
+                "conditional edge can route to END",
+                captured_flag[:80], expected[:80],
+            )
+
         run_id = state.get("run_id")
         target_url = state.get("target_url", "")
 
@@ -141,13 +181,23 @@ class SummarizerNode(BaseNode):
             len(report_messages), len(pending),
         )
 
-        return {
+        update: dict = {
             "messages": report_messages,
             # Sentinel: the reducer (_summary_inputs_reducer) treats
             # ``None`` as "clear the list" so subsequent worker fan-outs
             # don't see stale entries from this turn.
             "pending_summary_inputs": None,
         }
+        if captured_flag:
+            # Push onto submission_attempts so the existing benchmark
+            # verdict logic (``xbow_runner.run_one``, the planner's
+            # forcing-function check) sees a successful submission
+            # without any planner action. The conditional edge
+            # ``route_after_summarizer`` reads ``captured_flag`` to
+            # short-circuit straight to END.
+            update["captured_flag"] = captured_flag
+            update["submission_attempts"] = [captured_flag]
+        return update
 
     async def _summarize_one(
         self,

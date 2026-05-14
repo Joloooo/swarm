@@ -295,15 +295,15 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         # with the flag string it believes the worker captured. The
         # routing edge (`src/edges/routing.py:route_after_planner`)
         # compares that submission against ``state["expected_flag"]``
-        # via ``src.flag.flags_match`` and routes straight to END when
-        # it matches. The runner re-uses the same matcher so the
-        # verdict is consistent between in-graph routing and post-run
-        # reporting.
+        # via ``src.edges.flag_match.flags_match`` and routes straight
+        # to END when it matches. The runner re-uses the same matcher
+        # so the verdict is consistent between in-graph routing and
+        # post-run reporting.
         #
         # No more passive regex-scan of free-form state: a placeholder
         # like ``FLAG{...}`` in the planner's narration can no longer
         # masquerade as a captured flag.
-        from src.flag import flags_match
+        from src.edges.flag_match import flags_match
 
         attempts = list(agent_state.get("submission_attempts") or [])
         result["submission_attempts"] = attempts

@@ -215,7 +215,10 @@ def describe_config() -> str:
 
 from langgraph.graph import END, START, StateGraph  # noqa: E402
 
-from src.edges.routing import route_after_planner  # noqa: E402
+from src.edges.routing import (  # noqa: E402
+    route_after_planner,
+    route_after_summarizer,
+)
 from src.nodes import (  # noqa: E402
     executor_node,
     planner_node,
@@ -259,7 +262,7 @@ def build_graph():
     # runs for ``action="attack"``. It is ALSO the flag verifier — on
     # ``action="submit_flag"`` the edge compares the planner's
     # submitted flag against ``state["expected_flag"]`` via
-    # :func:`src.flag.flags_match` and routes to ``END`` on a match or
+    # :func:`src.edges.flag_match.flags_match` and routes to ``END`` on a match or
     # back to ``"planner"`` on a miss (so the planner can try a
     # different candidate, seeing its rejected attempt in
     # ``submission_attempts``).
@@ -307,15 +310,26 @@ def build_graph():
     graph.add_edge("recon", "summarizer")
     graph.add_edge("executor", "summarizer")
 
-    # The summariser → planner edge used to be conditional — it scanned
-    # state for ``flag{...}`` patterns and short-circuited to ``END`` on
-    # any match. That scan produced false positives whenever a
-    # ``FLAG{...}`` placeholder appeared in the planner's narration
-    # (the supervisor's reasoning text frequently mentioned the format).
-    # Flag verification now lives in the explicit submit-flag protocol
-    # in ``route_after_planner``; the summariser just hands control back
-    # to the supervisor.
-    graph.add_edge("summarizer", "planner")
+    # Summariser → planner OR END (conditional).
+    #
+    # The summariser sets ``state["captured_flag"]`` whenever a worker's
+    # tool output contained a string matching the run's expected flag
+    # (see ``src/nodes/summarizer.py`` and
+    # ``src/edges/flag_match.py:scan_pending_summary_inputs_for_flag``).
+    # ``route_after_summarizer`` reads that field and routes straight
+    # to ``END`` on a non-empty value — bypassing the planner's
+    # ``submit_flag`` round-trip — or back to the planner otherwise.
+    #
+    # This replaces a plain edge that existed since the 2026-05
+    # cleanup; the old conditional was deleted because it scanned
+    # narration text and false-positived on placeholder
+    # ``FLAG{...}``. The new scan is scoped to tool message content
+    # only, so the historical failure mode can't fire.
+    graph.add_conditional_edges(
+        "summarizer",
+        route_after_summarizer,
+        ["planner", END],
+    )
     graph.add_edge("web_search", "planner")
 
     graph.add_edge("report", END)

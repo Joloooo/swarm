@@ -1,12 +1,19 @@
 """Flag matching — one comparison function, one regex, zero state scanning.
 
-The previous version of this module exposed ``find_flag_in_state``,
-which walked ``state["messages"]`` / ``state["findings"]`` /
-``state["agent_results"]`` and returned ``True`` on any string matching
-``FLAG{...}``. That tier-5 fallback was the bug behind the
-"✓ FLAG FOUND" false positive on runs where the planner's reasoning
-text mentioned ``FLAG{...}`` as a placeholder — the regex matched the
-placeholder and the routing edge ended the run.
+Lives in ``src/edges/`` because its only purpose is to support the
+routing edge (:func:`src.edges.routing.route_after_planner`): on
+``action="submit_flag"`` the edge calls :func:`flags_match` to decide
+whether to route to ``END`` or back to ``"planner"``. The benchmark
+runner and the salvage logger re-use the same primitives so all three
+call sites agree on what "captured" means.
+
+The module used to live at ``src/flag.py`` and exposed
+``find_flag_in_state``, which walked ``state["messages"]`` /
+``state["findings"]`` / ``state["agent_results"]`` and returned
+``True`` on any string matching ``FLAG{...}``. That tier-5 fallback was
+the bug behind the "✓ FLAG FOUND" false positive on runs where the
+planner's reasoning text mentioned ``FLAG{...}`` as a placeholder —
+the regex matched the placeholder and the routing edge ended the run.
 
 The replacement is deliberately minimal. The agent must explicitly
 submit a flag (``action="submit_flag"`` in the planner schema; the
@@ -149,3 +156,97 @@ def extract_flags(text: str) -> list[str]:
     if not text:
         return []
     return FLAG_RE.findall(text)
+
+
+def _message_text(msg: object) -> str:
+    """Extract the textual content of a LangChain ``BaseMessage``.
+
+    Handles both the simple ``content: str`` shape and the multimodal
+    ``content: list[dict]`` shape (where each dict may carry a
+    ``"text"`` field). Anything else returns an empty string.
+    """
+    content = getattr(msg, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        chunks: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                chunks.append(part)
+            elif isinstance(part, dict):
+                t = part.get("text") or part.get("content") or ""
+                if isinstance(t, str):
+                    chunks.append(t)
+        return "\n".join(chunks)
+    return ""
+
+
+def scan_trace_for_flag(
+    trace: list, *, expected: str = "",
+) -> str | None:
+    """Return the first flag-string in ``trace`` that matches ``expected``.
+
+    Scans **tool-output content only** — i.e. messages whose class name
+    contains ``"Tool"`` (LangChain's ``ToolMessage``). The previous
+    auto-detection scanned every message including the assistant's own
+    narration; placeholder ``FLAG{...}`` strings in the assistant's
+    reasoning text produced false-positive captures and the feature
+    was ripped out (see the module docstring above).
+
+    Restricting the scan to tool messages eliminates that source of
+    false positives: tool outputs are deterministic server responses,
+    not LLM prose. The assistant can still echo a flag in its own
+    text (when filing a ``**FINDING:**`` block, for example) but we
+    don't trigger off that — only off the underlying server response
+    that actually contained the flag.
+
+    The candidate must additionally clear :func:`flags_match`'s
+    placeholder / length filters, so ``FLAG{x}`` from a help message
+    or example is rejected.
+
+    Returns the captured flag string (verbatim, including the
+    ``FLAG{...}`` wrapper) or None if no match was found. The caller
+    is responsible for pushing it onto ``state["submission_attempts"]``
+    and signalling the routing edge.
+    """
+    if not trace:
+        return None
+    for msg in trace:
+        # Two ways a message can be tool output: LangChain's typed
+        # ToolMessage class, or any duck-typed object exposing
+        # ``.type == "tool"``. Cover both — the create_agent loop
+        # emits typed instances, but the salvage / refusal paths
+        # occasionally synthesise dict-shaped fallbacks.
+        type_attr = getattr(msg, "type", None)
+        cls_name = msg.__class__.__name__ if msg is not None else ""
+        is_tool = type_attr == "tool" or "Tool" in cls_name
+        if not is_tool:
+            continue
+        text = _message_text(msg)
+        if not text:
+            continue
+        for candidate in extract_flags(text):
+            if flags_match(submitted=candidate, expected=expected):
+                return candidate
+    return None
+
+
+def scan_pending_summary_inputs_for_flag(
+    pending: list[dict], *, expected: str = "",
+) -> str | None:
+    """Walk every ``pending_summary_input.trace`` and return the first match.
+
+    Thin wrapper around :func:`scan_trace_for_flag` that handles the
+    list-of-summary-inputs shape the summarizer node receives. Returns
+    the first matching flag across all pending workers, or None.
+    """
+    if not pending:
+        return None
+    for entry in pending:
+        if not isinstance(entry, dict):
+            continue
+        trace = entry.get("trace") or []
+        captured = scan_trace_for_flag(trace, expected=expected)
+        if captured:
+            return captured
+    return None

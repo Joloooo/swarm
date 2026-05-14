@@ -1,8 +1,8 @@
 """Tier 1 — Flag matching tests.
 
-``src/flag.py:flags_match`` is the single source of truth for "did the
-agent's submitted flag count as a capture?". It is called from two
-sites:
+``src/edges/flag_match.py:flags_match`` is the single source of truth
+for "did the agent's submitted flag count as a capture?". It is called
+from two sites:
 
 - :func:`src.edges.routing.route_after_planner` — the verification edge
   that decides whether to terminate on a ``submit_flag`` action.
@@ -20,8 +20,8 @@ These tests pin the comparison ladder:
 1. Empty submission is rejected.
 2. Malformed input (no ``flag{...}`` shape) is rejected.
 3. Inner content that matches a known placeholder
-   (:data:`src.flag._OBVIOUS_PLACEHOLDERS`) is rejected even when
-   expected is empty.
+   (:data:`src.edges.flag_match._OBVIOUS_PLACEHOLDERS`) is rejected
+   even when expected is empty.
 4. Exact match accepted.
 5. Case-insensitive exact match accepted.
 6. UUID fallback (expected set, exact miss, submitted has ≥ 8 char
@@ -35,7 +35,7 @@ instead of bringing back the false-positive bug.
 
 from __future__ import annotations
 
-from src.flag import FLAG_RE, extract_flags, flags_match
+from src.edges.flag_match import FLAG_RE, extract_flags, flags_match
 
 
 # ── False-positive prevention (the bug that motivated this module) ──

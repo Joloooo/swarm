@@ -99,6 +99,17 @@ def _build_config(skill_name: str, meta: dict, body: str) -> tuple[AgentConfig, 
     description = str(meta.get("description") or "").strip()
     dispatchable = bool(md.get("agent_id"))
 
+    # Phase routing — "recon" picks the universal+recon-hint prompt;
+    # anything else (default "executor") gets the full executor rule
+    # bundle. The field is intentionally permissive so a future
+    # "neutral" phase (pure tooling helpers) can be added without a
+    # loader change.
+    phase = str(md.get("phase") or "executor").strip().lower()
+    if phase not in {"executor", "recon"}:
+        # Unknown phase strings fall back to executor rather than
+        # crash; the worker still gets a sensible prompt.
+        phase = "executor"
+
     cfg = AgentConfig(
         agent_id=str(md.get("agent_id") or f"skill-{skill_name}"),
         methodology=str(md.get("methodology") or "skill"),
@@ -108,6 +119,7 @@ def _build_config(skill_name: str, meta: dict, body: str) -> tuple[AgentConfig, 
         max_tool_calls=int(md.get("max_tool_calls") or 50),
         max_iterations=int(md.get("max_iterations") or 30),
         skip_base_prompt=bool(md.get("skip_base_prompt", False)),
+        phase=phase,
     )
     return cfg, description, dispatchable
 

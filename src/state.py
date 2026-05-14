@@ -182,7 +182,7 @@ class SwarmGraphState(TypedDict, total=False):
     # submitted via ``action="submit_flag"``. The routing edge
     # (``src.edges.routing.route_after_planner``) compares the most
     # recent entry against ``expected_flag`` using
-    # ``src.flag.flags_match`` and routes the graph to ``END`` on a
+    # ``src.edges.flag_match.flags_match`` and routes the graph to ``END`` on a
     # match — otherwise control returns to the planner so it can try a
     # different candidate. The system prompt teaches the planner that
     # re-entering after a submission means the previous attempt was
@@ -199,6 +199,24 @@ class SwarmGraphState(TypedDict, total=False):
     # planner each appending their own attempt are concatenated rather
     # than overwriting.
     submission_attempts: Annotated[list[str], operator.add]
+
+    # Set by the summarizer node when a worker's tool output contained
+    # a string matching ``expected_flag`` (or, in real-pentest mode,
+    # any well-formed ``flag{...}`` that isn't a placeholder). The
+    # conditional edge ``route_after_summarizer`` reads this field and
+    # routes straight to ``END`` on a non-empty value — bypassing the
+    # planner's ``submit_flag`` round-trip. The summarizer also pushes
+    # the captured flag onto ``submission_attempts`` so the existing
+    # benchmark verdict logic (``xbow_runner.run_one``) sees a
+    # successful submission unchanged.
+    #
+    # See:
+    #   - src.nodes.summarizer.SummarizerNode.execute  (writer)
+    #   - src.edges.flag_match.scan_pending_summary_inputs_for_flag
+    #     (scanner — scoped to tool message content only, no false
+    #     positives from assistant narration)
+    #   - src.edges.routing.route_after_summarizer  (reader)
+    captured_flag: str
 
     # ── Worker → Summarizer hand-off (the context-window fix) ──
     # Each worker (executor, recon, salvage) writes a SINGLE-ITEM list

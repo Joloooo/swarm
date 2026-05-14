@@ -85,6 +85,9 @@ from src.nodes.base.system_prompt import (
     PENTESTING_RULES,
     STEALTH_RULES,
     get_base_prompt,
+    get_executor_prompt,
+    get_recon_prompt,
+    get_universal_prompt,
 )
 
 # Back-compat alias: the old private name was ``_looks_like_refusal``.
@@ -107,6 +110,9 @@ __all__ = [
     "_findings_from_markdown",
     "_looks_like_refusal",
     "get_base_prompt",
+    "get_executor_prompt",
+    "get_recon_prompt",
+    "get_universal_prompt",
     "looks_like_refusal",
 ]
 

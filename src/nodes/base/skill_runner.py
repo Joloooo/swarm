@@ -94,6 +94,20 @@ class AgentConfig:
     # (focused technical Q&A that broad pentest context would taint).
     skip_base_prompt: bool = False
 
+    # Which rule bundle the worker prompt carries.
+    #   "executor" (default) — every dispatchable attack skill.
+    #     Gets universal blocks + methodology + demonstrated-extraction
+    #     + diversity + transformation hypothesis + severity +
+    #     finding category guidance.
+    #   "recon"             — discovery-phase agents (the recon skill).
+    #     Gets universal blocks + a short "what counts as a recon
+    #     finding" hint. No payload methodology, no exploit-output
+    #     standard — those are exec-phase concerns that empirically
+    #     tripped the Codex cyber_policy classifier on recon turns in
+    #     ``logs/run-XBEN-006-24__2026-05-13_21h14m49s/``.
+    # Set via ``metadata.phase`` in SKILL.md frontmatter.
+    phase: str = "executor"
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # Finding extraction from agent output
@@ -463,15 +477,17 @@ async def _run_skill_agent_impl(
 
     target_url = state.get("target_url", "")
 
-    # Build system message with all knowledge layers. The
-    # benchmark-mode addendum only fires when state.expected_flag
-    # is populated (the xbow_runner sets it; real pentest runs
-    # leave it empty).
+    # Build system message with phase-appropriate rule bundle. The
+    # benchmark-mode addendum used to be appended here when
+    # ``state.expected_flag`` was set; it was removed on 2026-05-14
+    # because the flag success-criterion language was the strongest
+    # cyber_policy refusal trigger in worker prompts. Flag detection
+    # now runs as a conditional edge after the summarizer
+    # (``src/edges/routing.py:route_after_summarizer``) so workers do
+    # not need to know about the success criterion.
     phase1_findings = state.get("phase1_findings")
-    expected_flag = state.get("expected_flag") or ""
     system_msg = _build_system_message(
         config, target_url, phase1_findings,
-        expected_flag=expected_flag,
     )
 
     # NB: agent construction is now deferred to ``_agent_factory``
@@ -770,13 +786,13 @@ async def _run_skill_agent_impl(
             # ``flag{582d82bb-...}`` at iteration 5 and got refused
             # at iteration 6, dropping the win.
             #
-            # Lazy import so the ``src.flag`` module is only loaded
-            # on the refusal path (it is also imported at routing
+            # Lazy import so the ``src.edges.flag_match`` module is only
+            # loaded on the refusal path (it is also imported at routing
             # time, but defensive imports here keep startup costs
             # tied to actual usage).
             findings = []
             try:
-                from src.flag import extract_flags
+                from src.edges.flag_match import extract_flags
 
                 # Stringify partial messages inline. The old code used a
                 # private ``_stringify_messages`` helper from ``src.flag``;

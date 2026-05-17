@@ -259,6 +259,27 @@ Runtime behavior is controlled by the `config` singleton in `src/graph.py`
 (budgets, verbosity). All settings are overridable via `SWARM_*` environment
 variables — see the `_env_*` helpers and `describe_config()` for the full list.
 
+### Local GGUFs via `llama-server`
+
+`Provider.LOCAL` routes every LLM call through a local `llama.cpp` server
+(or Ollama) over its OpenAI-compatible endpoint, so any GGUF in `~/llms/`
+can be used without code changes.
+
+```bash
+brew install llama.cpp
+llama-server -m ~/llms/Hermes-3-Llama-3.1-8B-Q4_K_M.gguf \
+  --port 8080 --alias hermes-8b -c 32768
+# in another shell:
+SWARM_PROVIDER=local SWARM_LOCAL_MODEL=hermes-8b uv run swarm ...
+```
+
+Env vars: `SWARM_PROVIDER=local`, `SWARM_LOCAL_MODEL=<--alias>`,
+`SWARM_LOCAL_BASE_URL=http://127.0.0.1:8080/v1` (Ollama: `:11434/v1`).
+Tool-call quality depends entirely on the GGUF — Hermes-3-8B and the
+abliterated gemma variants need a hand-crafted jinja template to call
+tools reliably (see `tests/FAILURES.md` 2026-05-17). The wiring works;
+swap models freely.
+
 ## Dependencies
 
 | Package | Purpose |

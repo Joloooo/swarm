@@ -157,14 +157,36 @@ config = SimpleNamespace(
         # SWARM_WEB_MAX_CHARS if synthesis quality degrades on very
         # small-context fallback models.
         web_search_max_crawled_chars = _env_int("SWARM_WEB_MAX_CHARS",          8000),
+        # ── Provider selection ──
+        # Which LLM backend ``get_llm()`` returns by default. ``codex``
+        # uses your ChatGPT subscription via the bundled ``ChatCodex``;
+        # ``local`` points at a local llama-server / Ollama HTTP endpoint
+        # (see ``local_base_url`` / ``local_model`` below) and reuses the
+        # ``ChatOpenAI`` plumbing under the hood.
+        provider                     = _env_str("SWARM_PROVIDER", "codex",
+                                                choices=("anthropic", "openai",
+                                                         "openrouter", "codex",
+                                                         "local")),
         # ── Codex model + reasoning controls (GPT-5.x family) ──
-        # Model slug. Override with SWARM_MODEL=<slug>.
+        # Model slug. Override with SWARM_MODEL=<slug>. Only consulted when
+        # ``provider`` is one of the hosted backends — for ``provider=local``
+        # see ``local_model`` instead.
         model                        = _env_str("SWARM_MODEL", "gpt-5.5",
                                                 choices=("gpt-5.5", "gpt-5.4",
                                                          "gpt-5.4-mini",
                                                          "gpt-5.3-codex",
                                                          "gpt-5.2",
                                                          "codex-auto-review")),
+        # ── Local llama-server / Ollama controls ──
+        # Active when ``provider=local``. ``local_model`` is the model
+        # alias the local server advertises (matches the ``--alias`` flag
+        # passed to ``llama-server`` or the Modelfile name in Ollama).
+        # ``local_base_url`` defaults to the llama-server default port;
+        # change to ``http://127.0.0.1:11434/v1`` for Ollama.
+        local_model                  = _env_str("SWARM_LOCAL_MODEL",
+                                                "hermes-8b"),
+        local_base_url               = _env_str("SWARM_LOCAL_BASE_URL",
+                                                "http://127.0.0.1:8080/v1"),
         # Effort: how hard the model thinks before responding. See the
         # full enum + valid values in src/llm/provider.py:LLMConfig.
         # Default xhigh = maximum reasoning depth → fullest chain-of-thought

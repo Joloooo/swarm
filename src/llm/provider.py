@@ -25,6 +25,11 @@ class Provider(str, Enum):
     OPENAI = "openai"
     OPENROUTER = "openrouter"
     CODEX = "codex"
+    # Local llama-server / Ollama on a localhost HTTP endpoint. Reuses
+    # ``ChatOpenAI`` under the hood — the only differences vs. ``OPENAI``
+    # are the baked-in localhost ``base_url`` (configurable via
+    # ``SWARM_LOCAL_BASE_URL``) and that no real API key is required.
+    LOCAL = "local"
 
 
 @dataclass
@@ -39,14 +44,23 @@ class LLMConfig:
     cheaper run during development.
     """
 
-    provider: Provider = Provider.CODEX
-    # Model slug. Default sourced from ``config.budgets.model`` (see
-    # ``src/graph.py``) which itself reads ``SWARM_MODEL`` — so a run
-    # can switch model with no code edit:
-    #     SWARM_MODEL=gpt-5.5 uv run python -m benchmarks.xbow_runner ...
+    # Provider default sourced from ``config.budgets.provider`` (which
+    # reads ``SWARM_PROVIDER``). Lets a run switch backends with no
+    # code edit, e.g. ``SWARM_PROVIDER=local uv run swarm ...``.
+    provider: Provider = field(
+        default_factory=lambda: Provider(
+            getattr(config.budgets, "provider", "codex")
+        )
+    )
+    # Model slug. For Codex / OpenAI / Anthropic this reads
+    # ``SWARM_MODEL``; for ``provider=local`` it reads
+    # ``SWARM_LOCAL_MODEL`` instead. The two are kept separate so a
+    # single ``.env`` can set valid slugs for both backends without
+    # collision (``SWARM_MODEL`` has a hard ``choices=`` whitelist of
+    # Codex-only slugs in ``src/graph.py``).
     #
-    # Why gpt-5.4-mini is the *default*: gpt-5.5's policy classifier
-    # refuses roughly 60% of pentest-shaped worker prompts
+    # Why gpt-5.4-mini is the *default* for Codex: gpt-5.5's policy
+    # classifier refuses roughly 60% of pentest-shaped worker prompts
     # (CodexCyberPolicyError), collapsing benchmark runs into 15-minute
     # timeouts. The mini model's filter is markedly more permissive
     # for the in-scope offensive-security work this swarm exists to do.
@@ -58,7 +72,11 @@ class LLMConfig:
     # Other valid Codex slugs: "gpt-5.5", "gpt-5.4", "gpt-5.3-codex",
     # "gpt-5.2", "codex-auto-review".
     model: str = field(
-        default_factory=lambda: getattr(config.budgets, "model", "gpt-5.4-mini")
+        default_factory=lambda: (
+            getattr(config.budgets, "local_model", "hermes-8b")
+            if getattr(config.budgets, "provider", "codex") == "local"
+            else getattr(config.budgets, "model", "gpt-5.4-mini")
+        )
     )
     temperature: float = 0.0
     max_tokens: int = field(default_factory=lambda: config.budgets.llm_max_tokens)
@@ -168,7 +186,7 @@ def current_default_config() -> dict[str, Any]:
     """
     try:
         cfg = LLMConfig()
-        return {
+        out = {
             "provider":          cfg.provider.value,
             "model":             cfg.model,
             "temperature":       cfg.temperature,
@@ -176,6 +194,15 @@ def current_default_config() -> dict[str, Any]:
             "reasoning_effort":  cfg.reasoning_effort,
             "reasoning_summary": cfg.reasoning_summary,
         }
+        if cfg.provider == Provider.LOCAL:
+            # Surface the local URL so the startup banner makes the
+            # endpoint obvious — otherwise "model=hermes-8b" is
+            # ambiguous about which llama-server / Ollama instance.
+            out["base_url"] = (
+                os.environ.get("SWARM_LOCAL_BASE_URL")
+                or "http://127.0.0.1:8080/v1"
+            )
+        return out
     except Exception:  # noqa: BLE001
         return {}
 
@@ -227,6 +254,43 @@ def get_llm(config: LLMConfig | None = None) -> BaseChatModel:
             base_url="https://openrouter.ai/api/v1",
             api_key=os.environ.get("OPENROUTER_API_KEY", ""),
             **extra,
+        )
+
+    if config.provider == Provider.LOCAL:
+        # Talks to a local llama-server (or Ollama, etc.) over its
+        # OpenAI-compatible Chat Completions endpoint. Reuses the same
+        # ``ChatOpenAI`` machinery that ``Provider.OPENAI`` does — only
+        # the ``base_url`` and the dummy API key change.
+        #
+        # No reasoning_summary plumbing here: none of the GGUFs commonly
+        # used with llama-server emit ``<think>`` blocks. If a reasoning
+        # GGUF (DeepSeek-R1-Distill, Qwen3-thinking) is later added, the
+        # ``additional_kwargs["reasoning_content"]`` deltas that
+        # ``ChatOpenAI`` already captures can be forwarded to
+        # ``LIVE.thinking_delta`` in ``callbacks.py``.
+        from langchain_openai import ChatOpenAI
+
+        # Resolution order: LLMConfig(extra={"base_url": ...}) wins,
+        # then ``SWARM_LOCAL_BASE_URL``, then llama-server's default
+        # port. The ``config.budgets.local_base_url`` value is sourced
+        # from ``SWARM_LOCAL_BASE_URL`` anyway, so the env lookup here
+        # covers both code paths without needing to un-shadow the
+        # module-level ``config`` import (the ``config`` parameter
+        # name shadows it inside this function).
+        base_url = (
+            (config.extra or {}).get("base_url")
+            or os.environ.get("SWARM_LOCAL_BASE_URL")
+            or "http://127.0.0.1:8080/v1"
+        )
+        _log_provider_diagnostic(config, base_url)
+        kwargs = {k: v for k, v in extra.items() if k != "base_url"}
+        return ChatOpenAI(
+            model=config.model,
+            temperature=config.temperature,
+            max_tokens=config.max_tokens,
+            base_url=base_url,
+            api_key="no-auth",  # llama-server / Ollama ignore this
+            **kwargs,
         )
 
     if config.provider == Provider.CODEX:

@@ -4,13 +4,19 @@ Invoked by :func:`src.cli.__init__.main` when the user runs ``swarm``
 with no positional argument and no benchmark shortcut. The flow:
 
   1. Print the rich banner (project name + config-file path).
-  2. ``docker_boot.ensure_ready()`` unless ``--no-docker``.
-  3. ``config_store.load_into_env()`` — TOML → ``os.environ``, with
+  2. ``config_store.load_into_env()`` — TOML → ``os.environ``, with
      override warnings shown under the banner.
-  4. Loop forever:
+  3. Loop forever:
         - present the top-level :func:`questionary.select`
         - dispatch to runner.* or _config_menu()
         - on Ctrl-C / "Quit", exit cleanly.
+
+Docker bootstrap is **lazy**: ``docker_boot.ensure_ready()`` is only
+called right before a benchmark action is dispatched (Pentest 1 /
+15 daily / 15 silent / all). The menu itself, config edits, and
+Quit never trigger Docker Desktop — SwarmAttacker only needs Docker
+when running pentest containers. ``--no-docker`` still skips the
+bootstrap even for benchmark actions (useful on remote VMs).
 
 Ctrl-C policy: ``questionary.select`` returns ``None`` when the user
 hits Ctrl-C. We treat that as "go back one level" rather than
@@ -21,7 +27,6 @@ their session.
 from __future__ import annotations
 
 import argparse
-import sys
 from typing import Any
 
 import questionary
@@ -40,15 +45,12 @@ _console = Console(stderr=True)
 # ---------------------------------------------------------------------------
 
 def main_loop(args: argparse.Namespace) -> None:
-    """Drive the interactive menu until the user quits or Ctrl-C's."""
-    banner.show(config_store.path())
+    """Drive the interactive menu until the user quits or Ctrl-C's.
 
-    if not args.no_docker:
-        try:
-            docker_boot.ensure_ready()
-        except KeyboardInterrupt:
-            _console.print("\n[dim]Cancelled during Docker bootstrap.[/dim]")
-            sys.exit(130)
+    Docker is **not** started here — it's bootstrapped lazily, only
+    when the user picks a benchmark action (see ``_ensure_docker``).
+    """
+    banner.show(config_store.path())
 
     # Apply persistent config to env, surfacing any shell-shadow overrides.
     for msg in config_store.load_into_env(override=True):
@@ -61,15 +63,41 @@ def main_loop(args: argparse.Namespace) -> None:
             return
 
         if action == "one":
+            if not _ensure_docker(args):
+                continue
             runner.run_one("XBEN-006-24")
         elif action == "daily_compact":
+            if not _ensure_docker(args):
+                continue
             runner.run_daily(silent=False)
         elif action == "daily_silent":
+            if not _ensure_docker(args):
+                continue
             runner.run_daily(silent=True)
         elif action == "all":
+            if not _ensure_docker(args):
+                continue
             runner.run_all()
         elif action == "config":
             _config_menu()
+
+
+def _ensure_docker(args: argparse.Namespace) -> bool:
+    """Bootstrap Docker Desktop right before a benchmark dispatch.
+
+    Returns True if Docker is ready (or the user passed
+    ``--no-docker``), False if the user Ctrl-C'd out of the
+    bootstrap — in which case the caller should drop back to the
+    menu instead of running the benchmark.
+    """
+    if args.no_docker:
+        return True
+    try:
+        docker_boot.ensure_ready()
+    except KeyboardInterrupt:
+        _console.print("\n[dim]Cancelled during Docker bootstrap — back to menu.[/dim]")
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------

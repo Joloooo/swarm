@@ -481,10 +481,10 @@ async def _run_skill_agent_impl(
     # benchmark-mode addendum used to be appended here when
     # ``state.expected_flag`` was set; it was removed on 2026-05-14
     # because the flag success-criterion language was the strongest
-    # cyber_policy refusal trigger in worker prompts. Flag detection
-    # now runs as a conditional edge after the summarizer
-    # (``src/edges/routing.py:route_after_summarizer``) so workers do
-    # not need to know about the success criterion.
+    # cyber_policy refusal trigger in worker prompts. The planner
+    # owns flag submission (``action="submit_flag"`` verified by
+    # ``src/edges/routing.py:route_after_planner``); workers only
+    # need to surface flag-shaped strings in their findings.
     phase1_findings = state.get("phase1_findings")
     system_msg = _build_system_message(
         config, target_url, phase1_findings,

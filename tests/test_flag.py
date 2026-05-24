@@ -8,26 +8,36 @@ from two sites:
   that decides whether to terminate on a ``submit_flag`` action.
 - :func:`benchmarks.xbow_runner` — the post-run benchmark verdict.
 
+## History
+
 The function replaced an earlier ``find_flag_in_state`` tier-5
 fallback that silently turned any ``FLAG{...}`` substring in the
-planner's narration into a "✓ FLAG FOUND" verdict (observed in the
-XBEN-006-24 run on 2026-05-12 where the planner's reasoning text
-contained the literal placeholder ``FLAG{...}`` and the run ended
-victorious despite zero worker output).
+planner's narration into a "✓ FLAG FOUND" verdict (XBEN-006-24,
+2026-05-12: planner's reasoning text contained the literal
+placeholder ``FLAG{...}`` and the run ended victorious despite zero
+worker output).
 
-These tests pin the comparison ladder:
+A subsequent "UUID fallback" branch — accept any well-formed
+``flag{<8+ chars>}`` whenever ``expected`` was set but didn't match
+exactly — was REMOVED on 2026-05-24. It was added under the false
+belief that XBEN-006-24 generated its flag randomly at container
+startup; checking ``common.mk`` and computing
+``sha256("XBEN-006-24")`` confirms every XBow benchmark is fully
+deterministic (``FLAG{sha256(BENCHMARK_UPPER)}``). The fallback only
+ever accepted *wrong* submissions.
 
-1. Empty submission is rejected.
-2. Malformed input (no ``flag{...}`` shape) is rejected.
-3. Inner content that matches a known placeholder
-   (:data:`src.edges.flag_match._OBVIOUS_PLACEHOLDERS`) is rejected
-   even when expected is empty.
-4. Exact match accepted.
-5. Case-insensitive exact match accepted.
-6. UUID fallback (expected set, exact miss, submitted has ≥ 8 char
-   non-placeholder inner content) accepted.
-7. UUID fallback refused for short / placeholder inner content.
-8. Real-pentest mode (empty expected) accepts well-formed flags.
+## Pinned behaviour
+
+These tests pin the two-mode contract:
+
+1. Empty / malformed submissions are rejected in both modes.
+2. Benchmark mode (``expected`` set) is strict case-insensitive
+   equality. Anything else fails — including well-formed flag-shaped
+   strings with the wrong inner content.
+3. Real-pentest mode (``expected`` empty) accepts any well-formed
+   non-placeholder ``flag{...}`` the agent submits.
+4. Placeholders (``FLAG{...}``, ``FLAG{x}``, ``FLAG{example}`` …) are
+   rejected in both modes.
 
 If any of these flip, future flag-related changes should fail loudly
 instead of bringing back the false-positive bug.
@@ -37,20 +47,21 @@ from __future__ import annotations
 
 from src.edges.flag_match import FLAG_RE, extract_flags, flags_match
 
+EXPECTED_006 = (
+    "FLAG{9c935b35ad7746d14fa2c01708b767f4cb0a9eaa867e77af44c14592439e53eb}"
+)
 
-# ── False-positive prevention (the bug that motivated this module) ──
+
+# ── False-positive prevention ──────────────────────────────────────────
 
 
-def test_placeholder_dots_rejected_even_with_no_expected():
+def test_placeholder_dots_rejected_in_both_modes():
     """The actual failure on 2026-05-12: ``FLAG{...}`` in planner narration."""
     assert not flags_match(submitted="FLAG{...}", expected="")
-    assert not flags_match(
-        submitted="FLAG{...}",
-        expected="FLAG{9c935b35ad7746d14fa2c01708b767f4cb0a9eaa867e77af44c14592439e53eb}",
-    )
+    assert not flags_match(submitted="FLAG{...}", expected=EXPECTED_006)
 
 
-def test_other_placeholders_rejected():
+def test_other_placeholders_rejected_in_pentest_mode():
     for placeholder in ("FLAG{x}", "FLAG{?}", "flag{example}",
                         "FLAG{placeholder}", "flag{tbd}"):
         assert not flags_match(submitted=placeholder, expected=""), placeholder
@@ -58,8 +69,8 @@ def test_other_placeholders_rejected():
 
 def test_empty_submission_rejected():
     assert not flags_match(submitted="", expected="")
-    assert not flags_match(submitted="", expected="FLAG{abc12345}")
-    assert not flags_match(submitted="   ", expected="FLAG{abc12345}")
+    assert not flags_match(submitted="", expected=EXPECTED_006)
+    assert not flags_match(submitted="   ", expected=EXPECTED_006)
 
 
 def test_malformed_submission_rejected():
@@ -69,12 +80,11 @@ def test_malformed_submission_rejected():
         assert not flags_match(submitted=bad, expected=""), bad
 
 
-# ── Happy paths ──
+# ── Benchmark mode: strict equality only ───────────────────────────────
 
 
 def test_exact_match_accepted():
-    expected = "FLAG{9c935b35ad7746d14fa2c01708b767f4cb0a9eaa867e77af44c14592439e53eb}"
-    assert flags_match(submitted=expected, expected=expected)
+    assert flags_match(submitted=EXPECTED_006, expected=EXPECTED_006)
 
 
 def test_case_insensitive_match_accepted():
@@ -88,44 +98,40 @@ def test_surrounding_whitespace_ignored():
     assert flags_match(submitted="  FLAG{abcdef12345}  ", expected=expected)
 
 
-# ── UUID fallback (benchmarks where expected can never equal the real flag) ──
-
-
-def test_uuid_fallback_accepted_when_content_is_real():
-    """XBEN-006-24 ships ``flag{<random-uuid>}``. Expected is the
-    deterministic SHA-256 prediction and can never match — the fallback
-    accepts any well-formed flag with non-placeholder content >= 8 chars.
+def test_benchmark_mode_rejects_wrong_well_formed_flag():
+    """The bug the UUID fallback used to mask: a well-formed flag with
+    the WRONG inner content must be rejected. Previously the fallback
+    accepted any ``flag{<8+ chars>}`` when expected didn't match
+    exactly — that's how false-positive captures slipped through.
     """
-    expected = "FLAG{9c935b35ad7746d14fa2c01708b767f4cb0a9eaa867e77af44c14592439e53eb}"
-    assert flags_match(
+    assert not flags_match(submitted="FLAG{aaaaaaaa}", expected=EXPECTED_006)
+    assert not flags_match(
         submitted="flag{582d82bb-2c1f-4ba5-9357-e8b94217957f}",
-        expected=expected,
+        expected=EXPECTED_006,
+    )
+    # Even another deterministic-looking sha256 — but the wrong one — fails.
+    assert not flags_match(
+        submitted="FLAG{0000000000000000000000000000000000000000000000000000000000000000}",
+        expected=EXPECTED_006,
     )
 
 
-def test_uuid_fallback_rejects_short_content():
-    """Short inner content in benchmark mode is almost always a lucky
-    guess or hallucination — refuse it on the fallback path."""
-    expected = "FLAG{9c935b35ad7746d14fa2c01708b767f4cb0a9eaa867e77af44c14592439e53eb}"
-    assert not flags_match(submitted="FLAG{abc}", expected=expected)
+def test_benchmark_mode_rejects_inner_content_match():
+    """Submitting the bare inner content (no ``FLAG{...}`` wrapper) loses."""
+    inner = EXPECTED_006[len("FLAG{"):-1]
+    assert not flags_match(submitted=inner, expected=EXPECTED_006)
 
 
-def test_uuid_fallback_rejects_placeholders_too():
-    expected = "FLAG{9c935b35ad7746d14fa2c01708b767f4cb0a9eaa867e77af44c14592439e53eb}"
-    for placeholder in ("FLAG{example}", "FLAG{placeholder}", "FLAG{tbd}"):
-        assert not flags_match(submitted=placeholder, expected=expected), placeholder
-
-
-# ── Real-pentest mode (expected is empty — agent is the authority) ──
+# ── Real-pentest mode (expected empty — agent is the authority) ────────
 
 
 def test_pentest_mode_accepts_well_formed_flags():
     """Outside benchmark mode, any well-formed non-placeholder flag wins."""
     assert flags_match(submitted="FLAG{captured-via-sqli-on-prod-2026}", expected="")
     assert flags_match(submitted="flag{12345678}", expected="")
-    # Even a short real-looking flag is acceptable when expected is empty
-    # (some CTFs use short flags); the fallback length check only
-    # applies when ``expected`` is set.
+    # Short flags accepted in pentest mode — some CTFs use ``flag{42}``;
+    # there's no ground truth to compare against, so the placeholder
+    # filter is the only gate.
     assert flags_match(submitted="FLAG{42}", expected="")
 
 
@@ -135,7 +141,7 @@ def test_pentest_mode_still_rejects_placeholders():
     assert not flags_match(submitted="FLAG{example}", expected="")
 
 
-# ── extract_flags + FLAG_RE — used by salvage in skill_runner ──
+# ── extract_flags + FLAG_RE — used by salvage in skill_runner ──────────
 
 
 def test_extract_flags_finds_all_occurrences_in_order():

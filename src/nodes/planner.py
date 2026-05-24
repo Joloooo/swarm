@@ -1224,28 +1224,22 @@ class PlannerNode(BaseNode):
         # empty and skip this entirely — non-benchmark behaviour is
         # unchanged.
         #
-        # The hint is a single line telling the planner that the
-        # success criterion lives in an automated edge: if a worker
-        # tool output contains the matching flag, the
-        # ``summarizer → END`` conditional edge terminates the run on
-        # its own (see ``src/edges/routing.py:route_after_summarizer``
-        # and ``src/nodes/summarizer.py``). The planner therefore does
-        # NOT need to chase the flag in its own narration, write
-        # ``submit_flag`` defensively, or refuse ``report`` — it just
-        # has to dispatch the right specialists. The previous addendum
-        # (7 lines of "do not route to report until …") was replaced
-        # on 2026-05-14 because the same language existed in worker
-        # prompts and was the single strongest cyber_policy refusal
-        # trigger; auto-capture removes the need for either prompt to
-        # carry it.
+        # Tells the planner the success criterion: the run only ends
+        # with a verified capture when YOU emit ``action="submit_flag"``
+        # with the exact string a worker extracted from the target.
+        # There is no auto-termination edge — the summariser-side scan
+        # was removed (2026-05-24) because regex-matching ``flag{...}``
+        # over raw HTTP bodies false-positived on template strings and
+        # the agent's own script literals. Capture is your decision.
         expected_flag = (state.get("expected_flag") or "").strip()
         if expected_flag:
             prior_messages.append(HumanMessage(content=(
-                "[SYSTEM NOTE] Benchmark mode: an automated edge ends "
-                "the run when a worker tool output contains the target "
-                "flag — you do not need to chase it yourself. Focus on "
-                "dispatching the right specialists against the right "
-                "surface; the capture happens downstream."
+                "[SYSTEM NOTE] Benchmark mode: the run only ends with a "
+                "verified capture when you call action=\"submit_flag\" "
+                "with the exact flag string a worker extracted from the "
+                "target. Watch every worker_report's \"Server responses\" "
+                "and \"**FINDING:**\" blocks for a flag-shaped value, "
+                "and submit it the moment you see one."
             )))
 
         try:

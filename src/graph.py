@@ -257,10 +257,7 @@ def describe_config() -> str:
 
 from langgraph.graph import END, START, StateGraph  # noqa: E402
 
-from src.edges.routing import (  # noqa: E402
-    route_after_planner,
-    route_after_summarizer,
-)
+from src.edges.routing import route_after_planner  # noqa: E402
 from src.nodes import (  # noqa: E402
     executor_node,
     planner_node,
@@ -352,26 +349,19 @@ def build_graph():
     graph.add_edge("recon", "summarizer")
     graph.add_edge("executor", "summarizer")
 
-    # Summariser → planner OR END (conditional).
+    # Summariser → planner. Always.
     #
-    # The summariser sets ``state["captured_flag"]`` whenever a worker's
-    # tool output contained a string matching the run's expected flag
-    # (see ``src/nodes/summarizer.py`` and
-    # ``src/edges/flag_match.py:scan_pending_summary_inputs_for_flag``).
-    # ``route_after_summarizer`` reads that field and routes straight
-    # to ``END`` on a non-empty value — bypassing the planner's
-    # ``submit_flag`` round-trip — or back to the planner otherwise.
-    #
-    # This replaces a plain edge that existed since the 2026-05
-    # cleanup; the old conditional was deleted because it scanned
-    # narration text and false-positived on placeholder
-    # ``FLAG{...}``. The new scan is scoped to tool message content
-    # only, so the historical failure mode can't fire.
-    graph.add_conditional_edges(
-        "summarizer",
-        route_after_summarizer,
-        ["planner", END],
-    )
+    # An earlier version routed conditionally via
+    # ``route_after_summarizer`` to allow auto-termination when a
+    # worker's tool output contained a flag-shaped string. Removed
+    # 2026-05-24: regex matching over raw HTTP response bodies cannot
+    # be made false-positive-safe (README excerpts, swagger schemas,
+    # the agent's own ``python3 -c`` script literals all match
+    # ``flag{...}``). The only way to win a benchmark is now the
+    # planner emitting ``action="submit_flag"`` with a string that
+    # passes :func:`src.edges.flag_match.flags_match`, verified by
+    # :func:`src.edges.routing.route_after_planner`.
+    graph.add_edge("summarizer", "planner")
     graph.add_edge("web_search", "planner")
 
     graph.add_edge("report", END)

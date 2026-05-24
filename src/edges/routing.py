@@ -1,6 +1,6 @@
 """Routing edges — translate the supervisor's decision into a transition.
 
-This module has two edge functions:
+One edge function:
 
   :func:`route_after_planner` — reads the supervisor's chosen action
   and returns either a node name (``recon`` / ``web_search`` /
@@ -12,25 +12,18 @@ This module has two edge functions:
   via :func:`src.edges.flag_match.flags_match`. Match → ``END``,
   miss → ``"planner"``.
 
-  :func:`route_after_summarizer` — runs after every worker fan-out's
-  digest. Reads ``state["captured_flag"]`` (set by
-  :class:`src.nodes.summarizer.SummarizerNode` when a worker tool
-  output contained a flag matching ``expected_flag``). On a non-empty
-  value → ``END``; otherwise → ``"planner"`` as in the plain edge it
-  replaced.
-
-  The 2026-05-14 reintroduction of summarizer-side flag detection is
-  narrower than the function deleted in 2026-05: the scan is scoped
-  to tool message content only (see
-  :func:`src.edges.flag_match.scan_trace_for_flag`), eliminating the
-  "FLAG{...} placeholder in planner narration triggers false
-  positive" failure mode that killed the old implementation. Workers
-  no longer carry benchmark-mode language in their system prompt
-  either — the success criterion lives entirely in this edge.
+The summarizer → planner transition used to be conditional (a
+``route_after_summarizer`` edge that scanned worker tool outputs for
+``flag{...}`` strings and auto-terminated on a hit). Removed
+2026-05-24: regex matching over raw HTTP response bodies cannot be
+made false-positive-safe — README excerpts, swagger schemas, and the
+agent's own ``python3 -c`` script literals all contain ``flag{...}``-
+shaped strings. Capture is now an explicit agent decision via
+``submit_flag``; the summarizer always routes back to the planner.
 
 The planner is responsible for populating ``pending_dispatch`` when
 it picks ``action="attack"`` and for populating ``submission_attempts``
-when it picks ``action="submit_flag"``; these edges only read those
+when it picks ``action="submit_flag"``; this edge only reads those
 fields.
 """
 
@@ -148,32 +141,4 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
         action,
     )
     return _TERMINATE
-
-
-def route_after_summarizer(state: SwarmGraphState) -> str:
-    """Pick the next transition after the summarizer node finishes.
-
-    The summarizer sets ``state["captured_flag"]`` whenever any
-    pending worker's tool output contained a string that matched the
-    run's ``expected_flag`` (or a well-formed flag in real-pentest
-    mode — see :func:`src.edges.flag_match.flags_match`).
-
-    On a non-empty captured flag → ``END``. The benchmark verdict
-    (``xbow_runner.run_one``) reads the captured flag off
-    ``submission_attempts`` (the summarizer pushes it there) so no
-    additional handshake is required — the run simply finishes.
-
-    Otherwise hand control back to the planner exactly like the plain
-    edge this function replaced.
-    """
-    captured = (state.get("captured_flag") or "").strip()
-    if captured:
-        logger.info(
-            "route_after_summarizer: captured flag %r from worker tool "
-            "output; routing to END (bypassing planner submit_flag).",
-            captured[:80],
-        )
-        return END
-    return "planner"
-
 

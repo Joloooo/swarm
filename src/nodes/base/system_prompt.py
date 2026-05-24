@@ -39,12 +39,12 @@ three audiences:
 ``STEALTH_RULES`` gets appended on top of any of the three audiences
 when the planner has marked ``stealth_level >= 1``. Benchmark-mode
 guidance ("scan responses for ``FLAG{...}``") was REMOVED from the
-worker prompt entirely on 2026-05-14: flag detection now runs as a
-conditional edge after the summarizer (see ``src/edges/routing.py:
-route_after_summarizer`` and ``src/nodes/summarizer.py``). Workers
-discover the flag by doing their job, not by being instructed to chase
-it — keeping the success criterion out of the prompt removes the
-single strongest "this is a CTF" cue the Codex cyber_policy classifier
+worker prompt entirely on 2026-05-14. The planner owns flag
+submission (``action="submit_flag"`` verified by
+``src/edges/routing.py:route_after_planner``); workers discover the
+flag by doing their job and surface it in findings. Keeping the
+success criterion out of the worker prompt removes the single
+strongest "this is a CTF" cue the Codex cyber_policy classifier
 keys on.
 
 The public assembly functions are :func:`get_universal_prompt`,
@@ -612,11 +612,11 @@ def _build_system_message(
           full executor methodology, severity, category guidance).
 
     Benchmark-mode flag guidance was REMOVED from the worker prompt
-    on 2026-05-14 — flag detection now runs as a conditional edge after
-    the summarizer (see ``src/edges/routing.py: route_after_summarizer``
-    and the trace scan in ``src/nodes/summarizer.py``). Workers
-    discover the flag by doing their job; the success criterion no
-    longer lives in their system prompt.
+    on 2026-05-14 — the planner owns flag submission via
+    ``action="submit_flag"`` (verified by
+    ``src/edges/routing.py:route_after_planner``). Workers discover
+    the flag by doing their job and surface it in findings; the
+    success criterion no longer lives in their system prompt.
     """
     # Minimal-framing path: the SKILL.md body is the entire system
     # prompt. Phase 1 findings still get appended because they are

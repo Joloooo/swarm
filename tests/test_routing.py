@@ -10,15 +10,20 @@ edge after the planner node. It maps the planner's chosen
   ``"submit_flag"``.
 * ``"planner"`` (loop back) for rejected ``"submit_flag"``.
 
-The ``submit_flag`` branch is the verification edge that replaced the
-old format-tolerant ``find_flag_in_state`` scan — the latter falsely
-ended runs whenever the planner's reasoning text contained the literal
-placeholder ``FLAG{...}``. These tests pin the new explicit-submission
-behaviour:
+The ``submit_flag`` branch is the verification edge that replaced
+two earlier flag-detection paths: the format-tolerant
+``find_flag_in_state`` scan (ended runs on placeholder ``FLAG{...}``
+in narration) and the summariser-side tool-output scan with its UUID
+fallback (accepted any well-formed flag-shaped string in benchmark
+mode whenever exact match missed — i.e. it accepted wrong
+submissions). Both were removed; ``submit_flag`` + strict equality
+is now the only termination-on-capture path.
 
-1. Verified submission → ``END``.
-2. Rejected submission → ``"planner"`` (the planner sees its own
-   history in ``submission_attempts`` and tries again).
+These tests pin the explicit-submission behaviour:
+
+1. Verified submission (exact match in benchmark mode) → ``END``.
+2. Wrong submission in benchmark mode → ``"planner"``. NO fallback
+   accepts arbitrary well-formed flags any more.
 3. Defensive: ``submit_flag`` with empty ``submission_attempts``
    defers to the planner rather than crashing.
 4. Real-pentest mode (empty ``expected_flag``) accepts a well-formed
@@ -61,14 +66,19 @@ def test_submit_flag_case_insensitive_verified_routes_to_end():
     assert route_after_planner(state) is END
 
 
-def test_submit_flag_uuid_fallback_routes_to_end():
-    """XBEN-006-24 path: expected SHA never matches but real flag is a UUID."""
+def test_submit_flag_wrong_uuid_routes_back_to_planner():
+    """The UUID fallback was REMOVED on 2026-05-24. In benchmark mode,
+    a well-formed flag with the WRONG inner content must NOT end the
+    run — previously the fallback accepted any ``flag{<8+ chars>}``
+    whenever expected didn't match exactly, which is how false-positive
+    captures slipped through.
+    """
     state = {
         "next_action": "submit_flag",
         "submission_attempts": ["flag{582d82bb-2c1f-4ba5-9357-e8b94217957f}"],
         "expected_flag": "FLAG{9c935b35ad7746d14fa2c01708b767f4cb0a9eaa867e77af44c14592439e53eb}",
     }
-    assert route_after_planner(state) is END
+    assert route_after_planner(state) == "planner"
 
 
 def test_submit_flag_placeholder_routes_back_to_planner():
@@ -81,24 +91,19 @@ def test_submit_flag_placeholder_routes_back_to_planner():
     assert route_after_planner(state) == "planner"
 
 
-def test_submit_flag_wrong_value_routes_back_to_planner():
+def test_submit_flag_wrong_well_formed_value_routes_back_to_planner():
+    """The exact false-positive surface the UUID fallback used to create."""
     state = {
         "next_action": "submit_flag",
         "submission_attempts": ["FLAG{wrongvalue12345}"],
         "expected_flag": "FLAG{rightvalue1234567890abcdef1234567890abcdef1234567890abcdef12}",
     }
-    # 16-char wrong content matches the FLAG_RE shape and exceeds the
-    # 8-char minimum, but since ``expected`` is set and the exact /
-    # case-insensitive checks both miss, the UUID fallback accepts it.
-    # That is the intended behaviour: in benchmark mode where expected
-    # cannot equal the real flag, ANY non-placeholder well-formed flag
-    # is treated as a capture. The placeholder defence prevents the
-    # specific false positive we observed.
-    assert route_after_planner(state) is END
+    assert route_after_planner(state) == "planner"
 
 
 def test_submit_flag_short_content_routes_back_to_planner():
-    """Inner content < 8 chars in benchmark mode is rejected."""
+    """Short inner content in benchmark mode is rejected (it can't match
+    a 64-char sha256 expected flag)."""
     state = {
         "next_action": "submit_flag",
         "submission_attempts": ["FLAG{abc}"],

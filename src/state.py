@@ -170,12 +170,12 @@ class SwarmGraphState(TypedDict, total=False):
     # other benchmark driver), the planner and workers know the run has
     # an explicit success criterion — extracting a string matching this
     # value. Real pentest runs leave this empty, and the benchmark-only
-    # behavior (flag-pattern detection in workers, flag-aware forcing in
-    # the planner) does not fire. Read by:
-    #   - src.nodes.base._build_system_message (worker prompt addendum)
+    # behavior (flag-aware planner forcing function) does not fire.
+    # Read by:
     #   - src.nodes.planner.PlannerNode.execute (planner prompt addendum
     #     and the `_maybe_force_recovery` safety net)
-    #   - src.edges.routing.route_after_summarizer (early-exit edge)
+    #   - src.edges.routing.route_after_planner (compares submitted vs
+    #     expected on action="submit_flag")
     expected_flag: str
 
     # Append-only list of flag strings the planner has explicitly
@@ -199,24 +199,6 @@ class SwarmGraphState(TypedDict, total=False):
     # planner each appending their own attempt are concatenated rather
     # than overwriting.
     submission_attempts: Annotated[list[str], operator.add]
-
-    # Set by the summarizer node when a worker's tool output contained
-    # a string matching ``expected_flag`` (or, in real-pentest mode,
-    # any well-formed ``flag{...}`` that isn't a placeholder). The
-    # conditional edge ``route_after_summarizer`` reads this field and
-    # routes straight to ``END`` on a non-empty value — bypassing the
-    # planner's ``submit_flag`` round-trip. The summarizer also pushes
-    # the captured flag onto ``submission_attempts`` so the existing
-    # benchmark verdict logic (``xbow_runner.run_one``) sees a
-    # successful submission unchanged.
-    #
-    # See:
-    #   - src.nodes.summarizer.SummarizerNode.execute  (writer)
-    #   - src.edges.flag_match.scan_pending_summary_inputs_for_flag
-    #     (scanner — scoped to tool message content only, no false
-    #     positives from assistant narration)
-    #   - src.edges.routing.route_after_summarizer  (reader)
-    captured_flag: str
 
     # ── Worker → Summarizer hand-off (the context-window fix) ──
     # Each worker (executor, recon, salvage) writes a SINGLE-ITEM list

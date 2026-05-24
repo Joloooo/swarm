@@ -573,7 +573,7 @@ async def _run_skill_agent_impl(
     # step — which is exactly what salvage_finding() consumes.
     #
     # The agent is reconstructed inside the retry helper because
-    # tier-2 needs to swap in a vocab-filtered system_msg.
+    # vocab-filter / tier-2 model-swap both rebuild it from scratch.
     def _agent_factory(sys_prompt: str):
         return create_agent(
             model=llm,
@@ -581,9 +581,48 @@ async def _run_skill_agent_impl(
             system_prompt=sys_prompt,
         )
 
+    # Tier-2 fallback factory — only wired when the primary provider
+    # is Codex (model-swap to gpt-5.4 isn't meaningful for anthropic
+    # / local / openrouter routes). See ``src/refusals/retry.py`` for
+    # the tier ladder and ``config.budgets.fallback_*`` env knobs for
+    # tuning the fallback model + reasoning_effort.
+    from src.llm.provider import LLMConfig as _LLMConfig
+    from src.llm.provider import Provider as _Provider
+    fallback_factory: Any = None
+    _primary_cfg = _LLMConfig()
+    if _primary_cfg.provider == _Provider.CODEX:
+        # Lazy import — skill_runner is imported transitively from
+        # src.graph during its own initialization, so a top-level
+        # ``from src.graph import config`` would re-enter the module
+        # while it's still binding ``config``. Reading via the module
+        # object at call-time (after graph.py has finished) avoids
+        # that.
+        from src import graph as _graph_module
+        _fallback_model = getattr(
+            _graph_module.config.budgets, "fallback_model", "gpt-5.4",
+        )
+        _fallback_effort = getattr(
+            _graph_module.config.budgets, "fallback_reasoning_effort", "low",
+        )
+
+        def _fallback_agent_factory(sys_prompt: str):
+            from src.llm.provider import get_llm as _get_llm
+            fb_llm = _get_llm(_LLMConfig(
+                provider=_Provider.CODEX,
+                model=_fallback_model,
+                reasoning_effort=_fallback_effort,
+            ))
+            return create_agent(
+                model=fb_llm,
+                tools=config.tools,
+                system_prompt=sys_prompt,
+            )
+
+        fallback_factory = _fallback_agent_factory
+
     last_snapshot: dict | None = None
     worker_attempts = 0
-    worker_last_tier = "plain"
+    worker_last_tier = "primary"
     try:
         (
             last_snapshot,
@@ -591,6 +630,7 @@ async def _run_skill_agent_impl(
             worker_last_tier,
         ) = await astream_with_refusal_retry(
             agent_factory=_agent_factory,
+            fallback_agent_factory=fallback_factory,
             system_msg=system_msg,
             seed_msgs=seed_msgs,
             call_config=call_config,

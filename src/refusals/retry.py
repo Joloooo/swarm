@@ -6,16 +6,33 @@ When a worker LLM call raises ``CodexCyberPolicyError`` or
 before any tool call happened. This module retries the call across
 two tiers:
 
-  Tier 1: plain retry × N (default 3) — handles the classifier's
-          near-threshold non-determinism. Empirical replay sweeps
-          (``scripts/replay_refusals_v{2,3,4}.py``, ~150 calls)
-          confirmed plain retry rescues 4-5 of 11 refused cases.
+  Preventive (always-on): the CLAUDE.md vocabulary filter
+          (``src/refusals/vocabulary.py``) is applied to ``system_msg``
+          and every ``seed_msg`` BEFORE the first attempt — not as a
+          fallback. Empirical v5 replay (2026-05-24,
+          ``scripts/replay_refusals_v5.py``) confirmed that the
+          ``cyber_policy`` classifier triggers on opening payload
+          content (system_prompt + seed user message), not on
+          accumulated assistant history (0/47 logged refusals had
+          rewritable AIMessage narration). So the right intervention
+          is at the opening, applied unconditionally.
 
-  Tier 2: vocabulary filter retry × 1 — applies the runtime
-          verb-policy filter (CLAUDE.md table, implemented in
-          ``src/refusals/vocabulary.py``) to the system prompt and
-          seed messages, then retries once. Rescued 2 unique cases
-          in the v4 sweep that no other transform could.
+  Tier 1 — primary model retry × N (default 3): the worker's
+          configured LLM with vocab-filter applied. Handles the
+          classifier's near-threshold non-determinism. Historical
+          replay sweeps showed plain retry rescues 4-5 of 11 refused
+          cases on its own; with preventive vocab filter the rate
+          should be at least as high.
+
+  Tier 2 — model-fallback retry × N (default 3): if a fallback agent
+          factory is supplied AND the primary tier exhausts, rebuild
+          the agent with a different model + reasoning_effort and
+          retry. Default fallback is gpt-5.4 at reasoning_effort=low
+          (see ``config.budgets.fallback_*`` in ``src/graph.py``).
+          The fallback model's cyber_policy classifier is markedly
+          more permissive than gpt-5.5's; trading some capability for
+          a successful response is a worthwhile bargain when the
+          alternative is total worker loss.
 
 On all-tiers-exhaust, re-raises the last refusal exception. The
 caller (``src/nodes/base/skill_runner.py:run_skill_agent``) catches it, logs to
@@ -43,34 +60,43 @@ async def astream_with_refusal_retry(
     call_config: dict,
     config: "AgentConfig",
     log: logging.Logger,
-    max_plain_retries: int = 2,
+    fallback_agent_factory: Callable[[str], Any] | None = None,
+    max_retries_per_tier: int = 2,
 ) -> tuple[dict | None, int, str]:
-    """Run agent.astream with tiered refusal retry.
+    """Run agent.astream with preventive vocab filter + tiered retry.
 
     Args:
-        agent_factory: callable taking the system prompt and returning
-            a freshly-built LangChain agent. Called once per tier so
-            the vocab-filtered system prompt can be applied cleanly.
-        system_msg: the worker's full system prompt, used unchanged
-            in tier 1 and vocabulary-rewritten in tier 2.
+        agent_factory: callable taking the (already vocab-filtered)
+            system prompt and returning a freshly-built LangChain
+            agent backed by the primary LLM. Called once per tier-1
+            attempt so the filtered prompt is wired in cleanly.
+        system_msg: the worker's full system prompt. Vocabulary-
+            filtered preventively (always, not just on retry) before
+            any LLM call.
         seed_msgs: the initial message list (web-search context,
-            prior-history block, the human task), used unchanged in
-            tier 1 and vocabulary-rewritten in tier 2.
+            prior-history block, the human task). Vocabulary-filtered
+            preventively, same as ``system_msg``.
         call_config: LangChain RunnableConfig forwarded to ``astream``
             so the token-logging callback fires for every LLM call.
         config: the worker's ``AgentConfig`` — only used for the
             ``agent_id`` in log messages.
         log: per-node logger so the retry events appear under the
             node's namespace (``node.executor`` etc.).
-        max_plain_retries: how many additional plain attempts after
-            the first. Default 2 → 3 plain attempts total before
-            tier 2 fires.
+        fallback_agent_factory: optional second factory that returns
+            an agent backed by the FALLBACK model (e.g. gpt-5.4 at
+            reasoning_effort=low). When supplied, fires as tier 2 if
+            tier 1 exhausts. Caller decides whether to supply one —
+            non-Codex providers (anthropic / local) typically pass
+            None since model-swap isn't well-defined for them.
+        max_retries_per_tier: how many additional attempts after the
+            first within each tier. Default 2 → 3 attempts per tier
+            → up to 6 attempts total when both tiers are configured.
 
     Returns:
         ``(last_snapshot, total_attempts, last_tier_used)`` on success.
         ``last_snapshot`` is the final state value yielded by
         ``astream``; ``total_attempts`` counts every call across both
-        tiers; ``last_tier`` is ``"plain"`` or ``"vocab_filter"``.
+        tiers; ``last_tier`` is ``"primary"`` or ``"fallback"``.
 
     Raises:
         The last refusal exception after all tiers exhaust. Two
@@ -78,10 +104,10 @@ async def astream_with_refusal_retry(
         so the catch site can read them:
 
           - ``e._swarm_attempts`` — total attempts across all tiers
-          - ``e._swarm_last_tier`` — ``"plain"`` or ``"vocab_filter"``
+          - ``e._swarm_last_tier`` — ``"primary"`` or ``"fallback"``
 
         Without this, the catch site's locals stay at their initial
-        values (0 / "plain") because tuple-unpacking the helper's
+        values (0 / "primary") because tuple-unpacking the helper's
         return never fires when the helper raises. Verified
         empirically in run-XBEN-006-24__2026-05-10_23h13m42s where
         the first ``refusals.jsonl`` row showed ``attempts_made: 0``
@@ -95,19 +121,38 @@ async def astream_with_refusal_retry(
         CodexCyberPolicyError,
         CodexInvalidPromptError,
     )
+    from src.refusals.vocabulary import filter_messages, filter_text
     REFUSAL_EXCS = (CodexCyberPolicyError, CodexInvalidPromptError)
+
+    # ── Preventive vocab filter ─────────────────────────────────
+    # Applied to BOTH system prompt and seed messages before the
+    # first attempt. v5 replay (2026-05-24) showed that 0/47
+    # historical refusals had rewritable AIMessage history, so the
+    # classifier's trigger is on opening payload content — exactly
+    # what this filter targets. Applying it preventively (vs. only
+    # on retry) costs nothing on calls that wouldn't have refused
+    # anyway (regex substitution is cheap and lossless for technical
+    # content) and gives tier-1 attempts the best chance from the
+    # outset.
+    filtered_sys, sys_subs = filter_text(system_msg)
+    filtered_seed, seed_subs = filter_messages(seed_msgs)
+    if sys_subs or seed_subs:
+        log.info(
+            "[%s] preventive vocab filter applied: %d sys + %d seed "
+            "substitutions before tier-1 attempt",
+            config.agent_id, len(sys_subs), len(seed_subs),
+        )
 
     last_snapshot: dict | None = None
     last_exc: Exception | None = None
     total_attempts = 0
-    last_tier = "plain"
+    last_tier = "primary"
 
     # Track per-tier "have we dumped yet" so the live refused-prompt
-    # render fires once per tier instead of once per retry. Tier-1
-    # plain retries reuse the same seed_msgs / system_msg, so the 3
-    # attempts produce near-identical inputs — dumping all of them
+    # render fires once per tier instead of once per retry. Retries
+    # within a tier reuse the same payload — dumping all of them
     # would just spam the terminal with duplicate red walls.
-    tier_dumped = {"plain": False, "vocab_filter": False}
+    tier_dumped = {"primary": False, "fallback": False}
 
     def _dump_to_live(exc: BaseException, tier: str) -> None:
         if tier_dumped.get(tier):
@@ -129,13 +174,13 @@ async def astream_with_refusal_retry(
             # about to re-raise.
             pass
 
-    # ── Tier 1: plain retry ─────────────────────────────────────
-    agent = agent_factory(system_msg)
-    for attempt in range(max_plain_retries + 1):
+    # ── Tier 1: primary model, vocab-filtered, retry × N ────────
+    agent = agent_factory(filtered_sys)
+    for attempt in range(max_retries_per_tier + 1):
         total_attempts += 1
         try:
             async for snap in agent.astream(
-                {"messages": seed_msgs},
+                {"messages": filtered_seed},
                 config=call_config,
                 stream_mode="values",
             ):
@@ -145,60 +190,57 @@ async def astream_with_refusal_retry(
         except REFUSAL_EXCS as e:
             last_exc = e
             log.warning(
-                "[%s] worker refused (tier=plain, attempt=%d/%d): %s",
+                "[%s] worker refused (tier=primary, attempt=%d/%d): %s",
                 config.agent_id, attempt + 1,
-                max_plain_retries + 1, str(e)[:160],
+                max_retries_per_tier + 1, str(e)[:160],
             )
-            # Dump the offending request payload on the FIRST refusal
-            # of this tier — see ``tier_dumped`` comment above for why
-            # we don't repeat it on subsequent identical retries.
-            _dump_to_live(e, "plain")
-            if attempt < max_plain_retries:
+            _dump_to_live(e, "primary")
+            if attempt < max_retries_per_tier:
                 await asyncio.sleep(1.5)
                 continue
-            # exhausted plain tier, fall through to tier 2
-        # any non-refusal exception propagates
+            # exhausted primary tier, fall through to tier 2
 
-    # ── Tier 2: vocabulary filter retry ────────────────────────
-    from src.refusals.vocabulary import filter_messages, filter_text
-    filtered_sys, sys_subs = filter_text(system_msg)
-    filtered_seed, seed_subs = filter_messages(seed_msgs)
-    if sys_subs or seed_subs:
+    # ── Tier 2: fallback model, vocab-filtered, retry × N ───────
+    if fallback_agent_factory is None:
+        # No fallback wired (caller is on a non-Codex provider, or
+        # opted out). Skip directly to the raise path.
         log.info(
-            "[%s] tier-2 retry with %d sys + %d seed vocab "
-            "substitutions",
-            config.agent_id, len(sys_subs), len(seed_subs),
-        )
-    else:
-        log.info(
-            "[%s] tier-2 retry: no vocab substitutions matched "
-            "(skill may already be neutral)",
+            "[%s] primary tier exhausted, no fallback factory "
+            "supplied — surfacing last refusal",
             config.agent_id,
         )
-
-    last_tier = "vocab_filter"
-    total_attempts += 1
-    agent = agent_factory(filtered_sys)
-    try:
-        async for snap in agent.astream(
-            {"messages": filtered_seed},
-            config=call_config,
-            stream_mode="values",
-        ):
-            last_snapshot = snap
-        return last_snapshot, total_attempts, last_tier
-    except REFUSAL_EXCS as e:
-        last_exc = e
-        log.warning(
-            "[%s] worker refused (tier=vocab_filter, attempt=%d): %s",
-            config.agent_id, total_attempts, str(e)[:160],
+    else:
+        last_tier = "fallback"
+        log.info(
+            "[%s] primary tier exhausted, switching to fallback model",
+            config.agent_id,
         )
-        # Dump the vocab-filtered payload too — its substitutions can
-        # be the difference between a refusal and a success, so seeing
-        # the actual filtered text in the terminal lets the operator
-        # judge whether the policy is being trained against neutral
-        # wording or whether more rewrites are needed.
-        _dump_to_live(e, "vocab_filter")
+        fb_agent = fallback_agent_factory(filtered_sys)
+        for attempt in range(max_retries_per_tier + 1):
+            total_attempts += 1
+            try:
+                async for snap in fb_agent.astream(
+                    {"messages": filtered_seed},
+                    config=call_config,
+                    stream_mode="values",
+                ):
+                    last_snapshot = snap
+                log.info(
+                    "[%s] rescued by fallback model on attempt %d",
+                    config.agent_id, attempt + 1,
+                )
+                return last_snapshot, total_attempts, last_tier
+            except REFUSAL_EXCS as e:
+                last_exc = e
+                log.warning(
+                    "[%s] worker refused (tier=fallback, attempt=%d/%d): %s",
+                    config.agent_id, attempt + 1,
+                    max_retries_per_tier + 1, str(e)[:160],
+                )
+                _dump_to_live(e, "fallback")
+                if attempt < max_retries_per_tier:
+                    await asyncio.sleep(1.5)
+                    continue
 
     # All tiers exhausted — surface the last refusal so the outer
     # except in ``run_skill_agent`` runs its existing logging /

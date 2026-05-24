@@ -53,7 +53,10 @@ class RefusalError(Exception):
     attempts_made: int
     refusal_message: str
     # Optional — set if the catch site knows which retry tier was
-    # last attempted (e.g. "plain" vs "vocab_filter").
+    # last attempted ("primary" or "fallback"; see retry.py for the
+    # tier ladder). The legacy values "plain" / "vocab_filter" may
+    # appear in older refusals.jsonl rows from before the 2026-05-24
+    # restructure that moved vocab-filter from tier-2 to preventive.
     last_tier: str | None = None
 
     def __post_init__(self) -> None:
@@ -64,6 +67,6 @@ class RefusalError(Exception):
         return (
             f"[{self.agent_id}] cyber_policy refusal after "
             f"{self.attempts_made} attempts (last tier: "
-            f"{self.last_tier or 'plain'}, request "
+            f"{self.last_tier or 'primary'}, request "
             f"~{self.request_size_tokens} tokens)"
         )

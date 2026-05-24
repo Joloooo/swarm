@@ -732,45 +732,6 @@ async def _run_skill_agent_impl(
                 worker_attempts, worker_last_tier, str(e)[:200],
             )
 
-            # Structured refusal log — append a JSONL row to
-            # ``logs/run-<id>/refusals.jsonl`` so the run summary can
-            # answer "X of Y workers refused" by skill/iteration/size.
-            # Best-effort, never raises.
-            #
-            # Pull the attempt counters off the exception (set by
-            # ``astream_with_refusal_retry`` before re-raising) —
-            # the local variables ``worker_attempts`` /
-            # ``worker_last_tier`` only get populated when the
-            # helper RETURNS (not on raise), so they'd otherwise
-            # show 0/"plain" here. Fall back to the locals if the
-            # exception didn't carry the attrs.
-            attempts_for_log = getattr(
-                e, "_swarm_attempts", worker_attempts,
-            )
-            tier_for_log = getattr(
-                e, "_swarm_last_tier", worker_last_tier,
-            )
-            try:
-                from src.refusals import RefusalError
-                from src.llm.refusal import log_refusal
-                refusal_record = RefusalError(
-                    agent_id=config.agent_id,
-                    skill_name=config.config_name,
-                    iteration=len(partial_messages),
-                    request_size_chars=len(system_msg or ""),
-                    request_size_tokens=(len(system_msg or "")) // 4,
-                    attempts_made=attempts_for_log,
-                    refusal_message=str(e)[:400],
-                    last_tier=tier_for_log,
-                )
-                log_refusal(refusal_record, run_id=run_id)
-            except Exception as log_err:  # noqa: BLE001
-                node.log.warning(
-                    "[%s] refusals.jsonl logging failed: %s: %s",
-                    config.agent_id,
-                    type(log_err).__name__,
-                    str(log_err)[:160],
-                )
             trace = [
                 m for m in partial_messages
                 if isinstance(m, (AIMessage, ToolMessage))

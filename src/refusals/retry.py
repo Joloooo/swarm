@@ -52,6 +52,34 @@ if TYPE_CHECKING:
     from src.nodes.base import AgentConfig
 
 
+async def _run_agent_once(
+    agent: Any, messages: list, call_config: dict, mode: str,
+) -> dict | None:
+    """Invoke one agent attempt under the chosen LangChain mode.
+
+    ``mode="astream"`` (workers): stream snapshots and keep the last,
+    so a mid-loop ``GraphRecursionError`` leaves a partial state for
+    the salvage path to consume. ``mode="ainvoke"`` (planner): the
+    planner produces one JSON decision per turn — streaming gives us
+    no useful checkpointing for a single-shot call, so we just await
+    the final result. Both branches return the same shape (the final
+    state dict), which is what the helper's caller expects.
+    """
+    if mode == "ainvoke":
+        return await agent.ainvoke(
+            {"messages": messages}, config=call_config,
+        )
+    # default "astream"
+    last: dict | None = None
+    async for snap in agent.astream(
+        {"messages": messages},
+        config=call_config,
+        stream_mode="values",
+    ):
+        last = snap
+    return last
+
+
 async def astream_with_refusal_retry(
     *,
     agent_factory: Callable[[str], Any],
@@ -62,6 +90,7 @@ async def astream_with_refusal_retry(
     log: logging.Logger,
     fallback_agent_factory: Callable[[str], Any] | None = None,
     max_retries_per_tier: int = 2,
+    mode: str = "astream",
 ) -> tuple[dict | None, int, str]:
     """Run agent.astream with preventive vocab filter + tiered retry.
 
@@ -179,12 +208,9 @@ async def astream_with_refusal_retry(
     for attempt in range(max_retries_per_tier + 1):
         total_attempts += 1
         try:
-            async for snap in agent.astream(
-                {"messages": filtered_seed},
-                config=call_config,
-                stream_mode="values",
-            ):
-                last_snapshot = snap
+            last_snapshot = await _run_agent_once(
+                agent, filtered_seed, call_config, mode,
+            )
             # Success.
             return last_snapshot, total_attempts, last_tier
         except REFUSAL_EXCS as e:
@@ -219,12 +245,9 @@ async def astream_with_refusal_retry(
         for attempt in range(max_retries_per_tier + 1):
             total_attempts += 1
             try:
-                async for snap in fb_agent.astream(
-                    {"messages": filtered_seed},
-                    config=call_config,
-                    stream_mode="values",
-                ):
-                    last_snapshot = snap
+                last_snapshot = await _run_agent_once(
+                    fb_agent, filtered_seed, call_config, mode,
+                )
                 log.info(
                     "[%s] rescued by fallback model on attempt %d",
                     config.agent_id, attempt + 1,

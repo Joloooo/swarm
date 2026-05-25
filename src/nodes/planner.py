@@ -1061,12 +1061,13 @@ class PlannerNode(BaseNode):
         # Lazy — see import comment above; ``LLMConfig`` is only a type
         # annotation and is resolved through ``TYPE_CHECKING``.
         from src.llm.provider import get_llm
-        llm = get_llm(llm_config)
-        self._agent = create_agent(
-            model=llm,
-            tools=[normalize_url, validate_website],
-            system_prompt=SUPERVISOR_SYSTEM_PROMPT,
-        )
+        # Store components separately rather than caching ``self._agent``
+        # so the refusal-recovery helper can rebuild the agent per tier
+        # (vocab-filtered system prompt for tier 1, swapped model for
+        # tier 2). The cost of calling ``create_agent`` per planner turn
+        # is negligible — it's plain object construction, no LLM I/O.
+        self._llm = get_llm(llm_config)
+        self._tools = [normalize_url, validate_website]
 
     async def _invoke_with_transient_retry(
         self,
@@ -1074,23 +1075,36 @@ class PlannerNode(BaseNode):
         *,
         run_id: str | None = None,
     ) -> dict:
-        """Call the supervisor agent, retrying transient transport errors.
+        """Call the supervisor agent through the refusal-recovery helper,
+        with an outer transient-retry loop for network errors.
 
-        The Codex backend occasionally drops the connection mid-stream
-        ("peer closed connection without sending complete message body",
-        ``IncompleteRead``, ``ReadTimeout``, ...). The LLM layer
-        translates those into ``CodexTransportError`` and retries them
-        inside ``ChatCodex._agenerate``, but the planner's prior context
-        is large enough that the same call can still drop on a later
-        attempt — and any LangChain-level wrapping that bypasses
-        ChatCodex's own retry leaves us bare. So we retry once more
-        here at the planner level, with a short backoff. We deliberately
-        do NOT retry refusals (cyber_policy / invalid_prompt) — those
-        won't succeed without prompt changes.
+        Two layers, in order from outer to inner:
+
+        1. **Transient retry** (this method's loop) — retries network-
+           shaped failures (peer-closed-connection, IncompleteRead,
+           ReadTimeout, CodexTransportError) up to 3 times with linear
+           backoff. These are not refusals; the call never even reached
+           the safety classifier.
+
+        2. **Refusal recovery** (``astream_with_refusal_retry`` called
+           in ``mode="ainvoke"``) — handles ``CodexCyberPolicyError``
+           and ``CodexInvalidPromptError`` via the same preventive
+           vocab-filter + tier-1 retry + tier-2 model fallback ladder
+           the workers already use. Without this, a single cyber-policy
+           refusal on the planner's call would propagate up and be
+           silently downgraded to ``action=report``.
+
+        Vocab filter coverage: the helper filters BOTH ``system_msg``
+        and ``seed_msgs`` on every call. The planner's static system
+        prompt is also pre-filtered at module import (line ~452); the
+        helper's filter on top is idempotent. The seed messages —
+        worker_report digests, evidence notes, finding text — are
+        filtered here for the first time, closing the long-standing
+        gap where a worker-introduced risky term could reach Codex on
+        the planner turn.
         """
-        # Lazy import to avoid pulling the LLM module at planner import
-        # time (which would dirty the partial-import dance with
-        # ``src.graph``).
+        # Lazy imports — keep planner module-load light and avoid the
+        # partial-import dance with ``src.graph``.
         from src.llm.codex import (
             CodexAPIError,
             CodexCyberPolicyError,
@@ -1098,35 +1112,96 @@ class PlannerNode(BaseNode):
             CodexQuotaExceededError,
             CodexContextWindowError,
         )
+        from src.llm.callbacks import make_call_config
+        from src.llm.provider import LLMConfig as _LLMConfig, Provider as _Provider
+        from src.refusals.retry import astream_with_refusal_retry
         import asyncio
 
-        non_retryable = (
-            CodexCyberPolicyError,
-            CodexInvalidPromptError,
-            CodexQuotaExceededError,
-            CodexContextWindowError,
-        )
-        # Token logging — every planner call goes through this path,
-        # so wiring the callback here means we never miss a planner LLM
+        # Token logging — every planner call goes through this path, so
+        # wiring the callback here means we never miss a planner LLM
         # request in llm_calls.jsonl. The agent_id "_planner" is a
         # convention recognized by post-run analysis scripts.
-        from src.llm.callbacks import make_call_config
         call_config = make_call_config(
             run_id=run_id,
             agent_id="_planner",
             node="planner",
         )
 
+        # Primary agent factory — rebuilt per tier inside the helper so
+        # the vocab-filtered system prompt is wired in cleanly. Cheap;
+        # no LLM I/O.
+        def _primary_factory(sys_prompt: str):
+            return create_agent(
+                model=self._llm,
+                tools=self._tools,
+                system_prompt=sys_prompt,
+            )
+
+        # Tier-2 fallback factory — only meaningful on Codex routes.
+        # Mirrors the pattern in src/nodes/base/skill_runner.py so the
+        # planner and workers share the same fallback behavior.
+        fallback_factory: Any = None
+        if _LLMConfig().provider == _Provider.CODEX:
+            from src import graph as _graph_module
+            _fb_model = getattr(
+                _graph_module.config.budgets, "fallback_model", "gpt-5.4",
+            )
+            _fb_effort = getattr(
+                _graph_module.config.budgets,
+                "fallback_reasoning_effort",
+                "low",
+            )
+
+            def _fallback_factory(sys_prompt: str):
+                from src.llm.provider import get_llm as _get_llm
+                fb_llm = _get_llm(_LLMConfig(
+                    provider=_Provider.CODEX,
+                    model=_fb_model,
+                    reasoning_effort=_fb_effort,
+                ))
+                return create_agent(
+                    model=fb_llm,
+                    tools=self._tools,
+                    system_prompt=sys_prompt,
+                )
+
+            fallback_factory = _fallback_factory
+
+        # The helper uses ``.agent_id`` only for log messages. Workers
+        # pass their full AgentConfig; the planner doesn't have one, so
+        # this tiny shim is enough.
+        class _PlannerShim:
+            agent_id = "_planner"
+
+        # Outer transient-retry loop. Cyber-policy / invalid-prompt /
+        # quota / context-window errors are NOT retried here — the
+        # helper exhausts its own tier ladder first, and if it still
+        # raises one of those, retrying at this layer would only repeat
+        # the same expensive sequence.
+        non_retryable = (
+            CodexCyberPolicyError,
+            CodexInvalidPromptError,
+            CodexQuotaExceededError,
+            CodexContextWindowError,
+        )
+
         max_attempts = 3
         for attempt in range(max_attempts):
             try:
-                return await self._agent.ainvoke(payload, config=call_config)
+                result, _attempts, _tier = await astream_with_refusal_retry(
+                    agent_factory=_primary_factory,
+                    fallback_agent_factory=fallback_factory,
+                    system_msg=SUPERVISOR_SYSTEM_PROMPT,
+                    seed_msgs=payload["messages"],
+                    call_config=call_config,
+                    config=_PlannerShim(),
+                    log=self.log,
+                    mode="ainvoke",
+                )
+                return result or {"messages": []}
             except non_retryable:
                 raise
             except (CodexAPIError, Exception) as e:  # noqa: BLE001
-                # Only retry network-shaped errors. If this is something
-                # truly unexpected (Python error, programming bug), let
-                # it raise on the last attempt.
                 if attempt == max_attempts - 1:
                     raise
                 if not _looks_transient(e):
@@ -1139,7 +1214,6 @@ class PlannerNode(BaseNode):
                     str(e)[:200],
                 )
                 await asyncio.sleep(delay)
-        # Unreachable — the loop either returns or raises above.
         raise RuntimeError("planner retry loop exited without result")
 
     async def execute(self, state: SwarmGraphState) -> dict:

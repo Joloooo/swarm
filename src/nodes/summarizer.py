@@ -67,6 +67,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 
 from src.llm.digest import summarize_worker_trace
 from src.nodes.base import BaseNode
+from src.state import Finding
 
 logger = logging.getLogger(__name__)
 
@@ -108,12 +109,19 @@ class SummarizerNode(BaseNode):
         from src.llm.provider import get_llm  # lazy — see base.py docstring
         model = get_llm()
 
+        # Snapshot the global findings list once before fan-out so each
+        # parallel _summarize_one sees a consistent view (the reducer
+        # in state.py never mutates this list in place, but reading it
+        # once avoids any chance of mid-coroutine reassignment).
+        all_findings = list(state.get("findings") or [])
+
         coros = [
             self._summarize_one(
                 inp=inp,
                 model=model,
                 run_id=run_id,
                 target_url_default=target_url,
+                all_findings=all_findings,
             )
             for inp in pending
         ]
@@ -165,6 +173,7 @@ class SummarizerNode(BaseNode):
         model: Any,
         run_id: str | None,
         target_url_default: str,
+        all_findings: list[Finding],
     ) -> AIMessage:
         """Produce one report ``AIMessage`` for one pending worker entry.
 
@@ -172,11 +181,25 @@ class SummarizerNode(BaseNode):
         try/except so a single worker's failure can't take down the
         whole batch — gather() then assembles per-worker results into
         the final messages list.
+
+        After the digest LLM returns, this method appends a
+        ``## Findings (verbatim from worker)`` section to the report's
+        content for any ``Finding`` objects this worker emitted. The
+        digest LLM compresses prose ("private record returned") and
+        will paraphrase away byte-exact strings (captured flags, leaked
+        credentials, raw SQL error fragments) that the planner needs to
+        see verbatim — the regex-parsed Finding objects already
+        preserve them in ``Finding.evidence``, so we just route that
+        data to the planner alongside the prose digest. The append is a
+        pure Python concatenation: no LLM round-trip, no risk of
+        paraphrasing, no false-positive surface from pattern matching.
+        Empty findings → no section, so the digest stands alone.
         """
+        worker_agent_id = str(inp.get("agent_id") or "_unknown")
         try:
-            return await summarize_worker_trace(
+            report = await summarize_worker_trace(
                 trace=list(inp.get("trace") or []),
-                agent_id=str(inp.get("agent_id") or "_unknown"),
+                agent_id=worker_agent_id,
                 config_name=str(inp.get("config_name") or ""),
                 methodology=str(inp.get("methodology") or ""),
                 dispatch_reason=str(inp.get("dispatch_reason") or ""),
@@ -193,9 +216,17 @@ class SummarizerNode(BaseNode):
         except Exception as e:  # noqa: BLE001
             self.log.warning(
                 "summarizer: digest for %r failed (%s) — placeholder will be emitted",
-                inp.get("agent_id"), e,
+                worker_agent_id, e,
             )
-            return self._error_placeholder(inp, e)
+            report = self._error_placeholder(inp, e)
+
+        worker_findings = [
+            f for f in all_findings
+            if getattr(f, "agent_id", None) == worker_agent_id
+        ]
+        if worker_findings:
+            return _attach_findings_section(report, worker_findings)
+        return report
 
     @staticmethod
     def _error_placeholder(inp: dict, err: BaseException | None) -> AIMessage:
@@ -233,6 +264,46 @@ class SummarizerNode(BaseNode):
                 "findings_count": int(inp.get("findings_count") or 0),
             },
         )
+
+
+def _render_findings(findings: list[Finding]) -> str:
+    """Render Finding dataclasses as a verbatim markdown block.
+
+    Used by :func:`_attach_findings_section` to build the planner-facing
+    ``## Findings (verbatim from worker)`` section. Format is plain
+    markdown — title + severity on the lead line, URL / category on
+    line 2, full evidence on line 3. Evidence is NOT truncated here
+    (the regex parser in skill_runner already caps it at 500 chars)
+    so the planner sees what the worker actually wrote.
+    """
+    lines: list[str] = []
+    for i, f in enumerate(findings, 1):
+        sev = getattr(f.severity, "name", str(f.severity))
+        lines.append(f"{i}. [{sev}] {f.title}")
+        meta_bits = []
+        if f.category:
+            meta_bits.append(f"category={f.category}")
+        if f.url:
+            meta_bits.append(f"url={f.url}")
+        if meta_bits:
+            lines.append(f"   {'  '.join(meta_bits)}")
+        if f.evidence:
+            lines.append(f"   evidence: {f.evidence}")
+    return "\n".join(lines)
+
+
+def _attach_findings_section(report: AIMessage, findings: list[Finding]) -> AIMessage:
+    """Return a new ``AIMessage`` with the verbatim findings block
+    appended to the digest content. Preserves ``additional_kwargs`` so
+    downstream code that reads ``kind="worker_report"`` / ``agent_id``
+    keeps working.
+    """
+    body = report.content if isinstance(report.content, str) else str(report.content or "")
+    appended = body.rstrip() + "\n\n## Findings (verbatim from worker)\n" + _render_findings(findings)
+    return AIMessage(
+        content=appended,
+        additional_kwargs=dict(report.additional_kwargs or {}),
+    )
 
 
 summarizer_node = SummarizerNode()

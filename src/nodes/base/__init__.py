@@ -192,6 +192,28 @@ class BaseNode(ABC):
             target_url=(state or {}).get("target_url"),
         )
 
+        # Early-exit guard for nodes dispatched AFTER the flag has been
+        # captured. State.captured_flag is set by the winning worker's
+        # update; once it lands in state via the reducer, any node that
+        # LangGraph schedules subsequently should bail out immediately
+        # rather than burn another LLM call on work the routing edges
+        # will discard.
+        #
+        # Does NOT help in-flight parallel siblings — they're already
+        # running and won't re-enter ``__call__`` until they finish.
+        # That cancellation path is handled by FlagWatcherCallback's
+        # ``on_chat_model_start`` hook checking the module-global
+        # ``_CAPTURED_FLAG``. The two mechanisms are complementary,
+        # both required — see ``flag_watcher.py`` module docstring.
+        if (state or {}).get("captured_flag"):
+            self.log.info(
+                "[%s] skipping node — flag already captured by a "
+                "previous worker (graph will route to END via "
+                "route_after_summarizer / route_after_planner)",
+                name,
+            )
+            return {}
+
         t0 = time.perf_counter()
         try:
             result = await self.execute(state)

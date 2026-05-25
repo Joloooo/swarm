@@ -89,6 +89,35 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
     For every other action: return the node name (or ``END`` if the
     planner picked report and report is currently bypassed).
     """
+    # Hard-stop: if any prior worker already captured the flag via
+    # FlagWatcher's auto-verify path, terminate immediately regardless
+    # of what action the planner chose. Otherwise the planner could
+    # waste a turn dispatching more workers that are guaranteed to
+    # exit early via the sibling-cancel hook. The summarizer's edge
+    # ``route_after_summarizer`` also reads ``captured_flag``, but
+    # short-circuiting here keeps the planner from emitting a
+    # redundant decision in the first place.
+    captured = (state.get("captured_flag") or "").strip()
+    if captured:
+        logger.info(
+            "route_after_planner: captured_flag already set (%r); "
+            "routing to END without dispatching further work.",
+            captured[:80],
+        )
+        try:
+            from src.observability.writers import append_event
+            append_event(
+                (state or {}).get("run_id"),
+                "routing_decision",
+                edge="route_after_planner",
+                next="__end__",
+                reason="captured_flag_already_set",
+                captured_flag=captured,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return END
+
     action = state.get("next_action", "report")
 
     if action == "attack":

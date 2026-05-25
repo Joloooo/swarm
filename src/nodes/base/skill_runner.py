@@ -47,7 +47,7 @@ from langchain_core.tools import BaseTool
 from src.llm.callbacks import make_call_config
 from src.nodes.base.flag_watcher import (
     FlagCapturedSignal,
-    GraphTerminatedByCapture,
+    SiblingCapturedSignal,
 )
 from src.nodes.base.system_prompt import _build_system_message
 from src.observability import make_run_id
@@ -646,16 +646,29 @@ async def _run_skill_agent_impl(
     worker_attempts = 0
     worker_last_tier = "primary"
     flag_watcher_capture: str | None = None
+    sibling_captured_value: str = ""
     try:
-        # Inner try catches the FlagWatcher's short-circuit signal so
-        # it never reaches the outer ``except Exception`` (which would
-        # mis-classify it as a refusal). The signal carries the matched
-        # flag value; we inject a synthetic ToolMessage holding that
-        # value so the downstream auto-verify block at the end of this
-        # function picks it up via its existing extract_flags +
-        # flags_match scan — single code path for setting captured_flag
-        # whether capture came from FlagWatcher (early) or the
-        # end-of-worker fallback scan (late).
+        # Inner try catches the FlagWatcher's short-circuit signals so
+        # they never reach the outer ``except Exception`` (which would
+        # mis-classify them as refusals). Two distinct signals:
+        #
+        #   * FlagCapturedSignal — THIS worker matched the flag in its
+        #     own tool output. We synthesise a ToolMessage so the
+        #     downstream auto-verify scan picks the flag up via its
+        #     existing extract_flags + flags_match path, then build a
+        #     normal worker-result dict. captured_flag lands in state
+        #     via the reducer.
+        #
+        #   * SiblingCapturedSignal — ANOTHER worker captured while we
+        #     were mid-LLM-call. We exit cleanly with an empty-findings
+        #     update so the fan-in can complete fast and the routing
+        #     edge ``route_after_summarizer`` can route to END. We do
+        #     NOT set captured_flag (the winning worker already did).
+        #
+        # Single code path for the WINNING worker — capture via
+        # FlagWatcher (early, milliseconds after tool returns) and the
+        # end-of-worker fallback scan (late, after the agent loop ends
+        # naturally) both feed the same downstream auto-verify block.
         try:
             (
                 last_snapshot,
@@ -700,6 +713,17 @@ async def _run_skill_agent_impl(
             ))
             snap["messages"] = msgs
             last_snapshot = snap
+        except SiblingCapturedSignal as sig:
+            # Sibling worker captured first; this worker exits with
+            # an empty update so fan-in completes fast. Routing reads
+            # state.captured_flag (set by the winning worker) to drive
+            # termination — we don't touch it here.
+            sibling_captured_value = sig.captured_flag
+            node.log.info(
+                "[%s] sibling worker captured the flag (%s) — "
+                "exiting cleanly to unblock fan-in",
+                config.agent_id, sig.captured_flag,
+            )
 
         result = last_snapshot or {}
         messages = result.get("messages", [])
@@ -749,6 +773,13 @@ async def _run_skill_agent_impl(
         # Refusal detection — if 0 findings AND the last assistant
         # message reads like a safety refusal, surface it explicitly
         # instead of letting it get swallowed as "0 findings".
+        #
+        # Skip this entire block when ``sibling_captured_value`` is
+        # set: the worker exited early because another worker captured
+        # the flag, not because of any refusal or anomalous output.
+        # Treating it as "0 findings — looks like a refusal" would
+        # trigger an unnecessary recovery sub-call AND emit a
+        # misleading warning to the operator.
         last_text = ""
         for m in reversed(messages):
             if isinstance(m, AIMessage):
@@ -758,12 +789,12 @@ async def _run_skill_agent_impl(
                 break
 
         refused = (not findings) and looks_like_refusal(last_text)
-        if not findings:
+        if not findings and not sibling_captured_value:
             node.log.warning(
                 f"[{config.agent_id}] produced 0 findings — "
                 f"last output: {last_text[:500]!r}"
             )
-        if refused:
+        if refused and not sibling_captured_value:
             node.log.warning(
                 f"[{config.agent_id}] looks like a model refusal — "
                 "attempting focused-sub-call recovery"
@@ -814,14 +845,29 @@ async def _run_skill_agent_impl(
                     },
                 ))
 
-        agent_result = AgentResult(
-            agent_id=config.agent_id,
-            methodology=config.methodology,
-            config_name=config.config_name,
-            findings=findings,
-            completed=not refused,
-            error="model refused" if refused else None,
-        )
+        # Sibling-cancelled workers are not refusals and not crashes —
+        # they're a clean cooperative exit. Surface them on a distinct
+        # ``error`` channel so the planner / triage tooling can tell
+        # the difference between "this worker tried and failed" and
+        # "this worker stood down because another worker won".
+        if sibling_captured_value:
+            agent_result = AgentResult(
+                agent_id=config.agent_id,
+                methodology=config.methodology,
+                config_name=config.config_name,
+                findings=findings,
+                completed=False,
+                error="sibling captured first",
+            )
+        else:
+            agent_result = AgentResult(
+                agent_id=config.agent_id,
+                methodology=config.methodology,
+                config_name=config.config_name,
+                findings=findings,
+                completed=not refused,
+                error="model refused" if refused else None,
+            )
     except Exception as e:
         # Cyber-policy / invalid-prompt failures from the Codex API
         # are *refusals*, not crashes. Surface them on the
@@ -1192,23 +1238,12 @@ async def _run_skill_agent_impl(
         update["captured_flag"] = captured_flag_value
         # Mirror onto submission_attempts so xbow_runner.run_one's
         # existing verdict path (which reads submission_attempts[-1])
-        # sees the capture without any change to that consumer.
+        # sees the capture without any change to that consumer. The
+        # graph terminates via the normal route_after_summarizer →
+        # END path: this update's captured_flag lands in state via
+        # the reducer; sibling workers exit fast via the FlagWatcher
+        # callback's sibling-cancel path (see flag_watcher module
+        # docstring); fan-in completes; summarizer fires;
+        # route_after_summarizer reads captured_flag → END.
         update["submission_attempts"] = [captured_flag_value]
-        # Raise to escape the graph and cancel sibling parallel workers.
-        # See GraphTerminatedByCapture's docstring for the full
-        # propagation chain. The empirical 2026-05-25 18:00 run showed
-        # that returning a plain dict (even with captured_flag set in
-        # state) doesn't terminate the graph from inside a fan-out:
-        # LangGraph waits for every parallel branch before firing the
-        # summarizer, and the 900 s timeout snapped before the slowest
-        # worker yielded. Raising leverages asyncio's CancelledError
-        # propagation through ainvoke — verified to cancel siblings at
-        # their next await point in LangGraph 1.1.6. xbow_runner
-        # catches this exception and synthesizes the verdict state
-        # from the exception's fields directly.
-        raise GraphTerminatedByCapture(
-            flag=captured_flag_value,
-            agent_id=config.agent_id,
-            findings=findings,
-        )
     return update

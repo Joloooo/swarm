@@ -1,32 +1,46 @@
-"""Tier 1 — FlagWatcherCallback short-circuit behaviour.
+"""Tier 1 — FlagWatcherCallback cooperative-cancel behaviour.
 
-Pins the contract introduced 2026-05-25 after the XBEN-006-24 retro:
-a worker that produces the expected flag literal in tool output must
-stop immediately, not run another 60-90 s of Codex reasoning before
-its agent loop notices it's "done". The callback fires on
-``on_tool_end`` and raises :class:`FlagCapturedSignal`, which the
-skill runner catches and converts into a normal captured-flag update.
+Pins the contract introduced 2026-05-25 after the XBEN-006-24 retros:
+when ANY worker matches the expected flag in tool output, the WINNING
+worker exits immediately AND every other in-flight sibling exits
+cleanly at its next LLM-call boundary. The graph terminates via the
+normal routing edge ``route_after_summarizer → END`` — no exception
+escapes the graph.
 
-These tests pin five behaviours:
+Two channels make this work:
 
-  1. Match → raises FlagCapturedSignal with the captured value.
-  2. No match (well-formed but wrong flag) → does NOT raise.
-  3. No flag-shaped string in output → does NOT raise.
-  4. Empty ``expected_flag`` (real-pentest mode) → callback is a
-     no-op regardless of output.
-  5. ToolMessage-wrapped output (some agent shapes wrap the bash
-     return value in a ToolMessage) is handled, not skipped.
+  * State.captured_flag (LangGraph state) → routing decisions
+  * Module-global ``_CAPTURED_FLAG`` → in-flight sibling cancellation
+    (callbacks can't reach LangGraph state, so a process-scope
+    variable is the only way for callbacks to see "the other guy
+    captured" while we're mid-LLM-call)
 
-Strategy: invoke the callback's ``on_tool_end`` directly with the
-arguments LangChain would pass at runtime. No real LangChain agent,
-no real LLM — pure Tier 1.
+These tests pin both channels:
+
+  Own-match path:
+    1. Match → raises FlagCapturedSignal AND sets module-global.
+    2. No match (well-formed but wrong flag) → does NOT raise.
+    3. No flag-shaped string in output → does NOT raise.
+    4. Empty ``expected_flag`` (real-pentest mode) → no-op.
+    5. ToolMessage-wrapped output is handled, not skipped.
+
+  Sibling-cancel path:
+    6. Module-global flips True when own-match fires.
+    7. ``on_chat_model_start`` raises SiblingCapturedSignal when
+       global is set.
+    8. ``on_llm_start`` raises SiblingCapturedSignal when global is set.
+    9. ``reset_captured`` clears the global (bench-isolation).
+   10. Sibling hooks no-op when ``expected_flag`` is empty.
+
+Strategy: invoke the callback's hooks directly with the arguments
+LangChain would pass at runtime. No real LangChain agent, no real
+LLM — pure Tier 1. The fixture ``reset_module_global`` ensures one
+test's capture doesn't leak into another.
 """
 
 from __future__ import annotations
 
 import asyncio
-from operator import add
-from typing import Annotated, TypedDict
 from uuid import uuid4
 
 import pytest
@@ -35,18 +49,28 @@ from langchain_core.messages import ToolMessage
 from src.nodes.base.flag_watcher import (
     FlagCapturedSignal,
     FlagWatcherCallback,
-    GraphTerminatedByCapture,
+    SiblingCapturedSignal,
     _coerce_to_text,
+    is_captured,
+    get_captured_flag,
+    reset_captured,
+    signal_captured,
 )
 
 
-# Module-scope so LangGraph's type-hint resolver (which evaluates
-# annotations via globals()) can find Annotated. Defining the
-# TypedDict inside a test function breaks under
-# ``typing.get_type_hints`` because the function's locals aren't
-# visible to LangGraph's runtime introspection.
-class _CancellationState(TypedDict):
-    siblings_cancelled: Annotated[list[str], add]
+@pytest.fixture(autouse=True)
+def reset_module_global():
+    """Reset the captured-flag module-global before AND after each test.
+
+    Without this, a test that signals capture would leak into every
+    subsequent test in the same process — siblings would raise
+    SiblingCapturedSignal on first hook and the test assumptions
+    would shift. autouse=True so every test in this file gets the
+    isolation automatically.
+    """
+    reset_captured()
+    yield
+    reset_captured()
 
 
 EXPECTED = "flag{582d82bb-2c1f-4ba5-9357-e8b94217957f}"
@@ -269,99 +293,168 @@ async def test_exception_propagates_through_callback_manager():
         )
 
 
-# ── 8. GraphTerminatedByCapture — escapes the graph + cancels siblings ──
+# ── 8. Module-global captured flag — bench isolation + read/set ──────
 
 
-def test_graph_terminated_carries_flag_agent_and_findings():
-    """The exception is the sole channel that survives the
-    ``ainvoke`` cancellation chain — graph state is discarded when an
-    unhandled exception propagates, so every field xbow_runner needs
-    for the verdict path must be present on the exception itself."""
-    findings = [object(), object()]  # placeholders; runner just len()s
-    exc = GraphTerminatedByCapture(
-        flag=EXPECTED, agent_id="owasp-auth", findings=findings,
-    )
-    assert exc.flag == EXPECTED
-    assert exc.agent_id == "owasp-auth"
-    assert exc.findings == findings
-    # Default findings → empty list (not None) so callers can len() safely.
-    bare = GraphTerminatedByCapture(flag=EXPECTED)
-    assert bare.findings == []
+def test_module_global_starts_clean():
+    """The autouse fixture resets the global before each test, so
+    the global must start empty regardless of prior test state."""
+    assert is_captured() is False
+    assert get_captured_flag() == ""
 
 
-def test_graph_terminated_str_includes_diagnostic_info():
-    """The ``str()`` form ends up in tracebacks, error logs, and the
-    ``result["error"]`` field on benches that fall through to the
-    generic ``except Exception`` handler. Must identify the flag and
-    the agent so post-mortem is one ``grep`` away."""
-    exc = GraphTerminatedByCapture(flag=EXPECTED, agent_id="owasp-auth")
-    s = str(exc)
-    assert EXPECTED in s
-    assert "owasp-auth" in s
+def test_signal_captured_flips_the_global():
+    """Once any worker calls signal_captured, every subsequent
+    is_captured() call (including from a different worker's callback)
+    returns True. This is the load-bearing primitive — sibling
+    workers' on_chat_model_start hooks read it to decide whether to
+    abort their next LLM call."""
+    signal_captured(EXPECTED)
+    assert is_captured() is True
+    assert get_captured_flag() == EXPECTED
+
+
+def test_signal_captured_is_first_writer_wins():
+    """If two parallel workers happen to match the same flag at
+    almost the same moment (rare but possible), only the first call
+    sticks. The exact value matters less than the consistency — both
+    workers raise FlagCapturedSignal with the same flag string from
+    their own scan, so either's value is correct."""
+    signal_captured(EXPECTED)
+    signal_captured("flag{some-other-value}")  # ignored
+    assert get_captured_flag() == EXPECTED
+
+
+def test_reset_clears_the_global():
+    """xbow_runner.run_one calls reset_captured() at the start of each
+    bench so the daily-sweep loop doesn't leak bench N's flag into
+    bench N+1. Without this reset, every worker on bench N+1 would
+    raise SiblingCapturedSignal on its first LLM call and the run
+    would terminate with no work done."""
+    signal_captured(EXPECTED)
+    assert is_captured() is True
+    reset_captured()
+    assert is_captured() is False
+    assert get_captured_flag() == ""
+
+
+# ── 9. Own-match path sets the module-global ────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_raising_from_one_branch_cancels_sibling_tasks():
-    """End-to-end pin for the cancellation mechanism we rely on.
+async def test_own_match_sets_module_global():
+    """When FlagWatcher fires for the WINNING worker, the global must
+    be set BEFORE the exception is raised — otherwise sibling
+    workers checking on_chat_model_start race against the
+    skill_runner catching the signal and miss the window."""
+    cb = FlagWatcherCallback(expected_flag=EXPECTED, agent_id="winner")
+    output = f"got it: {EXPECTED}"
+    with pytest.raises(FlagCapturedSignal):
+        await _call(cb, output)
+    # Side effect: global is now set.
+    assert is_captured() is True
+    assert get_captured_flag() == EXPECTED
 
-    This is the load-bearing behaviour discovered empirically against
-    LangGraph 1.1.6: ``Command(goto=END)`` from a fan-out branch does
-    NOT cancel siblings (they run to completion, the summarizer still
-    fires), but RAISING an exception from one branch DOES — asyncio's
-    ``CancelledError`` propagates to in-flight sibling coroutines at
-    their next ``await`` point.
 
-    If a future LangGraph upgrade breaks this contract, this test will
-    fail loudly — and the fix is no longer to raise, it is to add a
-    process-global captured flag + ``on_llm_start`` callback check.
-    The presence of this test is the trigger for that pivot."""
-    import time
+# ── 10. Sibling-cancel path — on_chat_model_start ───────────────────
 
-    from langgraph.graph import StateGraph, END, START
-    from langgraph.types import Send
 
-    async def planner_node(state):
-        return {"siblings_cancelled": []}
+@pytest.mark.asyncio
+async def test_on_chat_model_start_raises_when_sibling_captured():
+    """The load-bearing sibling-cancel hook. A worker is mid-loop
+    when another worker captures; on the next on_chat_model_start
+    (fires before each LLM call), this hook checks the global and
+    raises so we don't burn another 60-90 s Codex call."""
+    signal_captured(EXPECTED)
+    cb = FlagWatcherCallback(expected_flag=EXPECTED, agent_id="sibling")
+    with pytest.raises(SiblingCapturedSignal) as exc_info:
+        await cb.on_chat_model_start(
+            serialized={"name": "ChatCodex"},
+            messages=[[]],
+            run_id=uuid4(),
+        )
+    assert exc_info.value.captured_flag == EXPECTED
+    assert exc_info.value.agent_id == "sibling"
 
-    def fan_out(state):
-        # One winner that raises fast, two slow siblings that should
-        # be cancelled before completing their sleep.
-        return [
-            Send("worker", {"wid": "winner", "delay": 0.05, "raises": True}),
-            Send("worker", {"wid": "sib1", "delay": 3.0, "raises": False}),
-            Send("worker", {"wid": "sib2", "delay": 3.0, "raises": False}),
-        ]
 
-    async def worker(state):
-        try:
-            await asyncio.sleep(state["delay"])
-        except asyncio.CancelledError:
-            # Record that we were cancelled. This is the load-bearing
-            # assertion — if siblings ran to completion, this branch
-            # never fires and the list stays empty.
-            return {"siblings_cancelled": [state["wid"]]}
-        if state["raises"]:
-            raise GraphTerminatedByCapture(flag=EXPECTED, agent_id="winner")
-        return {"siblings_cancelled": []}
-
-    g = StateGraph(_CancellationState)
-    g.add_node("planner", planner_node)
-    g.add_node("worker", worker)
-    g.add_edge(START, "planner")
-    g.add_conditional_edges("planner", fan_out, ["worker"])
-    g.add_edge("worker", END)
-    compiled = g.compile()
-
-    t0 = time.time()
-    with pytest.raises(GraphTerminatedByCapture) as exc_info:
-        await compiled.ainvoke({"siblings_cancelled": []})
-    elapsed = time.time() - t0
-
-    # The full graph took less than the slow siblings' 3 s sleep,
-    # which proves they didn't run to completion.
-    assert elapsed < 1.0, (
-        f"siblings were not cancelled — graph took {elapsed:.2f}s "
-        "(expected < 1.0s if cancellation worked)"
+@pytest.mark.asyncio
+async def test_on_chat_model_start_noop_when_no_capture():
+    """Before any worker captures, on_chat_model_start must be a
+    no-op — otherwise every LLM call would raise on every worker
+    and no work would ever happen. The global starts empty (autouse
+    fixture); this verifies the guard."""
+    cb = FlagWatcherCallback(expected_flag=EXPECTED, agent_id="any")
+    # Should return None (not raise).
+    result = await cb.on_chat_model_start(
+        serialized={"name": "ChatCodex"},
+        messages=[[]],
+        run_id=uuid4(),
     )
-    assert exc_info.value.flag == EXPECTED
-    assert exc_info.value.agent_id == "winner"
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_on_chat_model_start_noop_in_real_pentest_mode():
+    """No oracle (expected_flag empty) → callback never fires the
+    sibling check. Capture in real-pentest mode is planner-driven
+    via submit_flag, so process-global wouldn't be set anyway, but
+    we belt-and-brace the guard at the callback level too."""
+    signal_captured(EXPECTED)  # simulate stale state from prior run
+    cb = FlagWatcherCallback(expected_flag="", agent_id="any")
+    result = await cb.on_chat_model_start(
+        serialized={"name": "ChatCodex"},
+        messages=[[]],
+        run_id=uuid4(),
+    )
+    assert result is None
+
+
+# ── 11. Sibling-cancel path — on_llm_start (non-chat models) ────────
+
+
+@pytest.mark.asyncio
+async def test_on_llm_start_raises_when_sibling_captured():
+    """Some agents use on_llm_start instead of on_chat_model_start
+    (depends on the model wrapper). We hook both for completeness —
+    a future provider switch shouldn't silently break the
+    sibling-cancel path."""
+    signal_captured(EXPECTED)
+    cb = FlagWatcherCallback(expected_flag=EXPECTED, agent_id="sibling")
+    with pytest.raises(SiblingCapturedSignal):
+        await cb.on_llm_start(
+            serialized={"name": "BaseLLM"},
+            prompts=["..."],
+            run_id=uuid4(),
+        )
+
+
+# ── 12. on_tool_end also notices sibling capture ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_on_tool_end_raises_sibling_when_global_already_set():
+    """Defense in depth: if the global was set by another worker
+    during our tool execution (between the LLM call and the tool
+    return), we surface that as SiblingCapturedSignal rather than
+    going through our own match scan. Prevents racing two workers
+    trying to write captured_flag to state at the same moment."""
+    signal_captured(EXPECTED)
+    cb = FlagWatcherCallback(expected_flag=EXPECTED, agent_id="sibling")
+    # Tool output that DOESN'T contain the flag — sibling check
+    # fires first regardless.
+    with pytest.raises(SiblingCapturedSignal):
+        await _call(cb, "some output without a flag")
+
+
+# ── 13. SiblingCapturedSignal carries diagnostic info ───────────────
+
+
+def test_sibling_captured_str_includes_agent_and_flag():
+    """The exception's str() ends up in logger.info output and may
+    appear in error tracebacks. It must identify both the cancelled
+    worker and the captured flag so a post-mortem operator can
+    correlate the abort with the matching capture."""
+    exc = SiblingCapturedSignal(captured_flag=EXPECTED, agent_id="sibling")
+    s = str(exc)
+    assert EXPECTED in s
+    assert "sibling" in s

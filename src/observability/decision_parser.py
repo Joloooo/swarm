@@ -31,10 +31,23 @@ import re
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _BARE_OBJECT = re.compile(r"(\{[^{}]*\"action\"[^{}]*\})", re.DOTALL)
 
-# Set of valid actions. Imported lazily by ``parse_planner_decision``
-# in strict mode so this module doesn't pull ``src.nodes.planner`` at
-# import time.
-_VALID_ACTIONS = frozenset({"attack", "recon", "web_search", "report"})
+# Set of valid actions. Kept in sync MANUALLY with
+# ``src.nodes.planner.VALID_ACTIONS`` — these are two files that must
+# agree but live in different layers (the planner defines the action
+# vocabulary; this parser validates output against it). When a new
+# action is added to the planner, it MUST be added here too, otherwise
+# the strict parser will silently reject every decision that uses it.
+#
+# History: ``submit_flag`` was added to the planner's vocabulary but
+# not here, which made every flag submission produce "no parseable
+# JSON decision" → force-report, killing benchmark runs where the
+# agent had actually captured the flag (XBEN-006-24,
+# ``run-XBEN-006-24__2026-05-25_14h33m29s``).
+#
+# Imported lazily (not via ``from src.nodes.planner``) so this module
+# doesn't pull the planner at import time — the duplication is the
+# price of breaking that import cycle.
+_VALID_ACTIONS = frozenset({"attack", "recon", "web_search", "report", "submit_flag"})
 
 
 def parse_planner_decision(text: str, *, strict: bool = True) -> dict | None:

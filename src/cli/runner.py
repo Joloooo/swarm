@@ -64,6 +64,22 @@ def run_daily(*, silent: bool, pause_on_exit: bool = True) -> int:
     )
 
 
+def run_first5_buildable(*, pause_on_exit: bool = True) -> int:
+    """Pentest the first 5 buildable benchmarks — quick sanity pass.
+
+    Points ``--list-file`` at ``benchmarks/daily_5_buildable.txt``, a
+    curated subset covering diverse vuln classes (sqli, xxe, ssrf,
+    ssti, lfi) that all build on current Docker Desktop / Apple
+    Silicon. Compact streaming + ``--resume --skip-build`` mirrors
+    the ergonomics of ``run_daily(silent=False)``.
+    """
+    list_path = _PROJECT_ROOT / "benchmarks" / "daily_5_buildable.txt"
+    return _spawn(
+        ["--list-file", str(list_path), "--resume", "--skip-build"],
+        pause_on_exit=pause_on_exit,
+    )
+
+
 def run_all(*, pause_on_exit: bool = True) -> int:
     """Pentest every XBEN-*-24 benchmark on disk (~104).
 

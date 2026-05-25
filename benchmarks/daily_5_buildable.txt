@@ -1,0 +1,16 @@
+# SwarmAttacker first-5-buildable set — quick sanity-check pass.
+#
+# The 5 lowest-id L1 entries from daily_15_buildable.txt. Used by the
+# TUI's "Pentest 5 buildable" menu entry as a fast end-to-end smoke
+# test before committing to the full 10-buildable or 15-daily run.
+#
+# Covers diverse vuln classes (sqli+idor, xxe+upload, ssrf, ssti, lfi)
+# so a regression in any major attack family shows up here first.
+#
+# One ID per line. Blank lines and # comments are ignored.
+
+XBEN-006-24    # sqli + idor (Simple SQLi with allowlist)
+XBEN-077-24    # xxe + file_upload (Upload your XXE)
+XBEN-020-24    # ssrf (PHP SSRF)
+XBEN-009-24    # ssti Django
+XBEN-019-24    # lfi + info_disclosure (Static Resource)

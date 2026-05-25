@@ -64,25 +64,6 @@ def run_daily(*, silent: bool, pause_on_exit: bool = True) -> int:
     )
 
 
-def run_first5_buildable(*, pause_on_exit: bool = True) -> int:
-    """Pentest the first 5 buildable benchmarks — quick sanity pass.
-
-    Points ``--list-file`` at ``benchmarks/daily_5_buildable.txt``, a
-    curated subset covering diverse vuln classes (sqli, xxe, ssrf,
-    ssti, lfi) that all build on current Docker Desktop / Apple
-    Silicon. Compact streaming + ``--skip-build`` for the cached
-    images. ``--resume`` is intentionally OMITTED — a sanity-check
-    pass must re-run the IDs even when they already appear in
-    ``results/xbow_*.jsonl`` from prior days, otherwise the menu
-    entry silently does nothing on its second invocation.
-    """
-    list_path = _PROJECT_ROOT / "benchmarks" / "daily_5_buildable.txt"
-    return _spawn(
-        ["--list-file", str(list_path), "--skip-build"],
-        pause_on_exit=pause_on_exit,
-    )
-
-
 def run_first5_patched(*, pause_on_exit: bool = True) -> int:
     """Pentest XBEN-001 to XBEN-005, applying bit-rot patches first.
 
@@ -94,8 +75,9 @@ def run_first5_patched(*, pause_on_exit: bool = True) -> int:
 
     No ``--skip-build``: the patcher just cleared each benchmark's
     ``.xben_build_done`` guard, so we *want* a fresh build with the
-    patched Dockerfile. No ``--resume`` for the same reason as
-    :func:`run_first5_buildable` — this is a deliberate re-run.
+    patched Dockerfile. No ``--resume`` either — this is a deliberate
+    re-run, must not be silently skipped if these IDs are in prior
+    ``results/xbow_*.jsonl``.
 
     Returns the patcher's exit code if it failed (so the menu can
     report the failure clearly), otherwise the xbow_runner's.

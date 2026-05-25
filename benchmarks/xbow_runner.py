@@ -85,9 +85,62 @@ def docker_is_available() -> tuple[bool, str]:
 
 
 def expected_flag(benchmark_id: str) -> str:
-    """Replicates common.mk: FLAG{sha256(BENCHMARK_UPPER)}."""
+    """Replicates common.mk: FLAG{sha256(BENCHMARK_UPPER)}.
+
+    This is the PREDICTED flag based on the XBow convention — what the
+    image should contain if it was built following ``common.mk``. The
+    actual baked value can disagree (manual ``--build-arg FLAG=...``
+    overrides, older common.mk versions, Docker prune re-tagging
+    older images) — in those cases :func:`read_served_flag` is the
+    source of truth. See :func:`run_one` for the override path.
+    """
     digest = hashlib.sha256(benchmark_id.upper().encode()).hexdigest()
     return f"FLAG{{{digest}}}"
+
+
+def read_served_flag(benchmark_id: str) -> str:
+    """Read ``/app/flag.txt`` from the running container.
+
+    Returns the actual baked flag value as a string, or ``""`` if the
+    container isn't running, the file is missing, the exec fails, or
+    times out. Caller is responsible for falling back to
+    :func:`expected_flag`'s sha256 prediction when this returns ``""``.
+
+    Why this exists — 2026-05-25 incident: the XBEN-006-24 image was
+    built 2 weeks ago with a manual ``--build-arg FLAG=flag{<uuid>}``
+    (not the common.mk sha256 formula). A fresh rebuild today produced
+    a sha256-baked image, but Docker Desktop's automatic "remove
+    unused images" pruned the new image during a brief idle window and
+    re-tagged the older UUID-baked image as ``:latest``. The runner's
+    sha256 prediction was correct by formula but didn't match the
+    actually-served flag, so every valid capture was rejected by the
+    strict matcher. Reading the truth directly from the container —
+    rather than predicting it — closes this entire class of bug:
+    manual overrides, prune races, stale common.mk versions, anything
+    that decouples "what we predict" from "what's actually baked".
+
+    Prerequisite: the container must already be running (i.e. called
+    AFTER :func:`make_run`). On the first call before the container
+    is up this returns ``""``, which is the expected fallback path.
+    """
+    bench_dir = XBOW_ROOT / "benchmarks" / benchmark_id
+    if not bench_dir.is_dir():
+        return ""
+    try:
+        proc = subprocess.run(
+            ["docker", "compose", "exec", "-T", "app",
+             "cat", "/app/flag.txt"],
+            cwd=bench_dir,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+    except (subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            FileNotFoundError):
+        return ""
+    return (proc.stdout or "").strip()
 
 
 def _run(
@@ -258,6 +311,25 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
             make_build(benchmark_id)
         make_run(benchmark_id)
         result["target_url"] = discover_target_url(benchmark_id)
+
+        # Override the sha256 prediction with the actual baked flag,
+        # if we can read it from the live container. This makes the
+        # runner robust to image-state churn — manual --build-arg
+        # overrides, Docker prune re-tagging older images, stale
+        # common.mk versions — so "what we expect" always equals
+        # "what's served" regardless of how the image was built or
+        # by whom. Falls through to the prediction if the read fails
+        # (container not up yet, exec permission denied, etc.).
+        served = read_served_flag(benchmark_id)
+        if served and served != flag:
+            logger.info(
+                "[%s] read live flag from container (%s) — overriding "
+                "sha256 prediction (%s)",
+                benchmark_id, served, flag,
+            )
+            flag = served
+            result["expected_flag"] = served
+
         # Show the start-of-run boundary now that target_url is known.
         LIVE.bench_start(benchmark_id, result["target_url"], flag)
         logger.info("[%s] target=%s expected_flag=%s run_dir=%s",

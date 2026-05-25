@@ -70,12 +70,15 @@ def run_first5_buildable(*, pause_on_exit: bool = True) -> int:
     Points ``--list-file`` at ``benchmarks/daily_5_buildable.txt``, a
     curated subset covering diverse vuln classes (sqli, xxe, ssrf,
     ssti, lfi) that all build on current Docker Desktop / Apple
-    Silicon. Compact streaming + ``--resume --skip-build`` mirrors
-    the ergonomics of ``run_daily(silent=False)``.
+    Silicon. Compact streaming + ``--skip-build`` for the cached
+    images. ``--resume`` is intentionally OMITTED — a sanity-check
+    pass must re-run the IDs even when they already appear in
+    ``results/xbow_*.jsonl`` from prior days, otherwise the menu
+    entry silently does nothing on its second invocation.
     """
     list_path = _PROJECT_ROOT / "benchmarks" / "daily_5_buildable.txt"
     return _spawn(
-        ["--list-file", str(list_path), "--resume", "--skip-build"],
+        ["--list-file", str(list_path), "--skip-build"],
         pause_on_exit=pause_on_exit,
     )
 

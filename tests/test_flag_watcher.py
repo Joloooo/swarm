@@ -201,3 +201,57 @@ def test_coerce_to_text_handles_common_shapes():
     assert _coerce_to_text({"text": "x"}) == "x"
     msg = ToolMessage(content="msg-content", tool_call_id="x", name="t")
     assert _coerce_to_text(msg) == "msg-content"
+
+
+# ── 7. raise_error semantics — load-bearing for LangChain dispatch ────
+
+
+def test_raise_error_class_attribute_is_true():
+    """The 2026-05-25 XBEN-006-24 run at 18:11:10 captured the flag
+    via the FlagWatcher but the worker did NOT short-circuit — the
+    operator saw ``⚠ Error in FlagWatcherCallback.on_tool_end
+    callback: FlagCapturedSignal(...)`` and the worker kept running.
+
+    LangChain's :class:`BaseCallbackManager` swallows callback
+    exceptions by default (``raise_error=False`` on the class).
+    Setting ``raise_error = True`` on the handler subclass is what
+    makes the exception propagate up through ``agent.astream``. This
+    test exists so a future refactor that drops the override can't
+    silently re-introduce the early-exit bug."""
+    from langchain_core.callbacks import AsyncCallbackHandler
+    # Sanity: the LangChain default is False (the bug substrate).
+    assert AsyncCallbackHandler.raise_error is False
+    # Our subclass overrides it.
+    assert FlagWatcherCallback.raise_error is True
+    # The override survives instantiation.
+    cb = FlagWatcherCallback(expected_flag="flag{x}")
+    assert cb.raise_error is True
+
+
+@pytest.mark.asyncio
+async def test_exception_propagates_through_callback_manager():
+    """End-to-end regression for the LangChain-swallows-callback bug.
+
+    Dispatches ``on_tool_end`` through an actual
+    :class:`AsyncCallbackManager` (the same path
+    ``agent.astream`` uses) and asserts the signal escapes.
+
+    With ``raise_error=False`` (the LangChain default), this would
+    log the exception and return normally — the original 2026-05-25
+    failure mode. With ``raise_error=True`` on our subclass, the
+    manager re-raises and the worker loop aborts."""
+    from langchain_core.callbacks import AsyncCallbackManager
+
+    cb = FlagWatcherCallback(expected_flag=EXPECTED, agent_id="t")
+    mgr = AsyncCallbackManager(handlers=[cb])
+    # AsyncCallbackManager.on_tool_start returns a per-call run manager
+    # whose on_tool_end is what the agent loop invokes after a tool
+    # returns. We mimic that pathway here.
+    run_mgr = await mgr.on_tool_start(
+        serialized={"name": "bash"},
+        input_str="curl ...",
+    )
+    with pytest.raises(FlagCapturedSignal):
+        await run_mgr.on_tool_end(
+            output=f"bash output containing {EXPECTED}",
+        )

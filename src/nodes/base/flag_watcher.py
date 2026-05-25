@@ -91,7 +91,24 @@ class FlagWatcherCallback(AsyncCallbackHandler):
     appears in the tool's OUTPUT, not its input. ``on_chain_end`` /
     ``on_llm_end`` would also work but fire later (after the next
     LLM round-trip) — defeating the point of an early-abort hook.
+
+    ``raise_error = True`` is load-bearing — LangChain's
+    :class:`langchain_core.callbacks.BaseCallbackManager` swallows
+    callback exceptions by default (logging them as
+    ``Error in <Handler>.<method> callback: ...`` and continuing the
+    parent call). The 2026-05-25 XBEN-006-24 run at 18:11:10 showed
+    this exact failure mode — FlagWatcher fired and raised, the
+    operator saw the swallowed-error log, but the worker kept
+    iterating until its own loop completed and only the end-of-worker
+    fallback scan caught the flag. With ``raise_error = True`` set,
+    the exception propagates through ``agent.astream`` to the caller
+    in :mod:`src.nodes.base.skill_runner`, which is the entire point
+    of the early-abort design.
     """
+
+    # See class docstring — without this the exception is swallowed
+    # by LangChain's callback dispatcher and the worker never aborts.
+    raise_error: bool = True
 
     def __init__(self, *, expected_flag: str, agent_id: str = ""):
         super().__init__()

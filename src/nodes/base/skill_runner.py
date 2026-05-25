@@ -991,7 +991,68 @@ async def _run_skill_agent_impl(
         "target_url": target_url,
     }
 
-    return {
+    # ── Success-path flag auto-verification ─────────────────────
+    # In benchmark mode (``expected_flag`` set), scan the worker's
+    # tool messages for ``flag{...}`` substrings and strict-equal
+    # them against ``expected_flag``. On a match, surface the
+    # captured value via ``state.captured_flag`` (consumed by
+    # ``route_after_summarizer`` to terminate the graph) AND push
+    # it onto ``submission_attempts`` (consumed by ``xbow_runner``
+    # as the verdict source of truth).
+    #
+    # Why this exists: prior to 2026-05-25 the only termination
+    # path was the planner explicitly emitting ``submit_flag`` with
+    # a flag-shaped string. The summarizer's digest LLM was
+    # observed (XBEN-006-24 on 2026-05-25, see tests/FAILURES.md)
+    # to rewrite the "Server responses" prose and DROP literal
+    # ``flag{...}`` strings — so the planner never saw the
+    # capture, never submitted, run timed out.
+    #
+    # Why this is SAFE despite the 2026-05-24 removal of the old
+    # regex-only auto-terminate: the strict-equality gate
+    # against ``expected_flag`` is itself the false-positive
+    # filter. Swagger ``flag{example}`` examples, README
+    # placeholders, and the agent's own ``python3 -c "flag=…"``
+    # script literals all FAIL strict equality with the
+    # deterministic ``FLAG{sha256(BENCHMARK_UPPER)}`` value, so
+    # they never set this field. Only the actual served flag does.
+    #
+    # In real-pentest mode (``expected_flag`` empty), this block
+    # is a no-op — capture remains planner-driven.
+    captured_flag_value: str | None = None
+    expected_flag = (state or {}).get("expected_flag") or ""
+    if expected_flag and last_snapshot:
+        from src.edges.flag_match import extract_flags, flags_match
+        scanned_msgs = last_snapshot.get("messages", []) or []
+        for m in scanned_msgs:
+            if not isinstance(m, ToolMessage):
+                continue
+            c = getattr(m, "content", None)
+            if isinstance(c, str):
+                content_str = c
+            elif isinstance(c, list):
+                # ToolMessage content can be a list of content blocks
+                # under certain provider shapes — flatten to text.
+                content_str = "\n".join(
+                    str((block or {}).get("text") or block)
+                    if isinstance(block, dict) else str(block)
+                    for block in c
+                )
+            else:
+                continue
+            for candidate in extract_flags(content_str):
+                if flags_match(submitted=candidate, expected=expected_flag):
+                    captured_flag_value = candidate
+                    node.log.info(
+                        "[%s] auto-verified flag in tool output: %s "
+                        "(matches expected_flag)",
+                        config.agent_id, candidate,
+                    )
+                    break
+            if captured_flag_value:
+                break
+
+    update: dict[str, Any] = {
         # NOTE: no ``"messages": trace`` — that was the cause of the
         # global-prompt explosion. The full trace stays on disk and
         # in ``pending_summary_inputs[*].trace`` until the
@@ -1001,3 +1062,10 @@ async def _run_skill_agent_impl(
         "findings": findings,
         "active_agents": [config.agent_id],
     }
+    if captured_flag_value is not None:
+        update["captured_flag"] = captured_flag_value
+        # Mirror onto submission_attempts so xbow_runner.run_one's
+        # existing verdict path (which reads submission_attempts[-1])
+        # sees the capture without any change to that consumer.
+        update["submission_attempts"] = [captured_flag_value]
+    return update

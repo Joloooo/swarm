@@ -57,6 +57,30 @@ def _merge_results(left: list[AgentResult], right: list[AgentResult]) -> list[Ag
     return left + right
 
 
+def _captured_flag_reducer(
+    existing: str | None,
+    new: str | None,
+) -> str | None:
+    """First non-None wins — once captured, stays captured.
+
+    The conditional edge ``route_after_summarizer`` reads this field and
+    routes to ``END`` on a truthy value. We use first-wins (rather than
+    last-wins) so that:
+
+    1. A second parallel worker that also matches expected_flag can't
+       overwrite the first match with the same value (harmless but
+       wasteful).
+    2. A subsequent ``None`` write from a different node (e.g. a
+       follow-up summarizer pass) cannot un-capture the flag.
+
+    Two parallel workers landing flag matches in the same fan-out is
+    rare (usually only one worker actually executes the winning probe),
+    and if it happens both should match the same ``expected_flag``
+    string anyway — so dropping the second is correct.
+    """
+    return existing or new
+
+
 def _summary_inputs_reducer(
     left: list[dict] | None, right: list[dict] | None,
 ) -> list[dict]:
@@ -199,6 +223,30 @@ class SwarmGraphState(TypedDict, total=False):
     # planner each appending their own attempt are concatenated rather
     # than overwriting.
     submission_attempts: Annotated[list[str], operator.add]
+
+    # Auto-verified flag capture. Set by ``run_skill_agent`` on the
+    # worker success path when ANY ToolMessage in the agent's trace
+    # contains a ``flag{...}`` substring that strict-equals
+    # ``expected_flag`` via ``src.edges.flag_match.flags_match``. The
+    # strict-equality gate is what makes this safe vs. the regex-only
+    # auto-terminate that was removed on 2026-05-24: false-positive
+    # patterns (swagger schemas, README examples, the agent's own
+    # script literals) cannot strict-equal the deterministic
+    # ``FLAG{sha256(BENCHMARK_UPPER)}`` value, so they simply don't
+    # set this field.
+    #
+    # Consumed by ``src.edges.routing.route_after_summarizer`` to
+    # auto-route the graph to ``END`` without requiring a planner
+    # round-trip + ``submit_flag``. The skill runner ALSO pushes the
+    # same value onto ``submission_attempts`` so ``xbow_runner``'s
+    # existing verdict path (which reads ``submission_attempts``)
+    # sees the capture without any new wiring.
+    #
+    # Only meaningful in benchmark mode (where ``expected_flag`` is
+    # set). In real-pentest mode ``expected_flag`` is empty and this
+    # field is never written — capture remains a planner-driven
+    # explicit ``submit_flag`` decision, since no oracle exists.
+    captured_flag: Annotated[str | None, _captured_flag_reducer]
 
     # ── Worker → Summarizer hand-off (the context-window fix) ──
     # Each worker (executor, recon, salvage) writes a SINGLE-ITEM list

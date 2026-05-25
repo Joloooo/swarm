@@ -66,6 +66,10 @@ def main_loop(args: argparse.Namespace) -> None:
             if not _ensure_docker(args):
                 continue
             runner.run_one("XBEN-006-24")
+        elif action == "first5_buildable":
+            if not _ensure_docker(args):
+                continue
+            runner.run_first5_buildable()
         elif action == "daily_compact":
             if not _ensure_docker(args):
                 continue
@@ -114,6 +118,7 @@ def _top_level() -> str | None:
 
     choices = [
         Choice("Pentest 1 container (XBEN-006-24)",        value="one"),
+        Choice("Pentest 5 buildable (sanity-check, compact)", value="first5_buildable"),
         Choice("Pentest 15 containers (daily, compact)",   value="daily_compact"),
         Choice("Pentest 15 containers (daily, silent)",    value="daily_silent"),
         Choice(all_label,                                  value="all", disabled=None if n_all else "submodule missing"),

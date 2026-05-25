@@ -58,6 +58,11 @@ class FlagCapturedSignal(Exception):
     re-scanning a (possibly truncated) snapshot. The skill runner's
     catch block treats this as a successful capture, not an error.
 
+    Scope is the **single worker** that raised. Other parallel workers
+    keep running until :class:`GraphTerminatedByCapture` (raised later
+    in the same worker) propagates up through ``ainvoke`` and asyncio
+    cancels their tasks. See module docstring for the layered design.
+
     NOT a subclass of the Codex refusal exceptions caught in
     :func:`src.refusals.retry.astream_with_refusal_retry` — that loop's
     ``except REFUSAL_EXCS`` clause must NOT swallow this signal, or
@@ -71,6 +76,57 @@ class FlagCapturedSignal(Exception):
         super().__init__(
             f"flag captured by {agent_id or 'worker'} "
             f"via {tool_name or 'tool'}: {flag}"
+        )
+
+
+class GraphTerminatedByCapture(Exception):
+    """Raised by ``skill_runner`` after capture to cancel the whole graph.
+
+    Unlike :class:`FlagCapturedSignal` (caught by skill_runner and
+    converted into a normal worker-result dict), this exception is
+    INTENDED to escape the graph entirely:
+
+      1. Raised at the end of ``_finalize_skill_result`` once
+         ``captured_flag_value`` is known.
+      2. Propagates out of ``agent.astream`` → executor node return
+         → LangGraph runtime.
+      3. LangGraph's asyncio-based ``ainvoke`` cancels the in-flight
+         sibling parallel branches via ``asyncio.CancelledError`` at
+         their next ``await`` point (the standard asyncio cancellation
+         semantics, verified empirically against LangGraph 1.1.6 —
+         see ``scripts/verify_*_cancellation.py``).
+      4. The exception re-raises out of ``ainvoke`` to ``xbow_runner``,
+         which catches it and synthesizes the minimum state needed
+         for the verdict path (``captured_flag``,
+         ``submission_attempts``, ``findings``).
+
+    Why this design instead of ``Command(goto=END)``: verified that
+    LangGraph 1.1.6's ``Command(goto=END)`` from a fan-out branch does
+    NOT cancel sibling branches — they run to completion, the
+    summarizer still fires, and total wall-clock is unaffected. The
+    sibling-cancellation we need comes from asyncio task cancellation
+    triggered by an unhandled exception during ``ainvoke``. Raising
+    is the cleanest way to trigger that path.
+
+    Carries enough state for the runner to reconstruct the verdict
+    without re-scanning anything — the graph state at the moment of
+    raise is discarded because the exception bypasses the normal
+    reducer path.
+    """
+
+    def __init__(
+        self,
+        *,
+        flag: str,
+        agent_id: str = "",
+        findings: list | None = None,
+    ):
+        self.flag = flag
+        self.agent_id = agent_id
+        self.findings = findings or []
+        super().__init__(
+            f"graph terminated by {agent_id or 'worker'}: "
+            f"flag captured = {flag}"
         )
 
 

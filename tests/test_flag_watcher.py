@@ -25,6 +25,8 @@ no real LLM — pure Tier 1.
 from __future__ import annotations
 
 import asyncio
+from operator import add
+from typing import Annotated, TypedDict
 from uuid import uuid4
 
 import pytest
@@ -33,8 +35,18 @@ from langchain_core.messages import ToolMessage
 from src.nodes.base.flag_watcher import (
     FlagCapturedSignal,
     FlagWatcherCallback,
+    GraphTerminatedByCapture,
     _coerce_to_text,
 )
+
+
+# Module-scope so LangGraph's type-hint resolver (which evaluates
+# annotations via globals()) can find Annotated. Defining the
+# TypedDict inside a test function breaks under
+# ``typing.get_type_hints`` because the function's locals aren't
+# visible to LangGraph's runtime introspection.
+class _CancellationState(TypedDict):
+    siblings_cancelled: Annotated[list[str], add]
 
 
 EXPECTED = "flag{582d82bb-2c1f-4ba5-9357-e8b94217957f}"
@@ -255,3 +267,101 @@ async def test_exception_propagates_through_callback_manager():
         await run_mgr.on_tool_end(
             output=f"bash output containing {EXPECTED}",
         )
+
+
+# ── 8. GraphTerminatedByCapture — escapes the graph + cancels siblings ──
+
+
+def test_graph_terminated_carries_flag_agent_and_findings():
+    """The exception is the sole channel that survives the
+    ``ainvoke`` cancellation chain — graph state is discarded when an
+    unhandled exception propagates, so every field xbow_runner needs
+    for the verdict path must be present on the exception itself."""
+    findings = [object(), object()]  # placeholders; runner just len()s
+    exc = GraphTerminatedByCapture(
+        flag=EXPECTED, agent_id="owasp-auth", findings=findings,
+    )
+    assert exc.flag == EXPECTED
+    assert exc.agent_id == "owasp-auth"
+    assert exc.findings == findings
+    # Default findings → empty list (not None) so callers can len() safely.
+    bare = GraphTerminatedByCapture(flag=EXPECTED)
+    assert bare.findings == []
+
+
+def test_graph_terminated_str_includes_diagnostic_info():
+    """The ``str()`` form ends up in tracebacks, error logs, and the
+    ``result["error"]`` field on benches that fall through to the
+    generic ``except Exception`` handler. Must identify the flag and
+    the agent so post-mortem is one ``grep`` away."""
+    exc = GraphTerminatedByCapture(flag=EXPECTED, agent_id="owasp-auth")
+    s = str(exc)
+    assert EXPECTED in s
+    assert "owasp-auth" in s
+
+
+@pytest.mark.asyncio
+async def test_raising_from_one_branch_cancels_sibling_tasks():
+    """End-to-end pin for the cancellation mechanism we rely on.
+
+    This is the load-bearing behaviour discovered empirically against
+    LangGraph 1.1.6: ``Command(goto=END)`` from a fan-out branch does
+    NOT cancel siblings (they run to completion, the summarizer still
+    fires), but RAISING an exception from one branch DOES — asyncio's
+    ``CancelledError`` propagates to in-flight sibling coroutines at
+    their next ``await`` point.
+
+    If a future LangGraph upgrade breaks this contract, this test will
+    fail loudly — and the fix is no longer to raise, it is to add a
+    process-global captured flag + ``on_llm_start`` callback check.
+    The presence of this test is the trigger for that pivot."""
+    import time
+
+    from langgraph.graph import StateGraph, END, START
+    from langgraph.types import Send
+
+    async def planner_node(state):
+        return {"siblings_cancelled": []}
+
+    def fan_out(state):
+        # One winner that raises fast, two slow siblings that should
+        # be cancelled before completing their sleep.
+        return [
+            Send("worker", {"wid": "winner", "delay": 0.05, "raises": True}),
+            Send("worker", {"wid": "sib1", "delay": 3.0, "raises": False}),
+            Send("worker", {"wid": "sib2", "delay": 3.0, "raises": False}),
+        ]
+
+    async def worker(state):
+        try:
+            await asyncio.sleep(state["delay"])
+        except asyncio.CancelledError:
+            # Record that we were cancelled. This is the load-bearing
+            # assertion — if siblings ran to completion, this branch
+            # never fires and the list stays empty.
+            return {"siblings_cancelled": [state["wid"]]}
+        if state["raises"]:
+            raise GraphTerminatedByCapture(flag=EXPECTED, agent_id="winner")
+        return {"siblings_cancelled": []}
+
+    g = StateGraph(_CancellationState)
+    g.add_node("planner", planner_node)
+    g.add_node("worker", worker)
+    g.add_edge(START, "planner")
+    g.add_conditional_edges("planner", fan_out, ["worker"])
+    g.add_edge("worker", END)
+    compiled = g.compile()
+
+    t0 = time.time()
+    with pytest.raises(GraphTerminatedByCapture) as exc_info:
+        await compiled.ainvoke({"siblings_cancelled": []})
+    elapsed = time.time() - t0
+
+    # The full graph took less than the slow siblings' 3 s sleep,
+    # which proves they didn't run to completion.
+    assert elapsed < 1.0, (
+        f"siblings were not cancelled — graph took {elapsed:.2f}s "
+        "(expected < 1.0s if cancellation worked)"
+    )
+    assert exc_info.value.flag == EXPECTED
+    assert exc_info.value.agent_id == "winner"

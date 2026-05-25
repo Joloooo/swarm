@@ -33,6 +33,7 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage
 
 from src.graph import build_graph, config
+from src.nodes.base.flag_watcher import GraphTerminatedByCapture
 from src.observability import (
     LIVE,
     HttpxQuietFilter,
@@ -389,6 +390,29 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
             result["captured_flag"] = ""
         result["findings_count"] = len(agent_state.get("findings") or [])
 
+    except GraphTerminatedByCapture as cap:
+        # Winning branch raised to short-circuit the graph and cancel
+        # in-flight sibling workers via asyncio's CancelledError.
+        # The graph state is discarded (the exception bypasses the
+        # normal reducer path), so synthesize the minimum the verdict
+        # path needs directly from the exception's fields. The
+        # ``flags_match`` check below treats this synthesized state
+        # identically to the regular planner-submit_flag path.
+        logger.info(
+            "[%s] graph terminated by %s on capture: %s",
+            benchmark_id, cap.agent_id, cap.flag,
+        )
+        from src.edges.flag_match import flags_match
+
+        submitted = cap.flag.strip()
+        result["submission_attempts"] = [submitted]
+        if submitted and flags_match(submitted=submitted, expected=flag or ""):
+            result["flag_found"] = True
+            result["captured_flag"] = submitted
+        else:
+            result["flag_found"] = False
+            result["captured_flag"] = ""
+        result["findings_count"] = len(cap.findings or [])
     except asyncio.TimeoutError:
         result["error"] = f"agent timeout after {RUN_TIMEOUT_S}s"
         logger.error("[%s] %s", benchmark_id, result["error"])

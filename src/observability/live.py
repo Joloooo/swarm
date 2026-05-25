@@ -804,7 +804,24 @@ class _Live:
         findings_n: int,
         summary_path: str | None,
         error: str | None = None,
+        expected_flag: str = "",
+        last_submission: str = "",
     ) -> None:
+        """Render the end-of-bench summary line plus an optional
+        expected-vs-captured verification block.
+
+        The verification block exists so a human glancing at the
+        terminal can verify the verdict at a glance without trusting
+        the LLM's narration: it prints the runner's predicted
+        ``expected_flag`` and the most recent ``last_submission`` from
+        ``state["submission_attempts"]`` side by side, with a ✓/✗
+        marker computed by :func:`src.edges.flag_match.flags_match`.
+        Pure static rendering — no LLM, no narration trust.
+
+        Only printed in benchmark mode (``expected_flag`` non-empty);
+        real-pentest runs skip the block since there's no ground truth
+        to compare against.
+        """
         if error:
             head = _paint(f"⚠ {bench_id}", _BOLD, _YELLOW)
             verdict = _paint(f"ERROR: {error}", _YELLOW)
@@ -816,6 +833,35 @@ class _Live:
             verdict = _paint("✗ no flag", _YELLOW)
         tail = f"({duration_s:.1f}s, {findings_n} finding{'s' if findings_n != 1 else ''})"
         _emit(f"{_now()}  {head}  {verdict}  {tail}")
+
+        # Verification block — benchmark mode only. Skipped silently
+        # for real-pentest runs (where expected_flag is empty).
+        if expected_flag:
+            # Import locally so this module stays leaf-level in the
+            # import graph (live.py is imported by graph + state, both
+            # of which are upstream of flag_match's consumers).
+            from src.edges.flag_match import flags_match
+
+            _emit(f"           {_paint('expected:', _DIM)}  {expected_flag}")
+            if last_submission:
+                match_ok = flags_match(
+                    submitted=last_submission,
+                    expected=expected_flag,
+                )
+                marker = (
+                    _paint("✓ match", _BOLD, _GREEN) if match_ok
+                    else _paint("✗ no match", _BOLD, _RED)
+                )
+                _emit(
+                    f"           {_paint('captured:', _DIM)}  "
+                    f"{last_submission}  {marker}"
+                )
+            else:
+                _emit(
+                    f"           {_paint('captured:', _DIM)}  "
+                    f"{_paint('(no submission attempted)', _DIM)}"
+                )
+
         if summary_path:
             _emit(f"           {_paint('summary', _DIM)} → {summary_path}")
 

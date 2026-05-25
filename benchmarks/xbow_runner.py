@@ -468,6 +468,20 @@ async def main_async(args) -> int:
         else:
             summary["fail"] += 1
 
+        # Pull the most recent submission attempt for the
+        # expected-vs-captured verification block in bench_end. Empty
+        # list → empty string → bench_end renders "(no submission
+        # attempted)". On success, ``r["captured_flag"]`` is the
+        # verified value, and the last submission_attempts entry
+        # equals it; we pick the last attempt either way because it's
+        # what the planner most recently committed to (and matches
+        # what's verified for the verdict — see the run_one block at
+        # xbow_runner.py:307-316).
+        last_submission = ""
+        attempts = r.get("submission_attempts") or []
+        if attempts:
+            last_submission = str(attempts[-1] or "").strip()
+
         LIVE.bench_end(
             bid,
             ok=bool(r["flag_found"]),
@@ -479,6 +493,8 @@ async def main_async(args) -> int:
             # directory over: ``logs/run-<run_id>/full_logs.jsonl``.
             summary_path=f"{r['run_dir']}/displayed_terminal_logs.log",
             error=r["error"],
+            expected_flag=str(r.get("expected_flag") or ""),
+            last_submission=last_submission,
         )
         LIVE.runner_message(f"           jsonl   → {path}")
 

@@ -83,6 +83,54 @@ def run_first5_buildable(*, pause_on_exit: bool = True) -> int:
     )
 
 
+def run_first5_patched(*, pause_on_exit: bool = True) -> int:
+    """Pentest XBEN-001 to XBEN-005, applying bit-rot patches first.
+
+    Runs ``benchmarks/patch_bitrot.sh`` as a preflight to repair the
+    Dockerfiles whose upstream base images have rotted (mysql:5.7.15
+    manifest, Debian buster apt 404, phantomjs gone from buster
+    archive). The script is idempotent and saves originals as
+    ``<file>.bitrot_orig`` so reverting is one command.
+
+    No ``--skip-build``: the patcher just cleared each benchmark's
+    ``.xben_build_done`` guard, so we *want* a fresh build with the
+    patched Dockerfile. No ``--resume`` for the same reason as
+    :func:`run_first5_buildable` — this is a deliberate re-run.
+
+    Returns the patcher's exit code if it failed (so the menu can
+    report the failure clearly), otherwise the xbow_runner's.
+    """
+    import subprocess
+    patcher = _PROJECT_ROOT / "benchmarks" / "patch_bitrot.sh"
+    print(f"[first5-patched] running preflight patcher: {patcher}")
+    try:
+        proc = subprocess.run(
+            ["bash", str(patcher)],
+            cwd=str(_PROJECT_ROOT),
+            check=False,
+        )
+        if proc.returncode != 0:
+            _print_error(
+                f"patch_bitrot.sh failed (rc={proc.returncode}).\n"
+                "Cannot proceed to the benchmark run. Inspect the\n"
+                "output above and fix or run `bash benchmarks/"
+                "patch_bitrot.sh --revert` to undo any partial changes."
+            )
+            if pause_on_exit:
+                _wait_for_enter(proc.returncode)
+            return proc.returncode
+    except KeyboardInterrupt:
+        if pause_on_exit:
+            _wait_for_enter(130)
+        return 130
+
+    list_path = _PROJECT_ROOT / "benchmarks" / "daily_5_first_patched.txt"
+    return _spawn(
+        ["--list-file", str(list_path)],
+        pause_on_exit=pause_on_exit,
+    )
+
+
 def run_all(*, pause_on_exit: bool = True) -> int:
     """Pentest every XBEN-*-24 benchmark on disk (~104).
 

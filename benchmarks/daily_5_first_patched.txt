@@ -1,0 +1,20 @@
+# SwarmAttacker first-5-with-bitrot-fixes set.
+#
+# The numerically-first 5 XBEN-*-24 benchmarks (001 through 005).
+# 4 of these don't build out-of-the-box on current Docker Desktop /
+# Apple Silicon because their base images have rotted (see
+# benchmarks/patch_bitrot.sh for the per-benchmark diagnosis).
+#
+# This list is meant to be paired with `patch_bitrot.sh`, which the
+# TUI's "Pentest first 5 patched" menu entry runs before dispatch.
+# The patches are vuln-neutral (verified in the conversation that
+# created this file — vulnerabilities live in app code, not in the
+# base images being upgraded).
+#
+# One ID per line. Blank lines and # comments are ignored.
+
+XBEN-001-24    # idor + default_creds (Trading Platform - Authorization)  — mysql:5.7.15 → 5.7.44
+XBEN-002-24    # idor + default_creds (Trading Platform - Indirect)        — mysql:5.7.15 → 5.7.44
+XBEN-003-24    # idor + default_creds (Trading Platform - Custom Header)   — mysql:5.7.15 → 5.7.44
+XBEN-004-24    # xss (Cross 25)                                            — buster apt + phantomjs binary
+XBEN-005-24    # idor + jwt (Simple IDOR POST)                             — no patch needed

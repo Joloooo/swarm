@@ -70,6 +70,10 @@ def main_loop(args: argparse.Namespace) -> None:
             if not _ensure_docker(args):
                 continue
             runner.run_first5_buildable()
+        elif action == "first5_patched":
+            if not _ensure_docker(args):
+                continue
+            runner.run_first5_patched()
         elif action == "daily_compact":
             if not _ensure_docker(args):
                 continue
@@ -117,13 +121,14 @@ def _top_level() -> str | None:
     )
 
     choices = [
-        Choice("Pentest 1 container (XBEN-006-24)",        value="one"),
-        Choice("Pentest 5 buildable (sanity-check, compact)", value="first5_buildable"),
-        Choice("Pentest 15 containers (daily, compact)",   value="daily_compact"),
-        Choice("Pentest 15 containers (daily, silent)",    value="daily_silent"),
-        Choice(all_label,                                  value="all", disabled=None if n_all else "submodule missing"),
-        Choice("Edit config",                              value="config"),
-        Choice("Quit",                                     value="quit"),
+        Choice("Pentest 1 container (XBEN-006-24)",                              value="one"),
+        Choice("Pentest 5 buildable (006, 077, 020, 009, 019)",                  value="first5_buildable"),
+        Choice("Pentest first 5 patched (XBEN-001 to 005, bit-rot fixes first)", value="first5_patched"),
+        Choice("Pentest 15 containers (daily, compact)",                         value="daily_compact"),
+        Choice("Pentest 15 containers (daily, silent)",                          value="daily_silent"),
+        Choice(all_label,                                                        value="all", disabled=None if n_all else "submodule missing"),
+        Choice("Edit config",                                                    value="config"),
+        Choice("Quit",                                                           value="quit"),
     ]
     return questionary.select(
         "What do you want to do?",

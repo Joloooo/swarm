@@ -45,7 +45,10 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
 from src.llm.callbacks import make_call_config
-from src.nodes.base.flag_watcher import FlagCapturedSignal
+from src.nodes.base.flag_watcher import (
+    FlagCapturedSignal,
+    GraphTerminatedByCapture,
+)
 from src.nodes.base.system_prompt import _build_system_message
 from src.observability import make_run_id
 from src.observability.state import _count_worker_iterations
@@ -1191,4 +1194,21 @@ async def _run_skill_agent_impl(
         # existing verdict path (which reads submission_attempts[-1])
         # sees the capture without any change to that consumer.
         update["submission_attempts"] = [captured_flag_value]
+        # Raise to escape the graph and cancel sibling parallel workers.
+        # See GraphTerminatedByCapture's docstring for the full
+        # propagation chain. The empirical 2026-05-25 18:00 run showed
+        # that returning a plain dict (even with captured_flag set in
+        # state) doesn't terminate the graph from inside a fan-out:
+        # LangGraph waits for every parallel branch before firing the
+        # summarizer, and the 900 s timeout snapped before the slowest
+        # worker yielded. Raising leverages asyncio's CancelledError
+        # propagation through ainvoke — verified to cancel siblings at
+        # their next await point in LangGraph 1.1.6. xbow_runner
+        # catches this exception and synthesizes the verdict state
+        # from the exception's fields directly.
+        raise GraphTerminatedByCapture(
+            flag=captured_flag_value,
+            agent_id=config.agent_id,
+            findings=findings,
+        )
     return update

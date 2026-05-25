@@ -1,6 +1,6 @@
 """Routing edges — translate the supervisor's decision into a transition.
 
-One edge function:
+Two edge functions:
 
   :func:`route_after_planner` — reads the supervisor's chosen action
   and returns either a node name (``recon`` / ``web_search`` /
@@ -12,14 +12,32 @@ One edge function:
   via :func:`src.edges.flag_match.flags_match`. Match → ``END``,
   miss → ``"planner"``.
 
-The summarizer → planner transition used to be conditional (a
-``route_after_summarizer`` edge that scanned worker tool outputs for
-``flag{...}`` strings and auto-terminated on a hit). Removed
-2026-05-24: regex matching over raw HTTP response bodies cannot be
-made false-positive-safe — README excerpts, swagger schemas, and the
-agent's own ``python3 -c`` script literals all contain ``flag{...}``-
-shaped strings. Capture is now an explicit agent decision via
-``submit_flag``; the summarizer always routes back to the planner.
+  :func:`route_after_summarizer` — reads ``state["captured_flag"]``,
+  which is set by the skill runner ONLY when a worker's tool output
+  contained a ``flag{...}`` substring that strict-equals
+  ``expected_flag``. Truthy → ``END``, empty → ``"planner"``.
+
+Why ``route_after_summarizer`` is back (2026-05-25):
+
+  An earlier version of this edge scanned worker tool outputs for ANY
+  ``flag{...}`` substring and terminated on a hit. Removed 2026-05-24
+  because regex matching over raw HTTP response bodies is structurally
+  false-positive-prone — README excerpts, swagger schemas, and the
+  agent's own ``python3 -c`` script literals all contain
+  ``flag{...}``-shaped strings.
+
+  The current re-introduction is a DIFFERENT design: the skill runner
+  (``src/nodes/base/skill_runner.py``) does the scan, but only
+  populates ``state["captured_flag"]`` when the extracted string
+  strict-equals ``expected_flag``. So this edge's decision reduces to
+  "is there a verified capture?" — a boolean read, not a regex match.
+  The strict-equality gate is itself the false-positive filter:
+  ``flag{example}`` cannot strict-equal ``FLAG{9c935b35a4f...}``.
+
+  In real-pentest mode (``expected_flag`` empty) the skill runner
+  never sets ``captured_flag``, so this edge always routes back to
+  the planner — capture remains planner-driven via ``submit_flag``,
+  same as before.
 
 The planner is responsible for populating ``pending_dispatch`` when
 it picks ``action="attack"`` and for populating ``submission_attempts``
@@ -141,4 +159,33 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
         action,
     )
     return _TERMINATE
+
+
+def route_after_summarizer(state: SwarmGraphState) -> str:
+    """Terminate the graph on a verified flag capture, else continue.
+
+    Reads ``state["captured_flag"]``, which the skill runner sets
+    ONLY when a worker's tool output contained a ``flag{...}``
+    substring that strict-equals ``state["expected_flag"]`` (the
+    deterministic XBow benchmark target value). The strict equality
+    is the false-positive filter — a placeholder ``flag{example}``
+    in a swagger schema cannot match ``FLAG{<64-hex>}``.
+
+    Truthy ``captured_flag`` → ``END``. The graph stops; the
+    ``xbow_runner`` reads ``submission_attempts[-1]`` (which the
+    skill runner also populated) as the authoritative verdict.
+
+    Empty / missing ``captured_flag`` → ``"planner"``. The planner
+    runs as normal and decides the next action. In real-pentest mode
+    (no ``expected_flag`` configured) this is always the taken
+    branch — capture is planner-driven via ``submit_flag``.
+    """
+    captured = (state.get("captured_flag") or "").strip()
+    if captured:
+        logger.info(
+            "route_after_summarizer: verified capture %r — routing to END.",
+            captured[:80],
+        )
+        return END
+    return "planner"
 

@@ -257,7 +257,7 @@ def describe_config() -> str:
 
 from langgraph.graph import END, START, StateGraph  # noqa: E402
 
-from src.edges.routing import route_after_planner  # noqa: E402
+from src.edges.routing import route_after_planner, route_after_summarizer  # noqa: E402
 from src.nodes import (  # noqa: E402
     executor_node,
     planner_node,
@@ -349,19 +349,37 @@ def build_graph():
     graph.add_edge("recon", "summarizer")
     graph.add_edge("executor", "summarizer")
 
-    # Summariser → planner. Always.
+    # Summariser → planner (conditional on captured_flag).
     #
-    # An earlier version routed conditionally via
-    # ``route_after_summarizer`` to allow auto-termination when a
-    # worker's tool output contained a flag-shaped string. Removed
-    # 2026-05-24: regex matching over raw HTTP response bodies cannot
-    # be made false-positive-safe (README excerpts, swagger schemas,
-    # the agent's own ``python3 -c`` script literals all match
-    # ``flag{...}``). The only way to win a benchmark is now the
-    # planner emitting ``action="submit_flag"`` with a string that
-    # passes :func:`src.edges.flag_match.flags_match`, verified by
-    # :func:`src.edges.routing.route_after_planner`.
-    graph.add_edge("summarizer", "planner")
+    # The 2026-05-25 re-introduction of ``route_after_summarizer``
+    # auto-terminates the graph WHEN a worker's tool output contained
+    # a ``flag{...}`` substring that strict-equals ``expected_flag``.
+    # The skill runner (``src/nodes/base/skill_runner.py``) does the
+    # scan + equality check on the success path and writes the
+    # verified value onto ``state.captured_flag``; this edge just
+    # reads that boolean.
+    #
+    # This is NOT a regression of the 2026-05-24 removal: the old
+    # design auto-terminated on ANY ``flag{...}`` regex match, which
+    # false-positived on swagger schemas, README excerpts, and the
+    # agent's own script literals. The new design's strict-equality
+    # gate against ``expected_flag`` makes those false positives
+    # structurally impossible — ``flag{example}`` cannot equal
+    # ``FLAG{<64-hex>}``.
+    #
+    # In real-pentest mode (``expected_flag`` empty) the skill runner
+    # never sets ``captured_flag``, so ``route_after_summarizer``
+    # always falls through to ``"planner"`` — capture remains a
+    # planner-driven explicit ``submit_flag`` decision, identical to
+    # the pre-2026-05-25 behaviour.
+    graph.add_conditional_edges(
+        "summarizer",
+        route_after_summarizer,
+        {
+            "planner": "planner",
+            END: END,
+        },
+    )
     graph.add_edge("web_search", "planner")
 
     graph.add_edge("report", END)

@@ -88,14 +88,20 @@ class SummarizerNode(BaseNode):
             )
             return {}
 
-        # Capture is an explicit agent decision. The previous
-        # summariser-side scan of tool outputs for ``flag{...}`` was
-        # removed (2026-05-24) — regex matching over raw HTTP responses
-        # is structurally false-positive-prone (template strings in
-        # READMEs, swagger examples, the agent's own script literals
-        # all match). The only termination-on-capture path is now the
-        # planner emitting ``action="submit_flag"`` with a string that
-        # passes :func:`src.edges.flag_match.flags_match`.
+        # Termination-on-capture is now driven by ``state.captured_flag``
+        # (set by ``src/nodes/base/skill_runner.py`` on the success
+        # path when a worker's tool output contained a ``flag{...}``
+        # substring that strict-equals ``expected_flag``). The
+        # ``route_after_summarizer`` conditional edge reads that field
+        # and routes to ``END`` on a verified capture.
+        #
+        # This module deliberately does NOT do any flag scanning of
+        # its own — by the time the summarizer runs, the worker has
+        # already done the strict-equality verification upstream. We
+        # just transform pending traces into digests for the planner.
+        # In real-pentest mode (``expected_flag`` empty) the skill
+        # runner never sets ``captured_flag``, so termination remains
+        # planner-driven via ``action="submit_flag"``.
 
         run_id = state.get("run_id")
         target_url = state.get("target_url", "")

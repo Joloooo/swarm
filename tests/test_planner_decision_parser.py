@@ -11,6 +11,10 @@ expected behaviour.
 from __future__ import annotations
 
 from src.nodes.planner import VALID_ACTIONS, _parse_decision
+from src.observability.decision_parser import (
+    _VALID_ACTIONS as PARSER_VALID_ACTIONS,
+    parse_planner_decision,
+)
 
 
 # ── Happy paths ──────────────────────────────────────────────────────
@@ -139,3 +143,81 @@ def test_valid_actions_set_is_what_the_planner_documents():
     assert VALID_ACTIONS == {
         "attack", "recon", "web_search", "report", "submit_flag",
     }
+
+
+def test_parser_whitelist_matches_planner_vocabulary():
+    """The strict-mode parser's whitelist (``decision_parser._VALID_ACTIONS``)
+    MUST equal the planner's own vocabulary (``planner.VALID_ACTIONS``).
+
+    These are two files that must agree but live in different layers:
+    the planner defines the action vocabulary; the strict parser
+    rejects any decision whose ``action`` field isn't in its own
+    whitelist. When they fall out of sync, the planner can emit
+    perfectly-valid JSON for an action it considers legal, and the
+    parser silently rejects it — which surfaces as "no parseable JSON
+    decision; forcing report" in the logs, looking like an LLM failure
+    rather than a code bug.
+
+    History: ``submit_flag`` was added to the planner's vocabulary in
+    2026-05 but NOT to ``decision_parser._VALID_ACTIONS``. Every flag
+    submission on every benchmark run silently force-reported instead
+    of submitting. Discovered in
+    ``run-XBEN-006-24__2026-05-25_14h33m29s`` after the
+    summarizer-findings-attach fix surfaced the captured flag to the
+    planner, which correctly tried to submit it.
+    """
+    assert PARSER_VALID_ACTIONS == VALID_ACTIONS, (
+        f"Parser whitelist {PARSER_VALID_ACTIONS!r} disagrees with planner "
+        f"vocabulary {VALID_ACTIONS!r}. Update "
+        "src/observability/decision_parser.py:_VALID_ACTIONS to match."
+    )
+
+
+def test_submit_flag_decision_parses_end_to_end():
+    """End-to-end: a realistic submit_flag JSON block (matching what
+    the planner emits when it decides to submit a captured flag) must
+    survive parse_planner_decision in strict mode and return a dict
+    with the action and flag fields intact.
+
+    This is the regression test for the 2026-05-25 incident — pin the
+    full path the planner uses so a future whitelist drift fails
+    loudly here instead of silently killing benchmark runs.
+    """
+    text = """\
+The latest worker captured a flag-shaped value in /jobs response.
+
+```json
+{
+  "action": "submit_flag",
+  "flag": "flag{582d82bb-2c1f-4ba5-9357-e8b94217957f}",
+  "reasoning": "owasp-input-validation finding #4 contains the flag verbatim."
+}
+```
+"""
+    decision = parse_planner_decision(text, strict=True)
+    assert decision is not None, "submit_flag JSON must parse in strict mode"
+    assert decision["action"] == "submit_flag"
+    assert decision["flag"] == "flag{582d82bb-2c1f-4ba5-9357-e8b94217957f}"
+
+
+def test_submit_flag_with_extra_fields_still_parses():
+    """The planner sometimes emits extra fields (mode, target_url,
+    target_scope) alongside the required ones. The parser must not
+    reject those — JSON-spec-valid extra fields are allowed.
+    """
+    text = """\
+```json
+{
+  "action": "submit_flag",
+  "flag": "flag{582d82bb-2c1f-4ba5-9357-e8b94217957f}",
+  "mode": "analyze",
+  "target_url": "http://localhost:8000",
+  "target_scope": "localhost",
+  "reasoning": "Submitting the flag the worker extracted."
+}
+```
+"""
+    decision = parse_planner_decision(text, strict=True)
+    assert decision is not None
+    assert decision["action"] == "submit_flag"
+    assert decision["flag"] == "flag{582d82bb-2c1f-4ba5-9357-e8b94217957f}"

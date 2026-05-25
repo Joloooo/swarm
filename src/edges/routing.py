@@ -133,21 +133,49 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
                 "route_after_planner: action=submit_flag but "
                 "submission_attempts is empty; deferring to planner.",
             )
+            try:
+                from src.observability.writers import append_event
+                append_event(
+                    (state or {}).get("run_id"),
+                    "routing_decision",
+                    edge="route_after_planner",
+                    next="planner",
+                    action="submit_flag",
+                    reason="no_submission_attempts",
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return "planner"
         submitted = attempts[-1].strip()
         expected = (state.get("expected_flag") or "").strip()
-        if flags_match(submitted=submitted, expected=expected):
+        matched = flags_match(submitted=submitted, expected=expected)
+        next_node = END if matched else "planner"
+        if matched:
             logger.info(
                 "route_after_planner: flag verified (%r); routing to END.",
                 submitted[:80],
             )
-            return END
-        logger.info(
-            "route_after_planner: submitted flag (%r) did not match "
-            "expected — handing control back to planner.",
-            submitted[:80],
-        )
-        return "planner"
+        else:
+            logger.info(
+                "route_after_planner: submitted flag (%r) did not match "
+                "expected — handing control back to planner.",
+                submitted[:80],
+            )
+        try:
+            from src.observability.writers import append_event
+            append_event(
+                (state or {}).get("run_id"),
+                "routing_decision",
+                edge="route_after_planner",
+                next=str(next_node),
+                action="submit_flag",
+                submitted=submitted,
+                expected_flag=expected,
+                matched=matched,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return next_node
 
     if action == "report":
         return _TERMINATE  # bypassed — see _TERMINATE comment above
@@ -181,11 +209,28 @@ def route_after_summarizer(state: SwarmGraphState) -> str:
     branch — capture is planner-driven via ``submit_flag``.
     """
     captured = (state.get("captured_flag") or "").strip()
+    next_node = END if captured else "planner"
     if captured:
         logger.info(
             "route_after_summarizer: verified capture %r — routing to END.",
             captured[:80],
         )
-        return END
-    return "planner"
+    # Structured record so post-mortem can answer "did this edge fire
+    # at all, and what did state look like when it did". The 2026-05-25
+    # XBEN-006-24 incident showed that scan + capture can succeed without
+    # this edge ever firing (blocked behind a fan-in waiting for stuck
+    # parallel workers), so a missing event here is itself the signal.
+    try:
+        from src.observability.writers import append_event
+        append_event(
+            (state or {}).get("run_id"),
+            "routing_decision",
+            edge="route_after_summarizer",
+            next=str(next_node),
+            captured_flag=captured,
+            expected_flag=(state.get("expected_flag") or "").strip(),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return next_node
 

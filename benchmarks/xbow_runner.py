@@ -37,6 +37,7 @@ from src.observability import (
     LIVE,
     HttpxQuietFilter,
     LiveLogHandler,
+    install_jsonl_log_handler,
     make_run_id,
     run_dir,
     set_terminal_log_file,
@@ -637,6 +638,19 @@ def main() -> None:
     if not config.verbosity.show_http:
         for log_name in ("httpx", "httpcore", "openai", "anthropic"):
             logging.getLogger(log_name).addFilter(HttpxQuietFilter())
+
+    # Mirror every ``src.*`` / ``node.*`` / ``benchmarks.*`` logger call
+    # into ``full_logs.jsonl`` as type=``log`` rows. Decoupled from
+    # ``logging.basicConfig`` so compact mode (root=WARNING) still
+    # captures INFO records that document load-bearing decisions —
+    # e.g. ``[%s] auto-verified flag in tool output`` from skill_runner.
+    # Without this, the only place that line existed was stderr, which
+    # the compact LIVE renderer suppresses for INFO records. See the
+    # 2026-05-25 XBEN-006-24 retro: three workers had captured the flag
+    # in their tool output and the static extractor matched it, but no
+    # disk artefact recorded the match, so post-mortem diagnosis was
+    # blind.
+    install_jsonl_log_handler()
 
     raise SystemExit(asyncio.run(main_async(args)))
 

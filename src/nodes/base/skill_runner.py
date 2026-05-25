@@ -1021,12 +1021,19 @@ async def _run_skill_agent_impl(
     # is a no-op — capture remains planner-driven.
     captured_flag_value: str | None = None
     expected_flag = (state or {}).get("expected_flag") or ""
+    # Counters that always end up in the auto-verify summary event,
+    # so post-mortem can see "we scanned N tool messages, looked at
+    # K candidate flag-shaped strings, matched 0" without re-reading
+    # the entire worker trace.
+    tool_msgs_scanned = 0
+    candidates_seen = 0
     if expected_flag and last_snapshot:
         from src.edges.flag_match import extract_flags, flags_match
         scanned_msgs = last_snapshot.get("messages", []) or []
         for m in scanned_msgs:
             if not isinstance(m, ToolMessage):
                 continue
+            tool_msgs_scanned += 1
             c = getattr(m, "content", None)
             if isinstance(c, str):
                 content_str = c
@@ -1041,6 +1048,7 @@ async def _run_skill_agent_impl(
             else:
                 continue
             for candidate in extract_flags(content_str):
+                candidates_seen += 1
                 if flags_match(submitted=candidate, expected=expected_flag):
                     captured_flag_value = candidate
                     node.log.info(
@@ -1051,6 +1059,34 @@ async def _run_skill_agent_impl(
                     break
             if captured_flag_value:
                 break
+
+    # Structured record of the scan — fires whether or not we matched,
+    # so the post-mortem can answer "did the scan even run?" with a
+    # single ``jq`` query rather than reconstructing it from logger
+    # output that may have been dropped by compact mode. The 2026-05-25
+    # XBEN-006-24 incident is the canonical case: three workers had the
+    # flag in tool output but no on-disk artefact recorded whether the
+    # scan matched, so it was unclear whether the bug was detection
+    # (scan didn't fire / didn't match) or routing (matched but graph
+    # didn't terminate from inside a fan-out).
+    if expected_flag:
+        try:
+            from src.observability.writers import append_event
+            run_id = (state or {}).get("run_id")
+            append_event(
+                run_id,
+                "flag_auto_verified",
+                agent_id=config.agent_id,
+                node=node.name,
+                expected_flag=expected_flag,
+                captured_flag=captured_flag_value or "",
+                matched=captured_flag_value is not None,
+                tool_msgs_scanned=tool_msgs_scanned,
+                candidates_seen=candidates_seen,
+                last_snapshot_present=last_snapshot is not None,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     update: dict[str, Any] = {
         # NOTE: no ``"messages": trace`` — that was the cause of the

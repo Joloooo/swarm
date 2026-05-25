@@ -120,6 +120,12 @@ def append_event(run_id: str | None, type: str, **fields: object) -> None:
       * ``llm_error``   — LLM call raised (refusal, network, etc.).
       * ``shell_command``, ``shell_output``, ``shell_spawn``,
         ``shell_blocked``, … — one row per shell event.
+      * ``log``         — mirrored stdlib ``logger.*`` call (installed
+                          by :class:`JsonlLogHandler`).
+      * ``flag_auto_verified``  — skill_runner detected a worker tool
+                          message strict-equal to ``state.expected_flag``.
+      * ``routing_decision``    — a conditional edge chose its next node
+                          (e.g. ``route_after_summarizer`` → END).
 
     Best-effort: failures log a warning but never raise. Observability
     must not break a graph run. Tolerates ``run_id=None`` (e.g. callbacks
@@ -139,6 +145,169 @@ def append_event(run_id: str | None, type: str, **fields: object) -> None:
             f.write(line)
     except Exception as e:  # noqa: BLE001 — observability must not break the graph
         logger.warning("append_event(%s) failed: %s", type, e)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Stdlib-logging mirror — capture every ``logger.*`` call into full_logs.jsonl
+# so the structured log is the single source of truth.
+#
+# History — 2026-05-25 XBEN-006-24 timed out with three workers having
+# captured the flag literal in tool output. The skill-runner's auto-verify
+# block called ``node.log.info("auto-verified flag …")`` which IS the
+# load-bearing signal that "we matched". But in compact mode (the default
+# runtime mode) the root logger is set to WARNING — that INFO line was
+# silently dropped. There was no record anywhere on disk that the scan
+# had even fired. The diagnosis took 30 minutes of reading code to rule
+# out other branches. With this handler the same scan emits a row to
+# ``full_logs.jsonl`` regardless of console verbosity.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+# Logger-name prefixes that produce too much noise (and no insight) to
+# mirror — third-party HTTP / async machinery. Anything not on this list
+# is captured. Keep the list short; better to err on the side of
+# capturing than silently filtering something a future debugger needs.
+_LOGGER_NOISE_PREFIXES = (
+    "httpx",
+    "httpcore",
+    "openai",
+    "anthropic",
+    "urllib3",
+    "asyncio",
+    "websockets",
+    "h11",
+    "h2",
+)
+
+
+# Loggers we explicitly want to capture — the root-of-tree names. We
+# attach our handler to each of these (not the global root) so that
+# pure third-party records that propagate up to root are skipped without
+# needing the noise filter to enumerate them all.
+_LOGGER_TARGETS = ("src", "node", "benchmarks")
+
+
+class JsonlLogHandler(logging.Handler):
+    """Mirror every stdlib ``logger.*`` call into ``full_logs.jsonl``.
+
+    Resolves the active run_id per-emit from the terminal-log sink path
+    (the same mechanism :func:`src.tools.shell._common.log_event` uses)
+    so the handler can be installed once at process start and route to
+    the correct per-bench log file automatically — no per-run wiring.
+
+    Captures at ``DEBUG`` level. The handler is attached to a curated
+    set of parent loggers (``src``, ``node``, ``benchmarks``) rather
+    than the global root, so third-party libraries that happen to log
+    at WARNING/ERROR (httpx, openai, …) don't pollute the JSONL even
+    if their records would otherwise propagate to root.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # Belt-and-braces noise filter — even though we attach to
+        # ``src`` / ``node`` / ``benchmarks`` rather than root, callers
+        # sometimes write under unexpected names; this catches them.
+        if any(record.name.startswith(p) for p in _LOGGER_NOISE_PREFIXES):
+            return
+        try:
+            msg = record.getMessage()
+        except Exception:  # noqa: BLE001
+            return
+        rid = _resolve_active_run_id()
+        if not rid:
+            return
+        fields: dict[str, object] = {
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": msg,
+        }
+        # Surface the path:line so a future reader can jump straight
+        # to the call site. Cheap and almost always wanted.
+        if record.pathname:
+            fields["where"] = f"{record.pathname}:{record.lineno}"
+        if record.exc_info:
+            try:
+                fields["exc"] = self.format(record)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            append_event(rid, "log", **fields)
+        except Exception:  # noqa: BLE001
+            # Observability must not break the graph — and our own
+            # append_event already logs its own failures.
+            pass
+
+
+def _resolve_active_run_id() -> str | None:
+    """Best-effort: derive run_id from the terminal-log sink path.
+
+    Mirrors :func:`src.tools.shell._common._RUN_ID_for_logging` so this
+    module stays self-contained. Returns ``None`` between benches (when
+    :func:`set_terminal_log_file` has been called with ``None``), which
+    correctly causes the handler to no-op for any stray logs that fire
+    after a run ends.
+    """
+    sink = _TERMINAL_LOG_FILE
+    if sink is None:
+        return None
+    parent = sink.parent.name  # "run-<run_id>"
+    if parent.startswith("run-"):
+        return parent[len("run-"):]
+    return None
+
+
+# Single global handler — installed once at process start by the
+# runner. Stored at module level so re-installation is idempotent
+# (e.g. ``xbow_runner`` invoked twice in the same process).
+_JSONL_LOG_HANDLER: JsonlLogHandler | None = None
+
+
+def install_jsonl_log_handler() -> None:
+    """Attach :class:`JsonlLogHandler` to ``src`` / ``node`` / ``benchmarks``.
+
+    Idempotent. Called once from the runner's main(). The handler then
+    routes per-bench via the terminal-log sink path; no per-run wiring
+    is required.
+
+    Why we attach to specific parent loggers instead of root: the root
+    logger also processes third-party records (httpx warnings, openai
+    rate-limit notices). Attaching here scopes the mirror to our code.
+    Child loggers like ``node.executor`` and ``src.nodes.summarizer``
+    propagate to these parents by default, so coverage is total for
+    anything we own.
+
+    Also lowers each target logger's effective level to ``DEBUG`` so
+    INFO records actually reach the handler — they would otherwise be
+    filtered at the logger level (the root WARNING in compact mode
+    blocks INFO from propagating in the first place). The new lower
+    level affects ONLY records flowing through these loggers — root
+    and its existing handlers (LiveLogHandler, basicConfig
+    StreamHandler) keep their own levels and behaviour.
+    """
+    global _JSONL_LOG_HANDLER
+    if _JSONL_LOG_HANDLER is not None:
+        return  # already installed
+    handler = JsonlLogHandler(level=logging.DEBUG)
+    for name in _LOGGER_TARGETS:
+        log = logging.getLogger(name)
+        # NOTSET (0) means inherit from parent; bump to DEBUG so INFO
+        # records pass the logger-level filter and reach our handler.
+        if log.level == logging.NOTSET or log.level > logging.DEBUG:
+            log.setLevel(logging.DEBUG)
+        log.addHandler(handler)
+    _JSONL_LOG_HANDLER = handler
+
+
+def uninstall_jsonl_log_handler() -> None:
+    """Detach the JSONL log handler. Idempotent. Used by tests."""
+    global _JSONL_LOG_HANDLER
+    if _JSONL_LOG_HANDLER is None:
+        return
+    for name in _LOGGER_TARGETS:
+        try:
+            logging.getLogger(name).removeHandler(_JSONL_LOG_HANDLER)
+        except Exception:  # noqa: BLE001
+            pass
+    _JSONL_LOG_HANDLER = None
 
 
 # ────────────────────────────────────────────────────────────────────────────

@@ -916,6 +916,7 @@ def make_call_config(
     node: str | None = None,
     recursion_limit: int | None = None,
     extra_metadata: dict | None = None,
+    extra_callbacks: list | None = None,
 ) -> dict:
     """Build a ``RunnableConfig`` dict that activates token logging.
 
@@ -927,6 +928,13 @@ def make_call_config(
     ``recursion_limit`` is forwarded so call-sites that previously
     passed only ``{"recursion_limit": N}`` can switch to this helper
     without losing the iteration cap.
+
+    ``extra_callbacks`` are appended after :data:`TOKEN_LOGGER`. Use
+    this to attach worker-specific handlers — currently the
+    :class:`src.nodes.base.flag_watcher.FlagWatcherCallback` that
+    short-circuits the worker on flag capture. Order matters only for
+    callbacks that mutate the run state; the flag watcher only reads,
+    so its position is irrelevant.
     """
     metadata = {
         "agent_id": agent_id,
@@ -937,8 +945,12 @@ def make_call_config(
     if extra_metadata:
         metadata.update(extra_metadata)
 
+    callbacks: list = [TOKEN_LOGGER]
+    if extra_callbacks:
+        callbacks.extend(extra_callbacks)
+
     cfg: dict = {
-        "callbacks": [TOKEN_LOGGER],
+        "callbacks": callbacks,
         "metadata":  metadata,
     }
     if recursion_limit is not None:

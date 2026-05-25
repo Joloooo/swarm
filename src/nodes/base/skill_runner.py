@@ -45,6 +45,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
 from src.llm.callbacks import make_call_config
+from src.nodes.base.flag_watcher import FlagCapturedSignal
 from src.nodes.base.system_prompt import _build_system_message
 from src.observability import make_run_id
 from src.observability.state import _count_worker_iterations
@@ -552,17 +553,35 @@ async def _run_skill_agent_impl(
     run_id = (state or {}).get("run_id") or make_run_id(
         target_url=target_url,
     )
-    # ``call_config`` carries: callbacks (token logger),
-    # metadata (agent_id / run_id / node — read by the callback to
-    # attribute each LLM call), and the recursion_limit budget.
-    # Using a helper keeps every LLM call site in the codebase
+    # ``call_config`` carries: callbacks (token logger + optional
+    # flag watcher), metadata (agent_id / run_id / node — read by the
+    # callback to attribute each LLM call), and the recursion_limit
+    # budget. Using a helper keeps every LLM call site in the codebase
     # consistent — a missing callback here would silently drop
     # token-cost rows from llm_calls.jsonl.
+    #
+    # In benchmark mode the FlagWatcherCallback hooks ``on_tool_end``
+    # and raises ``FlagCapturedSignal`` the instant a tool returns the
+    # expected flag literal. This short-circuits the worker BEFORE the
+    # next LLM call is queued — saves 60-90 s of gpt-5.5 reasoning per
+    # capture and unblocks the LangGraph fan-in much faster (other
+    # parallel workers then also stop on the same capture via the
+    # ``state.captured_flag`` reducer). See the module docstring of
+    # ``src.nodes.base.flag_watcher`` for the full incident retro.
+    from src.nodes.base.flag_watcher import FlagWatcherCallback
+    expected_flag_for_callback = (state or {}).get("expected_flag") or ""
+    worker_callbacks: list = []
+    if expected_flag_for_callback:
+        worker_callbacks.append(FlagWatcherCallback(
+            expected_flag=expected_flag_for_callback,
+            agent_id=config.agent_id,
+        ))
     call_config = make_call_config(
         run_id=run_id,
         agent_id=config.agent_id,
         node=node.name,
         recursion_limit=config.max_iterations,
+        extra_callbacks=worker_callbacks or None,
     )
 
     # Stream rather than ainvoke so a partial state snapshot
@@ -623,24 +642,92 @@ async def _run_skill_agent_impl(
     last_snapshot: dict | None = None
     worker_attempts = 0
     worker_last_tier = "primary"
+    flag_watcher_capture: str | None = None
     try:
-        (
-            last_snapshot,
-            worker_attempts,
-            worker_last_tier,
-        ) = await astream_with_refusal_retry(
-            agent_factory=_agent_factory,
-            fallback_agent_factory=fallback_factory,
-            system_msg=system_msg,
-            seed_msgs=seed_msgs,
-            call_config=call_config,
-            config=config,
-            log=node.log,
-        )
+        # Inner try catches the FlagWatcher's short-circuit signal so
+        # it never reaches the outer ``except Exception`` (which would
+        # mis-classify it as a refusal). The signal carries the matched
+        # flag value; we inject a synthetic ToolMessage holding that
+        # value so the downstream auto-verify block at the end of this
+        # function picks it up via its existing extract_flags +
+        # flags_match scan — single code path for setting captured_flag
+        # whether capture came from FlagWatcher (early) or the
+        # end-of-worker fallback scan (late).
+        try:
+            (
+                last_snapshot,
+                worker_attempts,
+                worker_last_tier,
+            ) = await astream_with_refusal_retry(
+                agent_factory=_agent_factory,
+                fallback_agent_factory=fallback_factory,
+                system_msg=system_msg,
+                seed_msgs=seed_msgs,
+                call_config=call_config,
+                config=config,
+                log=node.log,
+            )
+        except FlagCapturedSignal as sig:
+            flag_watcher_capture = sig.flag
+            node.log.info(
+                "[%s] FlagWatcher captured flag in %s output: %s — "
+                "short-circuiting worker (saves Codex spend + unblocks "
+                "fan-in)",
+                config.agent_id, sig.tool_name or "tool", sig.flag,
+            )
+            # Append a synthetic ToolMessage with the captured value
+            # to the last partial snapshot. The downstream auto-verify
+            # scan iterates ``last_snapshot["messages"]`` and matches
+            # ``extract_flags(content) → flags_match(...)``; this
+            # synthetic entry is exactly what that scan expects.
+            #
+            # Why the snapshot is partial: the FlagWatcher raises
+            # inside ``on_tool_end``, which fires AFTER the tool
+            # returns but BEFORE LangGraph yields the next state
+            # snapshot. So ``last_snapshot`` holds the state from
+            # before the flag-producing tool call. The synthetic
+            # message bridges that gap without us needing to
+            # reconstruct the missing snapshot ourselves.
+            snap = dict(last_snapshot or {})
+            msgs = list(snap.get("messages") or [])
+            msgs.append(ToolMessage(
+                content=sig.flag,
+                tool_call_id="_flag_watcher_synthetic",
+                name=sig.tool_name or "_flag_watcher",
+            ))
+            snap["messages"] = msgs
+            last_snapshot = snap
 
         result = last_snapshot or {}
         messages = result.get("messages", [])
         findings = _extract_findings(messages, config.agent_id)
+
+        # If the FlagWatcher fired, also synthesise a CRITICAL Finding
+        # so the worker reports ``1 finding`` instead of ``0`` and the
+        # summarizer's per-worker digest has something concrete to
+        # echo. Capture itself routes through ``captured_flag`` (set
+        # by the downstream auto-verify block); this Finding is the
+        # human-readable companion to that machine-readable signal.
+        if flag_watcher_capture and not findings:
+            findings = [
+                Finding(
+                    title=f"Flag captured: {flag_watcher_capture}",
+                    severity=Severity.CRITICAL,
+                    category="flag-capture",
+                    description=(
+                        "Worker tool output contained the expected "
+                        "flag literal. The FlagWatcher callback "
+                        "strict-equal matched it against "
+                        "state.expected_flag and short-circuited the "
+                        "worker loop to save downstream Codex spend."
+                    ),
+                    evidence=f"Captured flag: {flag_watcher_capture}",
+                    agent_id=config.agent_id,
+                    url=target_url or "",
+                    cwe="",
+                    reproduced=True,
+                )
+            ]
 
         # Mirror the inner agent trace up to the parent so Studio chat
         # shows every tool call (`run_command("curl ...")`) and the

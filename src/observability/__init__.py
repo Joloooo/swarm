@@ -46,13 +46,16 @@ from __future__ import annotations
 # Disk writers — unified event log + terminal log sink.
 from src.observability.writers import (
     LOGS_ROOT,
+    JsonlLogHandler,
     append_event,
     full_logs_path,
     get_terminal_log_file,
+    install_jsonl_log_handler,
     make_run_id,
     run_dir,
     set_terminal_log_file,
     terminal_log_path,
+    uninstall_jsonl_log_handler,
     write_terminal_chunk,
     write_terminal_line,
 )
@@ -66,16 +69,19 @@ from src.observability.live import (
 
 __all__ = [
     "HttpxQuietFilter",
+    "JsonlLogHandler",
     "LIVE",
     "LOGS_ROOT",
     "LiveLogHandler",
     "append_event",
     "full_logs_path",
     "get_terminal_log_file",
+    "install_jsonl_log_handler",
     "make_run_id",
     "run_dir",
     "set_terminal_log_file",
     "terminal_log_path",
+    "uninstall_jsonl_log_handler",
     "write_terminal_chunk",
     "write_terminal_line",
 ]

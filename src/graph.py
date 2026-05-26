@@ -209,11 +209,14 @@ config = SimpleNamespace(
                                                 "http://127.0.0.1:8080/v1"),
         # Effort: how hard the model thinks before responding. See the
         # full enum + valid values in src/llm/provider.py:LLMConfig.
-        # Default xhigh = maximum reasoning depth → fullest chain-of-thought
-        # in nodes.jsonl for benchmark debugging. Trade-off: 2-4x cost vs
-        # medium. Drop to "high" or "medium" via SWARM_REASONING_EFFORT
-        # for cheaper development runs.
-        reasoning_effort             = _env_str("SWARM_REASONING_EFFORT", "medium",
+        # Default "low" — empirical benchmark runs (2026-05-26) showed
+        # gpt-5.5 at medium spends ~60s per call doing chain-of-thought
+        # on routine decisions (curl this URL, dirbust that path), which
+        # burns the 15-min per-target budget in ~15 turns. Dropping to
+        # "low" trades depth-of-reasoning for more turns within budget;
+        # bump back to "medium"/"high"/"xhigh" via SWARM_REASONING_EFFORT
+        # when a benchmark needs deeper reasoning per step.
+        reasoning_effort             = _env_str("SWARM_REASONING_EFFORT", "low",
                                                 choices=("none", "minimal", "low",
                                                          "medium", "high", "xhigh")),
         # Summary: whether human-readable chain-of-thought is returned.

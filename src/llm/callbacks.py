@@ -100,6 +100,13 @@ class _AgentTokenTotals:
         output_tokens    — sum of visible output tokens
         reasoning_tokens — sum of separately-billed reasoning tokens
                            (Codex / o-series only; 0 for other providers)
+        cached_tokens    — sum of input tokens served from OpenAI's
+                           automatic prompt cache (a subset of
+                           ``input_tokens``; ``cached_tokens /
+                           input_tokens`` is the cache hit ratio). 0
+                           when the provider doesn't report cache
+                           hits — see ``src/llm/codex.py`` for the
+                           Responses-API parse site.
         peak_input       — largest single input_tokens observed; this is
                            the canonical "context rot risk" number
                            because it tracks the worst case, not the
@@ -113,6 +120,7 @@ class _AgentTokenTotals:
     input_tokens: int = 0
     output_tokens: int = 0
     reasoning_tokens: int = 0
+    cached_tokens: int = 0
     peak_input: int = 0
     errors: int = 0
 
@@ -135,6 +143,7 @@ def get_running_total(agent_id: str) -> _AgentTokenTotals:
         input_tokens=t.input_tokens,
         output_tokens=t.output_tokens,
         reasoning_tokens=t.reasoning_tokens,
+        cached_tokens=t.cached_tokens,
         peak_input=t.peak_input,
         errors=t.errors,
     )
@@ -575,6 +584,7 @@ class TokenLoggingCallback(AsyncCallbackHandler):
             input_tokens=usage["input_tokens"],
             output_tokens=usage["output_tokens"],
             reasoning_tokens=usage["reasoning_tokens"],
+            cached_tokens=usage.get("cached_tokens", 0),
         )
 
         # Tell the renderer to close the streaming line / cancel the
@@ -591,6 +601,7 @@ class TokenLoggingCallback(AsyncCallbackHandler):
                 input_tokens=usage["input_tokens"],
                 output_tokens=usage["output_tokens"],
                 reasoning_tokens=usage["reasoning_tokens"],
+                cached_tokens=usage.get("cached_tokens", 0),
                 running_input=running.input_tokens,
                 peak_input=running.peak_input,
             )
@@ -614,6 +625,7 @@ class TokenLoggingCallback(AsyncCallbackHandler):
             "duration_ms": dt_ms,
             **usage,
             "running_input": running.input_tokens,
+            "running_cached": running.cached_tokens,
             "running_calls": running.calls,
             "running_peak_input": running.peak_input,
         }
@@ -828,6 +840,7 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         input_tokens = 0
         output_tokens = 0
         reasoning_tokens = 0
+        cached_tokens = 0
         total_tokens = 0
 
         # Prefer message-level usage_metadata.
@@ -839,6 +852,7 @@ class TokenLoggingCallback(AsyncCallbackHandler):
                     input_tokens     += int(um.get("input_tokens",     0) or 0)
                     output_tokens    += int(um.get("output_tokens",    0) or 0)
                     reasoning_tokens += int(um.get("reasoning_tokens", 0) or 0)
+                    cached_tokens    += int(um.get("cached_tokens",    0) or 0)
                     total_tokens     += int(um.get("total_tokens",     0) or 0)
 
         # Fallback to llm_output (older integrations).
@@ -847,6 +861,11 @@ class TokenLoggingCallback(AsyncCallbackHandler):
             input_tokens     = int(tu.get("prompt_tokens",     input_tokens)     or input_tokens)
             output_tokens    = int(tu.get("completion_tokens", output_tokens)    or output_tokens)
             total_tokens     = int(tu.get("total_tokens",      total_tokens)     or total_tokens)
+            # Older OpenAI integrations report cache hits at
+            # ``prompt_tokens_details.cached_tokens``.
+            ptd = tu.get("prompt_tokens_details") or {}
+            if isinstance(ptd, dict):
+                cached_tokens = int(ptd.get("cached_tokens", cached_tokens) or cached_tokens)
 
         # Backfill total if missing.
         if not total_tokens:
@@ -856,6 +875,7 @@ class TokenLoggingCallback(AsyncCallbackHandler):
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "reasoning_tokens": reasoning_tokens,
+            "cached_tokens": cached_tokens,
             "total_tokens": total_tokens,
         }
 
@@ -881,6 +901,7 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         input_tokens: int,
         output_tokens: int,
         reasoning_tokens: int,
+        cached_tokens: int = 0,
     ) -> _AgentTokenTotals:
         with _TOTALS_LOCK:
             t = TOKEN_TOTALS.setdefault(agent_id, _AgentTokenTotals())
@@ -888,6 +909,7 @@ class TokenLoggingCallback(AsyncCallbackHandler):
             t.input_tokens += input_tokens
             t.output_tokens += output_tokens
             t.reasoning_tokens += reasoning_tokens
+            t.cached_tokens += cached_tokens
             if input_tokens > t.peak_input:
                 t.peak_input = input_tokens
             return _AgentTokenTotals(
@@ -895,6 +917,7 @@ class TokenLoggingCallback(AsyncCallbackHandler):
                 input_tokens=t.input_tokens,
                 output_tokens=t.output_tokens,
                 reasoning_tokens=t.reasoning_tokens,
+                cached_tokens=t.cached_tokens,
                 peak_input=t.peak_input,
                 errors=t.errors,
             )

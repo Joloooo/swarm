@@ -57,6 +57,38 @@ def _merge_results(left: list[AgentResult], right: list[AgentResult]) -> list[Ag
     return left + right
 
 
+def _recon_summary_reducer(existing: str | None, new: str | None) -> str:
+    """First non-empty write wins for ``recon_summary``.
+
+    The recon summarizer writes this field exactly once — on the first
+    summarizer pass that processed a recon worker. Subsequent summarizer
+    passes (for executor workers) emit nothing for this field, so the
+    reducer never overwrites. Returning ``existing`` on later writes
+    also defends against a hypothetical second recon dispatch — the
+    application map captured by the first recon run is the canonical
+    one for the engagement.
+    """
+    if existing:
+        return existing
+    return new or ""
+
+
+def _relevant_summary_reducer(
+    existing: dict | None, new: dict | None,
+) -> dict:
+    """Last non-empty write wins for ``relevant_summary``.
+
+    The planner rewrites this field every turn as part of its decision
+    JSON. When the planner emits nothing (e.g. ``action="report"`` with
+    no relevant_summary in the decision), we keep the prior turn's
+    value rather than wiping it — workers dispatched later in the run
+    should still see the most recent investigation state.
+    """
+    if new:
+        return new
+    return existing or {}
+
+
 def _captured_flag_reducer(
     existing: str | None,
     new: str | None,
@@ -134,6 +166,37 @@ class SwarmState:
 # We use the class above for documentation, but the actual graph state
 # is this TypedDict for LangGraph compatibility.
 from typing import TypedDict
+
+
+class RelevantSummary(TypedDict, total=False):
+    """Structured shape for ``state["relevant_summary"]``.
+
+    The planner rewrites this dict each turn as part of its decision
+    JSON. Three fixed keys, with size caps enforced by the validator
+    in ``src/nodes/planner.py`` to prevent unbounded growth across
+    turns:
+
+    - ``current_hypothesis``: one sentence (≤ 500 chars) describing
+      the most promising path to the flag right now.
+    - ``ruled_out``: list of one-line strings (≤ 20 items, ≤ 200
+      chars each) recording things tested and confirmed not to work.
+      Captures negative results that don't fit the Finding schema
+      (the canonical example: "tried `' OR 1=1` on username,
+      returned 200 unchanged" — useful for the next dispatch but
+      not a finding).
+    - ``open_questions``: list of one-line strings (≤ 20 items, ≤ 200
+      chars each) recording gaps in knowledge the next dispatch
+      should address.
+
+    The seed builder in ``src/nodes/base/skill_runner.py`` renders
+    this dict as markdown under "## Investigation state" for the
+    worker.
+    """
+
+    current_hypothesis: str
+    ruled_out: list[str]
+    open_questions: list[str]
+
 
 
 class SwarmGraphState(TypedDict, total=False):
@@ -247,6 +310,36 @@ class SwarmGraphState(TypedDict, total=False):
     # field is never written — capture remains a planner-driven
     # explicit ``submit_flag`` decision, since no oracle exists.
     captured_flag: Annotated[str | None, _captured_flag_reducer]
+
+    # ── Curated investigation context (the seed-context fix) ──
+    # Two structured fields the seed builder in
+    # ``src/nodes/base/skill_runner.py`` reads when assembling a worker's
+    # initial HumanMessage. Together with ``state["findings"]`` (already
+    # cumulative) and ``state["dispatch_reason"]`` (already per-turn),
+    # these give a fresh worker the full picture of what is known about
+    # the target — eliminating the "every worker re-does recon" failure
+    # mode observed across XBEN-001/003 on 2026-05-26.
+
+    # The reconnaissance summary, written ONCE by the summarizer on its
+    # first pass that processes a recon worker. Treated as the
+    # application's ground-truth map: routes, parameters, auth flow,
+    # framework fingerprint, inferred server-side behaviour. Never
+    # decays. Workers see it as "## Application map (from initial
+    # recon)" in their seed.
+    recon_summary: Annotated[str, _recon_summary_reducer]
+
+    # Curated investigation state, rewritten by the planner on every
+    # turn as part of its decision JSON. Three fixed keys:
+    #   - ``current_hypothesis``: str — one sentence, the most promising
+    #     path to the flag right now.
+    #   - ``ruled_out``: list[str] — things tested and confirmed not to
+    #     work, one-line each (preserves negative results that don't fit
+    #     the Finding schema).
+    #   - ``open_questions``: list[str] — gaps in knowledge the next
+    #     dispatch should address.
+    # See ``RelevantSummary`` for the TypedDict schema and the validator
+    # in ``src/nodes/planner.py`` for the size caps.
+    relevant_summary: Annotated[dict, _relevant_summary_reducer]
 
     # ── Worker → Summarizer hand-off (the context-window fix) ──
     # Each worker (executor, recon, salvage) writes a SINGLE-ITEM list

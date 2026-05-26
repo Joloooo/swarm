@@ -63,8 +63,6 @@ vocabulary.py`` for its runtime regex enforcement.
 
 from __future__ import annotations
 
-from src.state import Finding
-
 
 # ── Identity preamble ────────────────────────────────────────────────────
 #
@@ -592,12 +590,8 @@ FINDING_FORMAT = FINDING_SCHEMA + "\n" + FINDING_CATEGORY_GUIDANCE
 def _build_system_message(
     config: "AgentConfig",  # noqa: F821 — forward reference; defined in skill_runner
     target_url: str,
-    phase1_findings: list[Finding] | None = None,
 ) -> str:
     """Assemble the full system prompt from config + knowledge layers.
-
-    When ``phase1_findings`` is provided, injects analysis results into
-    the prompt so the exploit phase knows what to target.
 
     When ``config.skip_base_prompt`` is True the assembly is reduced to
     the SKILL.md body alone — no identity framing, no rule blocks, no
@@ -617,25 +611,20 @@ def _build_system_message(
     ``src/edges/routing.py:route_after_planner``). Workers discover
     the flag by doing their job and surface it in findings; the
     success criterion no longer lives in their system prompt.
+
+    Cumulative findings used to be injected here via a never-populated
+    ``phase1_findings`` parameter; that path was deleted on 2026-05-26
+    once the seed-message renderer in
+    ``src/nodes/base/skill_runner.py:_format_findings`` started
+    delivering ``state["findings"]`` to every worker.
     """
     # Minimal-framing path: the SKILL.md body is the entire system
-    # prompt. Phase 1 findings still get appended because they are
-    # observed evidence the agent needs to reason over, not framing.
+    # prompt. No additional layers — observed findings reach the worker
+    # through the seed HumanMessage instead.
     if config.skip_base_prompt:
         parts = []
         if config.system_prompt:
             parts.append(config.system_prompt)
-        if phase1_findings:
-            findings_text = "\n".join(
-                f"- [{f.severity.value.upper()}] {f.title}"
-                + (f" at {f.url}" if f.url else "")
-                + (f": {f.evidence[:200]}" if f.evidence else "")
-                for f in phase1_findings
-            )
-            parts.append(
-                "Observed prior findings:\n"
-                f"{findings_text}\n"
-            )
         return "\n\n".join(parts)
 
     parts = []
@@ -677,20 +666,10 @@ def _build_system_message(
     else:
         parts.append(get_executor_prompt(0))
 
-    # Phase 1 findings injection (for exploit phase)
-    if phase1_findings:
-        findings_text = "\n".join(
-            f"- [{f.severity.value.upper()}] {f.title}"
-            + (f" at {f.url}" if f.url else "")
-            + (f": {f.evidence[:200]}" if f.evidence else "")
-            for f in phase1_findings
-        )
-        parts.append(
-            "--- Analysis Phase Results ---\n"
-            "The analysis phase found the following vulnerabilities. "
-            "Focus your testing on these confirmed targets:\n"
-            f"{findings_text}\n"
-        )
+    # Findings injection used to live here behind a ``phase1_findings``
+    # parameter that was never populated. Cumulative findings now reach
+    # the worker through the seed HumanMessage's "## Confirmed findings"
+    # block built in ``src/nodes/base/skill_runner.py:_format_findings``.
 
     # Config-provided system prompt (the SKILL.md body — phase-specific
     # instructions: discovery objectives for recon, attack methodology

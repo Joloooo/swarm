@@ -375,6 +375,45 @@ After each worker, look at what came back:
                   message, new response shape). Re-searching the same
                   problem produces the same answers and burns budget.
 
+# Maintaining the investigation state (REQUIRED on every turn)
+
+Every JSON decision MUST include a ``relevant_summary`` object that
+describes the *current state of the investigation*. This is your
+curated, evolving picture of what the swarm knows. It is rendered into
+every worker's seed prompt so a freshly-dispatched executor starts
+with your live mental model instead of cold-booting.
+
+Three keys, all required (use empty list when nothing fits — never
+omit a key):
+
+- ``current_hypothesis``: one sentence. The single most-promising path
+  to the flag/objective right now. Replace this each turn as evidence
+  accumulates; do not keep stale hypotheses around.
+- ``ruled_out``: list of short strings. Things the swarm has TESTED
+  and confirmed do NOT work. This is the negative-results memory that
+  prevents the next worker from re-testing the same dead ends.
+  Examples: "tried `' OR 1=1` on /password username — 200, page
+  unchanged", "demo:demo brute force against /token cookie — 24
+  candidates tried, no match", "/admin returns 404 for every casing
+  variant tried so far". Keep entries short; ≤ 200 chars each.
+- ``open_questions``: list of short strings. Concrete gaps in
+  knowledge the next dispatch should close. Examples: "does
+  /edit_profile/N enforce server-side role checks?", "does the JWT
+  cookie carry a server-validated role claim?".
+
+Sizing rules (enforced by validator — exceeding them gets your entry
+silently dropped):
+- ``current_hypothesis`` ≤ 500 chars.
+- ``ruled_out`` ≤ 20 items, each ≤ 200 chars.
+- ``open_questions`` ≤ 20 items, each ≤ 200 chars.
+
+On every turn you SEE the previous turn's ``relevant_summary`` as a
+``[SYSTEM NOTE]`` near the end of your input. Treat it as your prior
+notes. Rewrite the whole object — add what's newly true, drop what
+became false or irrelevant, refine the hypothesis. This is small
+(usually < 1 KB) so token cost is negligible compared to the worker
+context it unlocks.
+
 # Output contract
 
 End EVERY turn with a fenced JSON block of this exact shape:
@@ -393,7 +432,18 @@ End EVERY turn with a fenced JSON block of this exact shape:
   "mode": "analyze",
   "target_url": "http://example.com",
   "target_scope": "example.com",
-  "reasoning": "Recon surfaced PHP + MySQL with a login form at /admin and a numeric id param on /api/v1/orders. Firing the standard SQLi/XSS skills, a custom WP-plugin lookup, and a targeted IDOR probe in parallel."
+  "reasoning": "Recon surfaced PHP + MySQL with a login form at /admin and a numeric id param on /api/v1/orders. Firing the standard SQLi/XSS skills, a custom WP-plugin lookup, and a targeted IDOR probe in parallel.",
+  "relevant_summary": {
+    "current_hypothesis": "Numeric id parameter on /api/v1/orders is the highest-probability IDOR — receipt endpoint already confirmed authenticated access by ID.",
+    "ruled_out": [
+      "SQL injection on POST / username — 12 payloads, all returned 200 with unchanged Welcome page",
+      "Default creds admin:admin on /admin — 404 regardless of casing"
+    ],
+    "open_questions": [
+      "Does GET /order/<N>/receipt validate the session's user_id against the order's owner?",
+      "Are there other authenticated-only routes the gobuster common wordlist missed?"
+    ]
+  }
 }
 ```
 
@@ -416,6 +466,14 @@ Rules:
   and in audit logs — this is how the operator follows along in
   real time. Do not omit it. Do not write marketing fluff ("Let's
   proceed with the plan"). State the evidence → decision link.
+- "relevant_summary" is REQUIRED on every turn. See the
+  "Maintaining the investigation state" section above for the shape
+  and the per-key size caps. This object is rendered into every
+  worker's seed prompt, so missing or stale entries directly cost
+  the swarm — workers re-test ruled-out dead ends or miss the
+  current hypothesis. Even on report / submit_flag turns, include
+  the object: it remains the final on-disk snapshot of the
+  engagement's state.
 
 If you cannot parse the user's intent, choose "report" with a
 ``reasoning`` field explaining what you need. Never omit the JSON
@@ -572,6 +630,129 @@ def _looks_transient(err: Exception) -> bool:
     name = type(err).__name__.lower()
     msg = str(err).lower()
     return any(h in name or h in msg for h in _TRANSIENT_HINTS)
+
+
+# ── relevant_summary validation ────────────────────────────────────────
+#
+# Per-key caps for ``state["relevant_summary"]``. The schema, prompted
+# values, and these constants must agree — the supervisor system prompt
+# documents the same numbers. See ``src/state.py:RelevantSummary``.
+
+_RELEVANT_HYPOTHESIS_MAX_CHARS = 500
+_RELEVANT_LIST_MAX_ITEMS = 20
+_RELEVANT_LIST_ITEM_MAX_CHARS = 200
+
+
+def _validate_relevant_summary(raw: Any) -> dict | None:
+    """Coerce planner-supplied ``relevant_summary`` into a valid dict.
+
+    Returns a cleaned ``{"current_hypothesis": str, "ruled_out":
+    list[str], "open_questions": list[str]}`` dict, or ``None`` when
+    the input is unusable (not a dict, all three keys empty/invalid).
+
+    Cleaning rules — never raise, always salvage what we can:
+
+    - Non-dict input  → ``None`` (the caller falls back to the prior
+      turn's value, if any).
+    - ``current_hypothesis``: coerce to str, strip, truncate to
+      ``_RELEVANT_HYPOTHESIS_MAX_CHARS``. Empty after stripping → key
+      becomes empty string (not dropped — keeping the slot lets the
+      seed renderer treat partial state coherently).
+    - ``ruled_out`` / ``open_questions``: coerce to list, filter to
+      non-empty strings, truncate each item to
+      ``_RELEVANT_LIST_ITEM_MAX_CHARS``, cap list at
+      ``_RELEVANT_LIST_MAX_ITEMS`` items.
+
+    Returns ``None`` only when ALL three resulting fields are
+    empty — in that case the prior turn's value (if any) is more
+    useful than an empty rewrite, so the caller should fall back.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    hypothesis = raw.get("current_hypothesis", "")
+    if not isinstance(hypothesis, str):
+        hypothesis = str(hypothesis or "")
+    hypothesis = hypothesis.strip()
+    if len(hypothesis) > _RELEVANT_HYPOTHESIS_MAX_CHARS:
+        hypothesis = hypothesis[: _RELEVANT_HYPOTHESIS_MAX_CHARS - 1] + "…"
+
+    def _clean_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        out: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                # Skip dicts / numbers / nulls silently — planner
+                # occasionally produces nested structures despite the
+                # schema; dropping is safer than coercing them into
+                # noisy ``str(...)`` output.
+                continue
+            stripped = item.strip()
+            if not stripped:
+                continue
+            if len(stripped) > _RELEVANT_LIST_ITEM_MAX_CHARS:
+                stripped = stripped[: _RELEVANT_LIST_ITEM_MAX_CHARS - 1] + "…"
+            out.append(stripped)
+            if len(out) >= _RELEVANT_LIST_MAX_ITEMS:
+                break
+        return out
+
+    ruled_out = _clean_list(raw.get("ruled_out"))
+    open_questions = _clean_list(raw.get("open_questions"))
+
+    if not (hypothesis or ruled_out or open_questions):
+        return None
+
+    return {
+        "current_hypothesis": hypothesis,
+        "ruled_out": ruled_out,
+        "open_questions": open_questions,
+    }
+
+
+def _format_relevant_summary_for_planner(rs: dict | None) -> str | None:
+    """Render the prior ``relevant_summary`` as a SYSTEM NOTE block for
+    the planner's input. Returns ``None`` when nothing to show.
+
+    The format mirrors the worker-side renderer in
+    ``src/nodes/base/skill_runner.py:_format_relevant_summary`` so the
+    planner reads exactly what its previous self wrote — no schema
+    drift between the planner's reading view and the worker's reading
+    view.
+    """
+    if not isinstance(rs, dict) or not rs:
+        return None
+
+    hypothesis = (rs.get("current_hypothesis") or "").strip()
+    ruled_out = [
+        s for s in (rs.get("ruled_out") or [])
+        if isinstance(s, str) and s.strip()
+    ]
+    open_questions = [
+        s for s in (rs.get("open_questions") or [])
+        if isinstance(s, str) and s.strip()
+    ]
+
+    if not (hypothesis or ruled_out or open_questions):
+        return None
+
+    sections: list[str] = [
+        "[SYSTEM NOTE] Your prior turn's relevant_summary (rewrite "
+        "this in your decision this turn — see the 'Maintaining the "
+        "investigation state' section of your system prompt):",
+    ]
+    if hypothesis:
+        sections.append(f"  • current_hypothesis: {hypothesis}")
+    if ruled_out:
+        sections.append("  • ruled_out:")
+        for item in ruled_out:
+            sections.append(f"      - {item}")
+    if open_questions:
+        sections.append("  • open_questions:")
+        for item in open_questions:
+            sections.append(f"      - {item}")
+    return "\n".join(sections)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1294,6 +1475,17 @@ class PlannerNode(BaseNode):
             )
             prior_messages.append(HumanMessage(content=evidence))
 
+        # Surface the prior turn's relevant_summary so the planner can
+        # see its own previous notes and rewrite them on this turn. The
+        # field is rendered by the same logic the worker seed renderer
+        # uses (see ``_format_relevant_summary_for_planner``), so the
+        # planner reads exactly the same view its workers will read.
+        prior_relevant = _format_relevant_summary_for_planner(
+            state.get("relevant_summary")
+        )
+        if prior_relevant:
+            prior_messages.append(HumanMessage(content=prior_relevant))
+
         # Benchmark-mode hint. Real pentest runs leave ``expected_flag``
         # empty and skip this entirely — non-benchmark behaviour is
         # unchanged.
@@ -1538,6 +1730,22 @@ class PlannerNode(BaseNode):
             update["target_url"] = target_url
         if target_scope:
             update["target_scope"] = target_scope
+
+        # Validate + emit the curated investigation state. The reducer
+        # in ``src/state.py:_relevant_summary_reducer`` keeps the prior
+        # turn's value when the new value is empty, so a planner that
+        # forgets the field doesn't wipe the running notes — but a
+        # planner that emits a usable update overwrites cleanly.
+        validated_summary = _validate_relevant_summary(
+            decision.get("relevant_summary")
+        )
+        if validated_summary is not None:
+            update["relevant_summary"] = validated_summary
+        else:
+            self.log.info(
+                "planner: decision lacked a usable relevant_summary; "
+                "keeping prior turn's value via state reducer."
+            )
 
         if action == "attack":
             pending = _stage_attack(decision, state)

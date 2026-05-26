@@ -164,13 +164,36 @@ class SummarizerNode(BaseNode):
             len(report_messages), len(pending),
         )
 
-        return {
+        update: dict[str, Any] = {
             "messages": report_messages,
             # Sentinel: the reducer (_summary_inputs_reducer) treats
             # ``None`` as "clear the list" so subsequent worker fan-outs
             # don't see stale entries from this turn.
             "pending_summary_inputs": None,
         }
+
+        # Capture the recon worker's summary once, into
+        # ``state["recon_summary"]``. The seed builder in
+        # ``src/nodes/base/skill_runner.py:_format_recon_summary``
+        # renders it as "## Application map" for every subsequent
+        # worker so they don't re-walk the application.
+        #
+        # We only write when:
+        #   1. ``state["recon_summary"]`` is empty (first recon pass), AND
+        #   2. one of this turn's pending entries was the recon worker.
+        # The reducer in ``src/state.py:_recon_summary_reducer`` is
+        # first-non-empty-wins so a hypothetical second recon dispatch
+        # cannot overwrite the canonical first map either.
+        if not (state.get("recon_summary") or "").strip():
+            recon_text = _pick_recon_report_body(pending, reports)
+            if recon_text:
+                update["recon_summary"] = recon_text
+                self.log.info(
+                    "summarizer: captured recon_summary (%d chars) into state",
+                    len(recon_text),
+                )
+
+        return update
 
     async def _summarize_one(
         self,
@@ -270,6 +293,33 @@ class SummarizerNode(BaseNode):
                 "findings_count": int(inp.get("findings_count") or 0),
             },
         )
+
+
+def _pick_recon_report_body(
+    pending: list[dict],
+    reports: list[Any],
+) -> str | None:
+    """Return the report body for the recon worker in ``pending``, if any.
+
+    Walks the paired (pending, reports) lists looking for the entry whose
+    ``config_name`` is ``"recon"``. Returns the matching report's
+    ``content`` as a string, or ``None`` when no recon entry exists or
+    the matched report did not produce text (e.g. a digest exception
+    that even the placeholder couldn't catch).
+
+    The pairing is by index — ``asyncio.gather`` preserves input order,
+    so ``reports[i]`` is the digest for ``pending[i]``.
+    """
+    for inp, rep in zip(pending, reports):
+        if str(inp.get("config_name") or "").lower() != "recon":
+            continue
+        if not isinstance(rep, AIMessage):
+            continue
+        body = rep.content if isinstance(rep.content, str) else str(rep.content or "")
+        body = body.strip()
+        if body:
+            return body
+    return None
 
 
 def _render_findings(findings: list[Finding]) -> str:

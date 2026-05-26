@@ -251,6 +251,199 @@ def _extract_findings(messages: list, agent_id: str) -> list[Finding]:
 #
 # Combined into the seed message inside ``run_skill_agent``.
 
+# ── Curated-state seed blocks ──────────────────────────────────────────
+#
+# These four helpers render structured fields from ``state`` into
+# markdown blocks the worker's seed HumanMessage will contain. Each
+# returns ``None`` when its source field is empty so cold-boot workers
+# (turn 1, no prior planner output) don't see empty ``##`` headers.
+#
+# Reading map:
+#   - dispatch_reason   ← state["dispatch_reason"]      (planner per turn)
+#   - findings          ← state["findings"]              (cumulative)
+#   - recon_summary     ← state["recon_summary"]         (written once)
+#   - relevant_summary  ← state["relevant_summary"]      (planner per turn)
+#
+# All four are pure renderers — no LLM calls, no side effects. They are
+# invoked from ``run_skill_agent`` after the system prompt is built and
+# before the agent loop starts.
+
+# Cap on findings rendered in the seed. The findings list grows
+# unboundedly across turns; a runaway swarm could produce dozens.
+# Workers care most about the freshest evidence, so we render the
+# tail. 30 is empirically enough to cover any realistic engagement
+# without bloating the prompt past ~5 KB for this block alone.
+_SEED_FINDINGS_TAIL = 30
+
+# Per-evidence cap inside a finding's seed line. The full evidence is
+# preserved in state["findings"] for the planner; workers only need
+# enough to recognise the finding and copy any literal payload string.
+_SEED_FINDING_EVIDENCE_CHARS = 400
+
+# Recon summary cap. The full digest can run 5-10 KB; we keep all of it
+# unless it's pathologically large. The reason for any cap at all is
+# defensive — a misbehaving summarizer could in principle emit
+# unbounded text, and silently truncating to a generous cap is safer
+# than poisoning every worker prompt downstream.
+_SEED_RECON_SUMMARY_CHARS = 12_000
+
+
+def _format_dispatch_reason(state: dict) -> str | None:
+    """Render the planner's reason-for-this-dispatch as a seed block.
+
+    Returns ``None`` on the cold-boot path (initialize → recon, before
+    the planner has spoken). The routing edge always writes
+    ``state["dispatch_reason"]`` for planner-staged workers — empty
+    string sentinel means "no reason recorded", which we also treat as
+    no block.
+    """
+    reason = (state.get("dispatch_reason") or "").strip()
+    if not reason:
+        return None
+    return (
+        "## Why you were dispatched\n\n"
+        "The supervisor picked you for this turn based on the state "
+        "below. Treat the hypothesis as your primary objective; if the "
+        "evidence you gather contradicts it, surface that in your "
+        "report — do not silently pivot.\n\n"
+        f"{reason}"
+    )
+
+
+def _format_findings(state: dict) -> str | None:
+    """Render the cumulative findings list as a seed block.
+
+    Includes every finding accumulated across the run so far — recon's
+    info-disclosures, prior attack workers' confirmed vulnerabilities,
+    everything. Tail-capped at ``_SEED_FINDINGS_TAIL`` items so a
+    runaway swarm cannot blow worker context; in practice 30 covers
+    multi-turn engagements with room to spare.
+
+    Each rendered line carries severity, title, url, category, and
+    trimmed evidence — enough for the worker to recognise the finding
+    and copy any literal payload string the previous worker captured.
+    """
+    findings = list(state.get("findings") or [])
+    if not findings:
+        return None
+
+    rendered = findings[-_SEED_FINDINGS_TAIL:]
+    elided = len(findings) - len(rendered)
+
+    lines: list[str] = []
+    if elided > 0:
+        lines.append(
+            f"_(showing the {len(rendered)} most recent of "
+            f"{len(findings)} total findings; {elided} earlier finding(s) "
+            "elided for context budget — see state.findings for the "
+            "complete list)_"
+        )
+    for i, f in enumerate(rendered, 1):
+        sev = getattr(getattr(f, "severity", None), "value", None) or "info"
+        title = getattr(f, "title", "") or "(untitled)"
+        url = getattr(f, "url", "") or ""
+        category = getattr(f, "category", "") or ""
+        evidence = (getattr(f, "evidence", "") or "").strip()
+        if len(evidence) > _SEED_FINDING_EVIDENCE_CHARS:
+            evidence = (
+                evidence[: _SEED_FINDING_EVIDENCE_CHARS - 1]
+                + "…"
+            )
+        head = f"{i}. [{sev.upper()}] {title}"
+        meta_bits = []
+        if category:
+            meta_bits.append(f"category={category}")
+        if url:
+            meta_bits.append(f"url={url}")
+        lines.append(head)
+        if meta_bits:
+            lines.append(f"   {'  '.join(meta_bits)}")
+        if evidence:
+            lines.append(f"   evidence: {evidence}")
+
+    body = "\n".join(lines)
+    return (
+        "## Confirmed findings so far (all turns)\n\n"
+        "These are atomic, verified facts produced by earlier workers. "
+        "Build on them — do not re-discover them. Each finding lists the "
+        "URL, category, and exact evidence the worker captured.\n\n"
+        f"{body}"
+    )
+
+
+def _format_recon_summary(state: dict) -> str | None:
+    """Render the one-time recon application map as a seed block.
+
+    Written once by the summarizer on its first pass that processes a
+    recon worker; never decays. Tells the worker the routes, params,
+    auth flow, framework fingerprint, and inferred server-side
+    behaviour without making it re-walk the application.
+    """
+    raw = (state.get("recon_summary") or "").strip()
+    if not raw:
+        return None
+    if len(raw) > _SEED_RECON_SUMMARY_CHARS:
+        raw = raw[: _SEED_RECON_SUMMARY_CHARS] + "\n…[truncated for context budget]"
+    return (
+        "## Application map (from initial recon — treat as ground truth)\n\n"
+        "The reconnaissance worker mapped the target's surface before "
+        "any attack dispatches ran. The structured digest below is the "
+        "canonical application map for this engagement — routes, "
+        "parameters, auth flow, server fingerprint. Use it instead of "
+        "re-probing the application surface.\n\n"
+        f"{raw}"
+    )
+
+
+def _format_relevant_summary(state: dict) -> str | None:
+    """Render the planner's curated investigation state as a seed block.
+
+    Source: ``state["relevant_summary"]`` — a dict with three optional
+    keys (``current_hypothesis``, ``ruled_out``, ``open_questions``)
+    rewritten by the planner each turn. Returns ``None`` when nothing
+    is present (turn-1 cold start, or planner failed validation).
+
+    Renders only the keys that have content — a partial relevant_summary
+    is more useful to the worker than no block at all, and the planner
+    validator's fallback behaviour leaves missing keys empty rather than
+    rejecting the whole dict.
+    """
+    rs = state.get("relevant_summary") or {}
+    if not isinstance(rs, dict):
+        return None
+
+    hypothesis = (rs.get("current_hypothesis") or "").strip()
+    ruled_out = [
+        s.strip() for s in (rs.get("ruled_out") or [])
+        if isinstance(s, str) and s.strip()
+    ]
+    open_questions = [
+        s.strip() for s in (rs.get("open_questions") or [])
+        if isinstance(s, str) and s.strip()
+    ]
+
+    if not (hypothesis or ruled_out or open_questions):
+        return None
+
+    sections: list[str] = []
+    if hypothesis:
+        sections.append("### Current hypothesis\n" + hypothesis)
+    if ruled_out:
+        body = "\n".join(f"- {item}" for item in ruled_out)
+        sections.append("### Ruled out\n" + body)
+    if open_questions:
+        body = "\n".join(f"- {item}" for item in open_questions)
+        sections.append("### Open questions\n" + body)
+
+    return (
+        "## Investigation state (current as of this turn)\n\n"
+        "The supervisor maintains this picture across turns. Use it to "
+        "avoid re-testing what was already ruled out and to prioritise "
+        "the open questions.\n\n"
+        + "\n\n".join(sections)
+    )
+
+
 # Maximum chars per summarized probe in the prior-attempts block.
 # Big enough to show the bash command + first/last bytes of output;
 # small enough that 12 of these stays under ~5KB of context.
@@ -489,31 +682,52 @@ async def _run_skill_agent_impl(
     # owns flag submission (``action="submit_flag"`` verified by
     # ``src/edges/routing.py:route_after_planner``); workers only
     # need to surface flag-shaped strings in their findings.
-    phase1_findings = state.get("phase1_findings")
-    system_msg = _build_system_message(
-        config, target_url, phase1_findings,
-    )
+    #
+    # Findings injection used to happen here via the never-populated
+    # ``phase1_findings`` state field. That was dead code; cumulative
+    # findings now reach the worker through the seed HumanMessage's
+    # "## Confirmed findings" block (see ``_format_findings`` below).
+    system_msg = _build_system_message(config, target_url)
 
     # NB: agent construction is now deferred to ``_agent_factory``
     # below so the tier-2 refusal-retry can rebuild the agent with
     # a vocab-filtered system prompt without losing any of this
     # call site's wiring.
 
-    # Seed the create_agent loop with whatever cross-turn context
-    # we can recover from state["messages"]:
-    #   1. The supervisor's most recent web_search synthesis, so a
-    #      worker dispatched right after research doesn't have to
-    #      re-derive techniques from scratch.
-    #   2. This agent_id's own prior tool calls, so a re-dispatched
-    #      skill (e.g. vulntype-sqli on its second turn) sees what
-    #      it already tried and what each probe returned.
+    # Seed the create_agent loop with whatever cross-turn context we can
+    # recover from state. The seed is a single HumanMessage prepended to
+    # the agent's input so a fresh worker doesn't start cold.
     #
-    # Both helpers return None when the relevant context isn't
-    # present, so cold first dispatches stay equivalent to the old
-    # ``{"messages": []}`` behavior — no behavioral change unless
-    # there's actual context to pass through. See the helpers'
-    # docstrings for the per-component caps.
+    # Order matters — these blocks are read top-down by the LLM and the
+    # earlier ones anchor focus:
+    #   1. dispatch_reason   — "why am I here, what's the hypothesis"
+    #   2. findings          — "what is already confirmed true"
+    #   3. recon_summary     — "what does the application look like"
+    #   4. relevant_summary  — "what's the live investigation state"
+    #   5. web_search        — "what external knowledge was just pulled"
+    #   6. prior_history     — "what did I myself try on a previous run"
+    #
+    # Each helper returns ``None`` when its source field is empty, so
+    # cold first dispatches (turn 1, before the planner has spoken)
+    # produce an empty seed and the worker starts cold — backward-
+    # compatible with the original ``{"messages": []}`` behavior.
     seed_parts: list[str] = []
+
+    dispatch_block = _format_dispatch_reason(state)
+    if dispatch_block:
+        seed_parts.append(dispatch_block)
+
+    findings_block = _format_findings(state)
+    if findings_block:
+        seed_parts.append(findings_block)
+
+    recon_block = _format_recon_summary(state)
+    if recon_block:
+        seed_parts.append(recon_block)
+
+    relevant_block = _format_relevant_summary(state)
+    if relevant_block:
+        seed_parts.append(relevant_block)
 
     web_search_ctx = _extract_latest_web_search(state)
     if web_search_ctx:
@@ -532,16 +746,21 @@ async def _run_skill_agent_impl(
 
     if seed_parts:
         seed_parts.append(
-            "Begin testing now. Use the context above where it "
-            "helps; pick up from where the previous run left off "
-            "without repeating its probes."
+            "Begin testing now. Build on the context above; do not "
+            "re-discover what's already mapped or re-probe what's "
+            "already been confirmed."
         )
         seed_msgs: list = [HumanMessage(content="\n\n".join(seed_parts))]
         node.log.info(
             "[%s] seeding worker with %d context block(s) "
-            "(web_search=%s, prior_history=%s)",
+            "(dispatch_reason=%s, findings=%s, recon_summary=%s, "
+            "relevant_summary=%s, web_search=%s, prior_history=%s)",
             config.agent_id,
             len(seed_parts) - 1,  # minus the "Begin testing" tail
+            bool(dispatch_block),
+            bool(findings_block),
+            bool(recon_block),
+            bool(relevant_block),
             bool(web_search_ctx),
             bool(prior_history),
         )

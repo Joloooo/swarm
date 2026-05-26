@@ -220,6 +220,24 @@ class BaseNode(ABC):
         except Exception as e:  # noqa: BLE001 — visibility > strictness here
             dt_ms = int((time.perf_counter() - t0) * 1000)
             self.log.exception("[%s] crashed after %dms", name, dt_ms)
+            # Persist the crash event to ``full_logs.jsonl`` BEFORE the
+            # marker AIMessage gets filtered out of the planner's input
+            # by ``_is_node_boundary_marker``. The marker still lives in
+            # state.messages for the TUI / Studio view; this event is
+            # the durable long-term record. See planner.py for the
+            # filter rationale.
+            try:
+                from src.observability.writers import append_event
+                append_event(
+                    run_id,
+                    "node_failed",
+                    node=name,
+                    dt_ms=dt_ms,
+                    error=str(e)[:500],
+                    error_type=type(e).__name__,
+                )
+            except Exception:  # noqa: BLE001 — observability must not break the graph
+                pass
             return {
                 "messages": [
                     AIMessage(
@@ -255,6 +273,24 @@ class BaseNode(ABC):
                 url=getattr(f, "url", None) or None,
                 payload=getattr(f, "evidence", None) or None,
             )
+        # Persist the success marker to ``full_logs.jsonl`` BEFORE the
+        # AIMessage gets filtered out of the planner's input by
+        # ``_is_node_boundary_marker``. The marker still lives in
+        # state.messages for the TUI / Studio view; this event is the
+        # durable long-term record.
+        try:
+            from src.observability.writers import append_event
+            append_event(
+                run_id,
+                "node_finished",
+                node=name,
+                dt_ms=dt_ms,
+                summary=summary,
+                findings_count=len(result.get("findings") or []),
+            )
+        except Exception:  # noqa: BLE001 — observability must not break the graph
+            pass
+
         msgs = list(result.get("messages") or [])
         msgs.append(
             AIMessage(

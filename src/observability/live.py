@@ -790,6 +790,18 @@ class _Live:
         expected_flag: str | None,
     ) -> None:
         self._seen_msg_hashes.clear()
+        # Drop any stale spinner rows held over from the previous bench.
+        # An LLM call in-flight when the previous bench hit its 900s
+        # timeout never receives on_llm_end / on_llm_error (the
+        # asyncio.CancelledError raised by asyncio.wait_for is a
+        # BaseException and bypasses LangChain's `except Exception`
+        # handlers in callbacks.py), so its _PAD entry would otherwise
+        # linger forever across bench boundaries. Same per-bench-reset
+        # pattern used by reset_totals() in src/llm/callbacks.py and by
+        # _seen_msg_hashes.clear() one line above.
+        with _STREAM_LOCK:
+            _pad_clear()
+            _PAD.clear()
         head = _paint(f"◆ {bench_id}", _BOLD, _CYAN)
         target_part = f"target={target}" if target else "target=?"
         flag_part = f"  expected={expected_flag}" if expected_flag else ""

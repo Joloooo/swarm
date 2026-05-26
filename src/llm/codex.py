@@ -766,16 +766,31 @@ def parse_stream_to_response(
                 # Finish reason
                 if resp.get("status") in ("completed", "done"):
                     metadata["finish_reason"] = "tool_calls" if tool_calls else "stop"
-                # Usage — including the separately-billed reasoning tokens.
-                # Path: usage.output_tokens_details.reasoning_tokens.
+                # Usage — including the separately-billed reasoning tokens
+                # and the OpenAI Responses API's prompt-cache hit count.
+                #
+                # Paths:
+                #   usage.input_tokens_details.cached_tokens
+                #     — bytes that hit OpenAI's automatic prompt cache
+                #       (≥ 1024-token stable prefixes; billed at a steep
+                #       discount and served with reduced prefill latency).
+                #       Reading this is the ONLY way to confirm whether
+                #       caching is actually happening; the top-level
+                #       ``input_tokens`` always reports the full prompt
+                #       size (cached + uncached).
+                #   usage.output_tokens_details.reasoning_tokens
+                #     — the gpt-5.x chain-of-thought tokens (billed
+                #       separately from visible output).
                 # See codex-rs/codex-api/src/sse/responses.rs:174-177.
                 u = resp.get("usage")
                 if isinstance(u, dict):
-                    details = u.get("output_tokens_details") or {}
+                    out_details = u.get("output_tokens_details") or {}
+                    in_details = u.get("input_tokens_details") or {}
                     usage = {
                         "input_tokens":     u.get("input_tokens", 0),
                         "output_tokens":    u.get("output_tokens", 0),
-                        "reasoning_tokens": details.get("reasoning_tokens", 0),
+                        "reasoning_tokens": out_details.get("reasoning_tokens", 0),
+                        "cached_tokens":    in_details.get("cached_tokens", 0),
                         "total_tokens":     u.get("total_tokens", 0),
                     }
 
@@ -859,11 +874,13 @@ async def aparse_stream_to_response(
                     metadata["finish_reason"] = "tool_calls" if tool_calls else "stop"
                 u = resp.get("usage")
                 if isinstance(u, dict):
-                    details = u.get("output_tokens_details") or {}
+                    out_details = u.get("output_tokens_details") or {}
+                    in_details = u.get("input_tokens_details") or {}
                     usage = {
                         "input_tokens":     u.get("input_tokens", 0),
                         "output_tokens":    u.get("output_tokens", 0),
-                        "reasoning_tokens": details.get("reasoning_tokens", 0),
+                        "reasoning_tokens": out_details.get("reasoning_tokens", 0),
+                        "cached_tokens":    in_details.get("cached_tokens", 0),
                         "total_tokens":     u.get("total_tokens", 0),
                     }
 

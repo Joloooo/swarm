@@ -1435,6 +1435,7 @@ class _Live:
         input_tokens: int = 0,
         output_tokens: int = 0,
         reasoning_tokens: int = 0,
+        cached_tokens: int = 0,
         running_input: int = 0,
         peak_input: int = 0,
         error: str | None = None,
@@ -1492,6 +1493,12 @@ class _Live:
             f"out={_fmt_tokens(output_tokens)} "
             f"think={_fmt_tokens(reasoning_tokens)}"
         )
+        # Surface cache hits whenever the provider reports them. Suppress
+        # when zero so non-Codex providers and cold-prefix calls don't
+        # litter every line with ``cached=0``.
+        if cached_tokens > 0:
+            pct = (cached_tokens / input_tokens * 100) if input_tokens else 0
+            tokens_part += f" cached={_fmt_tokens(cached_tokens)}({pct:.0f}%)"
         if mode == "verbose":
             tokens_part += f" running_in={_fmt_tokens(running_input)}"
 

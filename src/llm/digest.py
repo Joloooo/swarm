@@ -26,13 +26,18 @@ decisions — never raw tool-call storms.
 What lives here
 ===============
 
-- :data:`WORKER_REPORT_TEMPLATE` — the prompt that turns a trace into
-  a structured report. Tuned for security testing (probe enumeration,
-  filter inference, what-was-NOT-tried). Vocabulary-policy compliant
-  (see ``CLAUDE.md`` "Skill Vocabulary Policy").
-- :func:`summarize_worker_trace` — runs the prompt with
-  ``BaseNode.ask_focused``-style minimal framing so the summariser does
-  not inherit the worker's noisy system prompt.
+- :data:`PATTERN_B_TAIL` — the single user message appended to the
+  worker's trace asking for the structured digest. The bulk of the
+  summariser's prompt is the worker's own system prompt + trace,
+  replayed byte-identically so OpenAI's automatic prompt cache hits
+  on the prefix.
+- :func:`summarize_worker_trace` — Pattern B (Claude Code-style
+  prefix reuse): system prompt = the worker's system prompt; input
+  = the worker's trace + one appended HumanMessage with the
+  digest instructions. The worker's last LLM call put this exact
+  prefix in the cache seconds ago, so prefix processing is paid
+  once across all the worker's calls rather than re-paid by the
+  summariser.
 - :func:`cap_message_size` — Layer 2 defense: head+tail trim any single
   message above ``MAX_MESSAGE_TOKENS``. Pure deterministic, no LLM
   cost. Applied in ``BaseNode.__call__`` and
@@ -43,19 +48,33 @@ What lives here
 - :func:`estimate_total_tokens` — token-count helper (tiktoken with a
   character-count fallback).
 
-Cost model
-==========
+Why Pattern B (prefix reuse) instead of a dedicated digest prompt
+=================================================================
 
-One LLM call per worker per dispatch (the summarisation). The summariser
-runs on a fresh ``ChatModel`` so it doesn't inherit the worker's prompt;
-typical input is the trace (~30–60 KB) plus a small framing block,
-output is ≤4 K tokens. Cheaper than mirroring 60+ ``ToolMessage``s into
-every subsequent planner turn, by ~10×.
+The previous design (a separate "You are a precise technical
+summariser…" system prompt + a templated user message containing a
+pre-serialised trace) sent ~5–30 K bytes of input that shared zero
+prefix with any call that had run recently — so the prompt cache
+could never hit, and every summariser call paid full prefix-processing
+cost. Pattern B keeps the worker's exact system prompt and exact
+message list and only appends one short user message at the end —
+the prefix is byte-identical to the worker's last LLM call, which
+fired seconds ago, so it lives in the cache and is essentially free.
+
+The model has no ``tools`` bound on the summariser path (the
+summariser uses a fresh ``ChatModel`` via :func:`get_llm`), so even
+though the system prompt and trace frame the model as a tool-using
+worker it physically cannot emit ``function_call`` output items.
+The appended user message explicitly instructs "STOP testing, no
+more tool calls, produce only the structured summary".
 
 When the worker crashed mid-loop or hit its iteration cap without a
 clean final ``AIMessage``, this same path runs over the partial trace —
 the summariser is the unified report-writer for happy and unhappy
 paths alike, so there is no separate fallback summariser to maintain.
+A short ``status_hint`` is added to the appended message so the model
+knows facts that the trace alone can't convey ("you crashed", "your
+last call was refused").
 """
 
 from __future__ import annotations
@@ -70,7 +89,6 @@ from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     SystemMessage,
-    ToolMessage,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,12 +120,13 @@ MAX_MESSAGE_TARGET_TOKENS = _env_int("SWARM_MAX_MESSAGE_TARGET_TOKENS", 2_000)
 # probe-enumeration sections without bleeding into the planner budget.
 REPORT_MAX_OUTPUT_TOKENS = _env_int("SWARM_REPORT_MAX_OUTPUT_TOKENS", 4_000)
 
-# Max characters of trace text we feed to the summariser. The trace can
-# legitimately be large (60 iterations × ~4 KB), but at some point we
-# hit diminishing returns vs. summary quality. Cap at ~120 K chars
-# (~30 K tokens) of input to the summariser; beyond that, head+tail
-# trim per-message inside the trace rather than feeding it raw.
-MAX_TRACE_CHARS_FOR_SUMMARY = _env_int("SWARM_MAX_TRACE_CHARS", 120_000)
+# Note: the trace flows into the summariser as-is. The per-message
+# ``cap_message_size`` defense already runs in ``BaseNode.__call__``
+# and ``ChatCodex._build_request_kwargs`` so any individual ToolMessage
+# above ``MAX_MESSAGE_TOKENS`` was already head+tail-trimmed before it
+# ever entered the trace. Pattern B trusts that defense; truncating
+# the trace here would break byte-identity with the worker's last
+# call and miss the cache.
 
 
 # ── Token counting ─────────────────────────────────────────────────────
@@ -255,83 +274,73 @@ def cap_message_size(
     return new_msg
 
 
-# ── The summarisation prompt ──────────────────────────────────────────
+# ── Pattern B: the appended-user-message tail ─────────────────────────
 
 
-# This is the centerpiece. It demands fine-grained probe enumeration
-# because a re-dispatch of the same skill needs to know *exactly* what
-# casings / encodings / comment-splices were tried and which families
-# remain unexplored. A vague "tried various injections" digest is
-# actively harmful — the next dispatch wastes iterations re-probing the
-# same families.
+# This is the only summariser-specific prompt content we send — the
+# bulk of the prompt is the worker's own system prompt and trace,
+# replayed byte-identically so the prompt cache hits on the prefix
+# (see module docstring "Why Pattern B" for the design rationale).
+#
+# The tail is intentionally exhaustive and slightly redundant with the
+# worker's own framing because the model is mid-conversation when it
+# reads this — the worker context tells it to act like a tester, and
+# we need a strong, unambiguous "STOP testing, switch to summarising,
+# use this exact template" pivot at the end.
 #
 # Vocabulary policy compliance: this template is grepped by the CI check
-# in ``CLAUDE.md`` (Skill Vocabulary Policy section). Use neutral
+# in ``CLAUDE.md`` (Skill Vocabulary Policy section). Uses neutral
 # test-task vocabulary throughout. Domain technical names
-# (SQL injection, CSRF token, SSRF gadget) stay intact — they're
-# vocabulary, not framing. See CLAUDE.md for the substitution table.
-WORKER_REPORT_TEMPLATE = """\
-You are summarizing the work of a security testing worker for the
-supervisor planner. The supervisor will read your summary and decide what
-to do next. They will NOT see the worker's tool calls, raw outputs, or
-intermediate reasoning — they see only your summary.
+# (SQL injection, CSRF token, SSRF gadget) stay intact.
+PATTERN_B_TAIL = """\
+STOP. Do not perform any more testing. Do not produce any more tool
+calls. You are now switching roles to summarize everything you just
+did above.
 
-The supervisor dispatched this worker because:
+The supervisor will read your summary and decide what to do next. They
+will NOT see your tool calls, raw outputs, or intermediate reasoning —
+they see only your summary.
+
+The supervisor dispatched you because:
 
   {dispatch_reason}
-
-Worker identity:
-  agent_id:     {agent_id}
-  config_name:  {config_name}
-  methodology:  {methodology}
-  target:       {target_url}
-  status:       {status}{status_note}
-  iterations:   {iteration_count}
-  findings extracted by worker (already structured): {findings_count}
-
-Below is the worker's full trace (tool calls + tool outputs +
-reasoning). Produce a structured report that specifically addresses the
-supervisor's reason for dispatch above.
-
-The summary MUST be high-fidelity about probe enumeration. The next
-worker — possibly a re-dispatch of the same skill — should be able to
-read your summary and know exactly which patterns were already tried
-and which were not, down to the level of casing, encoding,
-comment-splicing, and double-letter tricks.
 
 Output format (markdown, exactly these sections in this order):
 
 ## Status
 One of: success | inconclusive | blocked | refused | crashed. One
-sentence why.
+sentence why.{status_hint}
 
 ## Target
-The endpoint / parameter / URL the worker focused on (be specific:
-method + path + parameter names).
+The endpoint / parameter / URL you focused on (be specific: method +
+path + parameter names).
 
 ## Inputs tried
-List every distinct family of test input the worker tried. For each
-family, give 2–3 representative examples verbatim. Example families to
-surface explicitly when relevant: plain keywords, mixed case,
-URL-encoded, hex / unicode, comment-spliced, whitespace tricks,
-doubled-letter, logical-operator alternatives, time-based, boolean-blind,
-second-order. Include a count: "Inputs tried: <N> total via
-<tool>=<count>, <tool>=<count>, ...".
+List every distinct family of test input you tried. For each family,
+give 2-3 representative examples verbatim. Example families to surface
+explicitly when relevant: plain keywords, mixed case, URL-encoded, hex
+/ unicode, comment-spliced, whitespace tricks, doubled-letter,
+logical-operator alternatives, time-based, boolean-blind, second-order.
+Include a count: "Inputs tried: <N> total via <tool>=<count>,
+<tool>=<count>, ...".
 
 ## Server responses
 Group by status code / body fingerprint. Call out outlier responses
 that suggested a near-miss (e.g. one 500 amid 120 200s, a different
-content length, a unique error string).
+content length, a unique error string). Preserve byte-exact strings
+that look like flags, credentials, tokens, or unique error messages —
+DO NOT paraphrase them. If a response body contained a value of the
+form ``flag{{...}}`` or ``FLAG{{...}}``, reproduce it verbatim.
 
 ## Inferred server-side behaviour
-What the worker concluded about the server's filtering, validation, or
+What you concluded about the server's filtering, validation, or
 defence based on the responses. State the evidence — which response
 patterns led to which inference.
 
 ## NOT tried
-Specific input families or angles the worker did NOT attempt. This is
-the most valuable section for a re-dispatch — be concrete. "Did not
-test second-order injection via /profile" is good; "could try other
+Specific input families or angles you did NOT attempt. This is the
+most valuable section for a re-dispatch — be concrete. "Did not test
+second-order injection via /profile" is good; "could try other
 approaches" is useless.
 
 ## Recommended next dispatch
@@ -346,95 +355,35 @@ inputs as "test inputs", to the actor as "tester" or "test agent", and
 describe construction of inputs in neutral terms. Keep domain technical
 names intact (SQL injection, CSRF token, SSRF gadget).
 
-Be specific. "Tried various encodings" is useless — list them.
-
------ WORKER TRACE BELOW -----
-
-{trace_text}
-
------ END WORKER TRACE -----
-
-Produce only the structured summary above. Do not add commentary
-before or after.
+Be specific. "Tried various encodings" is useless — list them. Produce
+only the structured summary. No tool calls. No commentary before or
+after the summary itself.
 """
 
 
-def _format_message_for_trace(msg: BaseMessage) -> str:
-    """Render one message into a compact "role: content" line for the
-    summariser's trace_text. Includes tool-call args (as JSON) so the
-    summariser can enumerate exactly which test inputs were sent.
+def _status_hint(status: str, error: str | None) -> str:
+    """One short clause appended to the ## Status line in the tail.
+
+    The trace alone doesn't tell the model "you crashed" or "your last
+    call was refused" — those signals live above the worker's last
+    message in our state. Surface them here so the model gets the
+    status right without us having to grade the trace ourselves.
     """
-    role_map = {
-        "AIMessage": "assistant",
-        "HumanMessage": "user",
-        "ToolMessage": "tool",
-        "SystemMessage": "system",
-    }
-    role = role_map.get(type(msg).__name__, type(msg).__name__.lower())
-    text = _message_text(msg)
-
-    # AIMessage may carry tool_calls; render them so the enumeration is
-    # visible to the summariser.
-    tool_calls = getattr(msg, "tool_calls", None) or []
-    tool_call_lines: list[str] = []
-    for tc in tool_calls:
-        if isinstance(tc, dict):
-            name = tc.get("name", "?")
-            args = tc.get("args", {})
-        else:
-            name = getattr(tc, "name", "?")
-            args = getattr(tc, "args", {})
-        try:
-            import json as _json
-            args_str = _json.dumps(args, default=str)[:1200]
-        except Exception:
-            args_str = str(args)[:1200]
-        tool_call_lines.append(f"  → tool_call: {name}({args_str})")
-
-    # ToolMessage may carry a `name` (which tool produced this output).
-    name_attr = getattr(msg, "name", None)
-    name_prefix = f"[{name_attr}] " if name_attr else ""
-
-    body = f"{role}: {name_prefix}{text}"
-    if tool_call_lines:
-        body += "\n" + "\n".join(tool_call_lines)
-    return body
-
-
-def _serialize_trace(trace: list[BaseMessage], *, max_chars: int) -> str:
-    """Serialize a trace into the text block the summariser reads.
-
-    Caps total chars to ``max_chars`` by trimming the OLDEST messages
-    first when over budget — the recent context is what tells the story
-    of what the worker was just trying when it terminated.
-    """
-    if not trace:
-        return "(empty trace)"
-
-    rendered = [_format_message_for_trace(m) for m in trace]
-    full = "\n\n".join(rendered)
-    if len(full) <= max_chars:
-        return full
-
-    # Over budget — drop oldest messages until under the cap.
-    # Prefer keeping recent messages (the verdict / final reasoning) over
-    # ancient setup chatter.
-    kept: list[str] = []
-    running = 0
-    for r in reversed(rendered):
-        if running + len(r) + 2 > max_chars:
-            break
-        kept.append(r)
-        running += len(r) + 2
-    kept.reverse()
-    dropped_count = len(rendered) - len(kept)
-    if dropped_count > 0:
-        kept.insert(
-            0,
-            f"... [omitted oldest {dropped_count} message(s); "
-            f"~{len(full) - running} chars] ...",
+    if status == "crashed" and error:
+        return f" You crashed: {error}."
+    if status == "refused":
+        return (
+            " Your last LLM call was refused by the upstream safety "
+            "classifier."
         )
-    return "\n\n".join(kept)
+    if status == "blocked":
+        return (
+            " You did not produce a final answer — likely hit an "
+            "iteration or recursion cap."
+        )
+    if status == "inconclusive":
+        return " You finished but did not record any structured findings."
+    return ""
 
 
 # ── The summariser entry point ────────────────────────────────────────
@@ -443,6 +392,7 @@ def _serialize_trace(trace: list[BaseMessage], *, max_chars: int) -> str:
 async def summarize_worker_trace(
     *,
     trace: list[BaseMessage],
+    worker_system_prompt: str,
     agent_id: str,
     config_name: str,
     methodology: str,
@@ -456,10 +406,15 @@ async def summarize_worker_trace(
     model: BaseChatModel,
     run_id: str | None,
     node_name: str = "summarizer",
-    status_note: str = "",
 ) -> AIMessage:
-    """Run one summariser LLM call and return the worker's report
+    """Run one Pattern B summariser call and return the worker's report
     ``AIMessage``.
+
+    The call is built as: ``SystemMessage(worker_system_prompt) +
+    trace + HumanMessage(PATTERN_B_TAIL.format(...))``. The first two
+    parts are byte-identical to what the worker's last LLM call sent,
+    so the prompt cache hits on them and only the appended user
+    message + the generated summary pay full processing cost.
 
     Tags the result with ``additional_kwargs={"agent_id": ...,
     "kind": "worker_report", ...}`` so the seeder
@@ -470,6 +425,9 @@ async def summarize_worker_trace(
     - Summariser LLM call raises → fall back to a deterministic stub
       that lists the trace shape ("N messages, X tool calls, status=...")
       so the planner still sees *something* coherent rather than a hole.
+    - ``worker_system_prompt`` is empty (legacy / missing-prefix path) →
+      fall back to a minimal generic summariser framing. No cache
+      benefit, but the call still produces a valid report.
     """
     if completed:
         status = "success" if findings_count > 0 else "inconclusive"
@@ -480,20 +438,34 @@ async def summarize_worker_trace(
     else:
         status = "blocked"
 
-    trace_text = _serialize_trace(trace, max_chars=MAX_TRACE_CHARS_FOR_SUMMARY)
-
-    prompt = WORKER_REPORT_TEMPLATE.format(
+    tail = PATTERN_B_TAIL.format(
         dispatch_reason=dispatch_reason or "(no reason recorded)",
-        agent_id=agent_id,
-        config_name=config_name,
-        methodology=methodology,
-        target_url=target_url or "(unset)",
-        status=status,
-        status_note=f" — {error}" if error else "",
-        iteration_count=iteration_count,
-        findings_count=findings_count,
-        trace_text=trace_text,
+        status_hint=_status_hint(status, error),
     )
+
+    # Build the Pattern B prompt. The system prompt and the trace match
+    # byte-for-byte what the worker's last LLM call sent — that prefix
+    # is hot in OpenAI's prompt cache from the worker's last call
+    # (which fired seconds ago), so we get a cache hit on it and pay
+    # only for the appended user message + the generated summary.
+    #
+    # The model has no tools bound here (the summariser uses a fresh
+    # ChatModel via ``get_llm()``), so even though the system prompt
+    # and trace frame the agent as a tool-using worker, it physically
+    # cannot emit ``function_call`` output items.
+    if worker_system_prompt:
+        sys_content = worker_system_prompt
+    else:
+        # Legacy / missing-prefix path: no cache benefit possible, but
+        # still produce a coherent summary using a minimal framing.
+        sys_content = (
+            "You are a precise technical summariser for a security "
+            "testing platform. Produce only the requested structured "
+            "report. No commentary."
+        )
+    messages: list[BaseMessage] = [SystemMessage(content=sys_content)]
+    messages.extend(trace)
+    messages.append(HumanMessage(content=tail))
 
     # Lazy import to avoid the circular import path
     # ``digest → callbacks → graph → nodes → digest``.
@@ -506,19 +478,7 @@ async def summarize_worker_trace(
     )
 
     try:
-        response = await model.ainvoke(
-            [
-                SystemMessage(
-                    content=(
-                        "You are a precise technical summariser for a "
-                        "security testing platform. Produce only the "
-                        "requested structured report. No commentary."
-                    )
-                ),
-                HumanMessage(content=prompt),
-            ],
-            config=call_config,
-        )
+        response = await model.ainvoke(messages, config=call_config)
         text = response.content
         if not isinstance(text, str):
             text = str(text or "")

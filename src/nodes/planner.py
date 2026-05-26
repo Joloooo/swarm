@@ -152,6 +152,13 @@ only decision-maker in the graph — every other node runs only because
 you chose it. After each worker node completes, the graph returns to
 you and you decide the next step.
 
+# Authorized target
+
+If the first user message contains a target URL (e.g. "Test the target
+at http://localhost:65204…"), treat that URL as the authorized target
+for this run. Do not ask the user to confirm the target. Do not ask
+for a new target. Proceed directly to recon / attack / etc.
+
 # Reasoning fields (required everywhere)
 
 Both the tools you can call (``normalize_url``, ``validate_website``)
@@ -881,6 +888,41 @@ _SQLI_HINTS = ("'--", "\"--", "' or ", "\" or ", "union", " null,", "[]",
                "payload=\"'", "payload='\"", "or 1=1", "1=1--")
 
 
+def _is_node_boundary_marker(msg: Any) -> bool:
+    """True if ``msg`` is one of the ``✅ [name] Xms — summary`` /
+    ``❌ [name] crashed`` AIMessages that ``BaseNode.__call__`` appends
+    to ``state["messages"]`` after every node run.
+
+    The markers carry wall-clock latencies (``56312ms`` etc.) — useful
+    for the TUI live view and for ``full_logs.jsonl`` (via the
+    ``node_finished`` / ``node_failed`` event types), useless to the
+    planner LLM's decision-making. Filtering them out of the planner's
+    prompt:
+
+      - removes ~50–90 bytes × ~5 markers per turn of noise from the
+        reasoning context,
+      - removes wall-clock ms strings that would otherwise pollute
+        the cross-run prompt-cache prefix,
+      - keeps the cumulative history readable to humans (markers
+        remain in ``state["messages"]`` so the TUI / Studio view still
+        sees them; they're also written to ``full_logs.jsonl`` as
+        structured events).
+
+    The matcher is intentionally tolerant: we look at content prefix
+    AND ``additional_kwargs.node`` so a worker_report or any
+    user-supplied message that happens to start with ``✅`` survives.
+    """
+    if not isinstance(msg, AIMessage):
+        return False
+    akw = getattr(msg, "additional_kwargs", None) or {}
+    if not akw.get("node"):
+        return False
+    content = getattr(msg, "content", None)
+    if not isinstance(content, str):
+        return False
+    return content.startswith("✅ [") or content.startswith("❌ [")
+
+
 def _summarize_recent_evidence(messages: list) -> str | None:
     """Build a one-page evidence digest from the most-recent worker turn.
 
@@ -1428,19 +1470,27 @@ class PlannerNode(BaseNode):
         # Feed the supervisor the full conversation so far. Worker nodes
         # will have appended their own AIMessages; the supervisor reads
         # them as the record of what happened.
-        prior_messages = list(state.get("messages", []))
-        seeded_target = (state.get("target_url") or "").strip()
-        if seeded_target:
-            prior_messages.insert(
-                0,
-                HumanMessage(
-                    content=(
-                        "The graph invocation already includes this authorized "
-                        f"benchmark target_url: {seeded_target}. Treat it as "
-                        "the user-supplied target. Do not ask for a target."
-                    )
-                ),
-            )
+        #
+        # Two pieces of filtering happen here:
+        #
+        #   1. Node-boundary markers (``✅ [recon] 250648ms — ...``) are
+        #      stripped. They live in ``state["messages"]`` for the TUI
+        #      and Studio view; for the planner LLM they're just noise
+        #      with wall-clock latencies that pollute the cache prefix
+        #      cross-run. See ``_is_node_boundary_marker`` for rationale.
+        #      ``state["messages"]`` itself is unchanged — they're written
+        #      to ``full_logs.jsonl`` as ``node_finished`` events by
+        #      ``BaseNode.__call__`` for the long-term record.
+        #
+        #   2. The previous per-turn re-insertion of a target_url framing
+        #      message has been removed. The target URL already arrives
+        #      in the first user message (see ``benchmarks/xbow_runner.py``)
+        #      and the system prompt's "Authorized target" section
+        #      instructs the planner to treat it as the authorized target
+        #      without asking — so re-stating it every turn was redundant
+        #      and the dynamic port number broke cross-run cache hits.
+        raw_messages = list(state.get("messages", []))
+        prior_messages = [m for m in raw_messages if not _is_node_boundary_marker(m)]
         if not prior_messages:
             prior_messages = [
                 HumanMessage(
@@ -1467,7 +1517,12 @@ class PlannerNode(BaseNode):
         # contains it. The digest below extracts a coarse but high-signal
         # summary and surfaces it as a SYSTEM NOTE so the planner can
         # specialize on the right skill instead of fanning out generically.
-        evidence = _summarize_recent_evidence(prior_messages)
+        # Evidence digest reads the UNFILTERED message list because it
+        # needs the node-boundary markers to slice "messages emitted by
+        # the most-recent worker" from older history. The result it
+        # appends to prior_messages below is a single SYSTEM NOTE, so
+        # the planner LLM doesn't see the markers themselves.
+        evidence = _summarize_recent_evidence(raw_messages)
         if evidence:
             self.log.info(
                 "evidence digest: %s",

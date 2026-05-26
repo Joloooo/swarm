@@ -66,7 +66,7 @@ BUILD_TIMEOUT_S = 1500      # 25 min: image pulls + apt + pip (first build is sl
 UP_TIMEOUT_S = 180          # 3 min: `docker compose up --wait` + healthcheck
 DOWN_TIMEOUT_S = 90         # 1.5 min: cleanup
 DISCOVER_TIMEOUT_S = 30     # 30 s: `docker compose ps`
-RUN_TIMEOUT_S = 15 * 60     # 15 min: per-bench wall-clock leash on graph.ainvoke
+RUN_TIMEOUT_S = 20 * 60     # 20 min: per-bench wall-clock leash on graph.ainvoke
 
 
 def docker_is_available() -> tuple[bool, str]:

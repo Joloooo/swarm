@@ -1325,6 +1325,17 @@ async def _run_skill_agent_impl(
         or ""
     )
 
+    # The worker's effective system prompt (after the preventive vocab
+    # filter that ``astream_with_refusal_retry`` always applies). We
+    # propagate it into ``summary_input`` so the summariser node can
+    # replay it byte-identically as Pattern B's prefix and get a
+    # prompt-cache hit. ``filter_text`` is a deterministic regex
+    # substitution — re-running it here yields the same bytes the
+    # retry helper sent on the wire. Lazy import to avoid a hard
+    # dependency cycle through ``src.refusals`` at module load.
+    from src.refusals.vocabulary import filter_text as _filter_text
+    worker_system_prompt_used, _ = _filter_text(system_msg)
+
     # The summary input that the SummarizerNode will consume. Each
     # parallel worker writes a singleton list; the
     # ``_summary_inputs_reducer`` accumulates them so the
@@ -1344,6 +1355,9 @@ async def _run_skill_agent_impl(
         "findings_count": len(findings),
         "iteration_count": _count_worker_iterations(trace),
         "target_url": target_url,
+        # The exact system prompt the worker's LLM saw — fed to the
+        # summariser so its call shares the worker's cached prefix.
+        "worker_system_prompt": worker_system_prompt_used,
     }
 
     # ── Success-path flag auto-verification ─────────────────────

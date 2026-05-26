@@ -228,6 +228,7 @@ class SummarizerNode(BaseNode):
         try:
             report = await summarize_worker_trace(
                 trace=list(inp.get("trace") or []),
+                worker_system_prompt=str(inp.get("worker_system_prompt") or ""),
                 agent_id=worker_agent_id,
                 config_name=str(inp.get("config_name") or ""),
                 methodology=str(inp.get("methodology") or ""),

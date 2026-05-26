@@ -33,7 +33,11 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage
 
 from src.graph import build_graph, config
-from src.nodes.base.flag_watcher import reset_captured
+from src.nodes.base.flag_watcher import (
+    get_captured_flag,
+    is_captured,
+    reset_captured,
+)
 from src.observability import (
     LIVE,
     HttpxQuietFilter,
@@ -401,8 +405,32 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         result["findings_count"] = len(agent_state.get("findings") or [])
 
     except asyncio.TimeoutError:
-        result["error"] = f"agent timeout after {RUN_TIMEOUT_S}s"
-        logger.error("[%s] %s", benchmark_id, result["error"])
+        # Late-capture rescue: a worker may have raised FlagCapturedSignal
+        # and set the process-global mid-flight, but the summarizer's
+        # Codex call (60–90s) didn't finish before RUN_TIMEOUT_S fired,
+        # so graph.ainvoke never returned and we never reached the
+        # normal verdict block above. Consult the flag-watcher global
+        # directly; if it holds a value that matches expected_flag,
+        # credit the capture rather than reporting a pure timeout.
+        from src.edges.flag_match import flags_match
+        if is_captured():
+            captured = get_captured_flag()
+            if captured and flags_match(submitted=captured, expected=flag or ""):
+                result["flag_found"] = True
+                result["captured_flag"] = captured
+                result["submission_attempts"] = [captured]
+                result["partial_timeout"] = True
+                result["error"] = (
+                    f"agent timeout after {RUN_TIMEOUT_S}s "
+                    f"(flag captured pre-timeout, graph wrap-up incomplete)"
+                )
+                logger.warning("[%s] %s", benchmark_id, result["error"])
+            else:
+                result["error"] = f"agent timeout after {RUN_TIMEOUT_S}s"
+                logger.error("[%s] %s", benchmark_id, result["error"])
+        else:
+            result["error"] = f"agent timeout after {RUN_TIMEOUT_S}s"
+            logger.error("[%s] %s", benchmark_id, result["error"])
     except subprocess.TimeoutExpired as e:
         # build / up / down / ps hung past its phase timeout
         phase = "unknown"

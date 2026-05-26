@@ -69,13 +69,23 @@ def make_run_id(
 ) -> str:
     """Build a run_id that ties target identity to a readable timestamp.
 
-    Format:  ``<slug>__<YYYY-MM-DD>_<HHhMMmSSs>``
-    Example: ``XBEN-006-24__2026-05-03_21h18m10s``
+    Format:  ``<MM-DD>_<HHhMMmSSs>_<slug>``
+    Example: ``05-25_16h40m26s_XBEN-006``
+
+    Date-first so ``ls logs/`` sorts chronologically. Year is omitted —
+    operators distinguish years by archive folder, not by filename. The
+    XBEN benchmark-year suffix (``-24``) is stripped from the slug for
+    the same reason: it's the same value for every benchmark in the
+    current set and adds noise.
     """
     now = dt.datetime.now()
-    ts = now.strftime("%Y-%m-%d_%Hh%Mm%Ss")
+    ts = now.strftime("%m-%d_%Hh%Mm%Ss")
     if benchmark_id:
-        slug = _slug(benchmark_id)
+        # Drop the trailing two-digit bench year (``-24`` today, ``-25``
+        # when the next batch lands). Conservative regex — only strips
+        # ``-NN`` at the very end, leaves IDs without that shape alone.
+        bid = re.sub(r"-\d{2}$", "", benchmark_id)
+        slug = _slug(bid)
     elif target_url:
         parsed = urlparse(target_url)
         host = parsed.hostname or "unknown"
@@ -83,7 +93,7 @@ def make_run_id(
         slug = _slug(f"target-{host}{port}")
     else:
         slug = "studio"
-    return f"{slug}__{ts}"
+    return f"{ts}_{slug}"
 
 
 def run_dir(run_id: str) -> Path:

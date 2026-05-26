@@ -784,23 +784,6 @@ def parse_stream_to_response(
                 # See codex-rs/codex-api/src/sse/responses.rs:174-177.
                 u = resp.get("usage")
                 if isinstance(u, dict):
-                    # DIAGNOSTIC (2026-05-26): dump the raw usage dict
-                    # once per process so we can see whether the Codex
-                    # SSE backend exposes ``input_tokens_details`` (the
-                    # OpenAI Responses-API field that reports prompt-
-                    # cache hits) or strips it on this auth route. Remove
-                    # once cache reporting is confirmed working.
-                    global _USAGE_SHAPE_LOGGED
-                    if not _USAGE_SHAPE_LOGGED:
-                        _USAGE_SHAPE_LOGGED = True
-                        try:
-                            import json as _json
-                            logger.warning(
-                                "DIAGNOSTIC raw codex usage dict: %s",
-                                _json.dumps(u, default=str),
-                            )
-                        except Exception:  # noqa: BLE001
-                            logger.warning("DIAGNOSTIC raw codex usage dict (repr): %r", u)
                     out_details = u.get("output_tokens_details") or {}
                     in_details = u.get("input_tokens_details") or {}
                     usage = {
@@ -821,10 +804,6 @@ def parse_stream_to_response(
         response_metadata=metadata,
         usage=usage,
     )
-
-
-# Module-level toggle for the one-shot diagnostic dump above.
-_USAGE_SHAPE_LOGGED: bool = False
 
 
 async def aparse_stream_to_response(

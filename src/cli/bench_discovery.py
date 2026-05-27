@@ -85,26 +85,16 @@ def count_all() -> int:
     return sum(1 for p in XBOW_BENCH_DIR.glob("XBEN-*-24") if p.is_dir())
 
 
-# Build guard written by ``common.mk`` after ``docker compose build``
-# succeeds. Its presence (and freshness vs ``benchmark.json``) is what
-# Make uses to skip rebuilds; we reuse it here as the "is this
-# benchmark built locally?" signal for the TUI's single-container menu.
-_BUILD_GUARD = ".xben_build_done"
+def list_ids(limit: int | None = None) -> list[str]:
+    """Return XBEN-*-24 benchmark ids in sorted order, optionally capped.
 
-
-def list_built() -> list[tuple[str, float]]:
-    """Return ``(benchmark_id, guard_mtime)`` for every locally-built XBEN.
-
-    Sorted by benchmark id. Empty list if the submodule is missing or
-    no benchmark has been built yet. Note: a guard file only proves
-    the image *was* built — Docker Desktop auto-prune can remove the
-    image afterwards (see ``benchmarks/xbow_runner.py:115-120``).
+    Empty list if the submodule is missing. ``limit=None`` returns all.
     """
     if not XBOW_BENCH_DIR.is_dir():
         return []
-    out: list[tuple[str, float]] = []
-    for p in sorted(XBOW_BENCH_DIR.glob("XBEN-*-24")):
-        guard = p / _BUILD_GUARD
-        if guard.is_file():
-            out.append((p.name, guard.stat().st_mtime))
-    return out
+    ids = sorted(
+        p.name
+        for p in XBOW_BENCH_DIR.glob("XBEN-*-24")
+        if p.is_dir()
+    )
+    return ids if limit is None else ids[:limit]

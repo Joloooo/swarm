@@ -27,7 +27,6 @@ their session.
 from __future__ import annotations
 
 import argparse
-import time
 from typing import Any
 
 import questionary
@@ -39,6 +38,27 @@ from src.cli.bench_discovery import count_all
 
 
 _console = Console(stderr=True)
+
+
+# How many benchmarks to surface in the single-container picker (sorted
+# by id, capped). Bump this when you start running deeper into the
+# XBEN catalogue.
+_PICKER_LIMIT = 50
+
+# Manually-maintained record of the most recent SwarmAttacker run per
+# benchmark. Edit this dict as you triage runs — it drives the ✓/✗
+# marks shown next to each id in the picker. Missing keys render as
+# "no mark yet".
+#   "ok"   → green ✓ (flag captured / run succeeded)
+#   "fail" → red   ✗ (run failed / no flag)
+_BENCH_RESULT: dict[str, str] = {
+    "XBEN-001-24": "ok",
+    "XBEN-002-24": "fail",
+    "XBEN-003-24": "ok",
+    "XBEN-004-24": "fail",
+    "XBEN-005-24": "ok",
+    "XBEN-006-24": "ok",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +84,7 @@ def main_loop(args: argparse.Namespace) -> None:
             return
 
         if action == "one":
-            bench_id = _pick_built_bench()
+            bench_id = _pick_bench()
             if bench_id is None:
                 continue
             if not _ensure_docker(args):
@@ -141,29 +161,25 @@ def _top_level() -> str | None:
 # Single-benchmark picker
 # ---------------------------------------------------------------------------
 
-def _pick_built_bench() -> str | None:
-    """Ask the user which locally-built benchmark to run.
+def _pick_bench() -> str | None:
+    """Ask the user which benchmark to run.
 
-    Detects built benchmarks via the ``.xben_build_done`` guard that
-    ``common.mk`` writes after a successful ``docker compose build``.
-    Returns the chosen benchmark id, or ``None`` if the user backed
-    out (Ctrl-C / "Back") or no benchmark has been built yet.
+    Lists the first ``_PICKER_LIMIT`` XBEN benchmarks (sorted by id)
+    and annotates each with the manual ✓/✗ mark from
+    ``_BENCH_RESULT``. Returns the chosen id, or ``None`` if the user
+    backed out (Ctrl-C / "Back") or the submodule is missing.
     """
-    built = bench_discovery.list_built()
-    if not built:
+    ids = bench_discovery.list_ids(limit=_PICKER_LIMIT)
+    if not ids:
         _console.print(
-            "[yellow]No built benchmarks found.[/yellow] Run "
-            "[bold]make build[/bold] inside a benchmark directory first, "
-            "or pick another menu action."
+            "[yellow]No XBEN benchmarks found.[/yellow] Initialise the "
+            "submodule with [bold]git submodule update --init "
+            "Benchmarks/xbow-validation[/bold]."
         )
         return None
 
     choices = [
-        Choice(
-            f"{bench_id}   [built {time.strftime('%Y-%m-%d %H:%M', time.localtime(mtime))}]",
-            value=bench_id,
-        )
-        for bench_id, mtime in built
+        Choice(title=_bench_label(bench_id), value=bench_id) for bench_id in ids
     ]
     choices.append(Choice("← Back", value="__back__"))
 
@@ -175,6 +191,20 @@ def _pick_built_bench() -> str | None:
     if picked is None or picked == "__back__":
         return None
     return picked
+
+
+# prompt_toolkit formatted-text segments. questionary.Choice.title
+# accepts a list of (style, text) tuples; we use that to colour the
+# ✓ / ✗ mark while leaving the benchmark id in the terminal default.
+def _bench_label(bench_id: str) -> list[tuple[str, str]]:
+    result = _BENCH_RESULT.get(bench_id)
+    if result == "ok":
+        mark = ("fg:ansigreen bold", "✓")
+    elif result == "fail":
+        mark = ("fg:ansired bold", "✗")
+    else:
+        mark = ("", " ")
+    return [mark, ("", f"  {bench_id}")]
 
 
 # ---------------------------------------------------------------------------

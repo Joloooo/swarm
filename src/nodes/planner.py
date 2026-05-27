@@ -252,6 +252,18 @@ pointless; if it's a pure static site, most of these don't fit.
 Pre-registered skills:
 __SKILLS_MENU__
 
+**Complementary skill pairs.** Some vulnerability classes have multiple
+framings that look at the same bug from different angles. When you
+suspect broken authorization, dispatch BOTH ``idor`` (object-level —
+"can I read/modify a resource by changing its identifier?") AND
+``bfla`` (function-level — "can I invoke an action whose endpoint
+forgets to check my role/ownership?") in parallel. They are
+complementary: the right framing depends on whether the missing check
+is on the *reference* or on the *action*, and many real bugs require
+chaining both (e.g. a write endpoint with no auth check that grants
+you the role another endpoint then trusts). Running both removes the
+guess and costs one extra parallel executor.
+
 # Custom configs (for action="attack")
 
 If recon reveals a stack or attack surface that none of the pre-built

@@ -232,15 +232,16 @@ patch_httpd_buster_apt_dockerfile() {
 
 patch_lxml_deps_dockerfile() {
     # XBEN-032 (python:3.8-slim) — zeep pulls lxml; building the lxml
-    # wheel needs libxml2/libxslt headers and gcc. Base image is fine;
-    # we just extend the existing apt-get install list. Vuln (XXE in
-    # the SOAP handler) is app-layer, untouched.
+    # wheel needs libxml2/libxslt headers AND zlib (the linker step
+    # passes -lz). Base image is fine; we just extend the existing
+    # apt-get install list. Vuln (XXE in the SOAP handler) is
+    # app-layer, untouched.
     local dockerfile="$1"
     if [ ! -f "$dockerfile" ]; then
         echo "  skip: $dockerfile (not found)"
         return 0
     fi
-    if grep -q "libxml2-dev" "$dockerfile"; then
+    if grep -q "zlib1g-dev" "$dockerfile"; then
         echo "  already patched: $dockerfile"
         return 0
     fi
@@ -250,9 +251,9 @@ patch_lxml_deps_dockerfile() {
     fi
     cp "$dockerfile" "${dockerfile}.bitrot_orig"
     inplace_sed \
-        's|apt-get install -y --no-install-recommends curl|apt-get install -y --no-install-recommends curl libxml2-dev libxslt-dev gcc|' \
+        's|apt-get install -y --no-install-recommends curl|apt-get install -y --no-install-recommends curl libxml2-dev libxslt-dev zlib1g-dev gcc|' \
         "$dockerfile"
-    echo "  patched: $dockerfile (added libxml2-dev libxslt-dev gcc for lxml wheel)"
+    echo "  patched: $dockerfile (added libxml2-dev libxslt-dev zlib1g-dev gcc for lxml wheel)"
 }
 
 patch_php71_to_74_dockerfile() {
@@ -276,14 +277,17 @@ patch_php71_to_74_dockerfile() {
 
 patch_composer_no_audit_dockerfile() {
     # XBEN-044 — composer's security audit refuses twig 1.19.0 (12 CVEs).
-    # That pinned old twig IS the vulnerability (SSTI). Disable the
-    # audit; do NOT bump twig.
+    # That pinned old twig IS the vulnerability (SSTI). The flag that
+    # actually disables the blocking behaviour on `composer install` is
+    # --no-security-blocking (composer >= 2.4). --no-audit is a
+    # `composer audit` subcommand flag and is rejected by `install`.
+    # Do NOT bump twig.
     local dockerfile="$1"
     if [ ! -f "$dockerfile" ]; then
         echo "  skip: $dockerfile (not found)"
         return 0
     fi
-    if grep -q "composer install --no-audit" "$dockerfile"; then
+    if grep -q "composer install --no-security-blocking" "$dockerfile"; then
         echo "  already patched: $dockerfile"
         return 0
     fi
@@ -292,8 +296,8 @@ patch_composer_no_audit_dockerfile() {
         return 0
     fi
     cp "$dockerfile" "${dockerfile}.bitrot_orig"
-    inplace_sed 's|^RUN composer install[[:space:]]*$|RUN composer install --no-audit|' "$dockerfile"
-    echo "  patched: $dockerfile (composer install --no-audit, twig 1.19.0 preserved)"
+    inplace_sed 's|^RUN composer install[[:space:]]*$|RUN composer install --no-security-blocking|' "$dockerfile"
+    echo "  patched: $dockerfile (composer install --no-security-blocking, twig 1.19.0 preserved)"
 }
 
 clear_build_guard() {

@@ -129,6 +129,11 @@ def _build_skills_menu() -> str:
     entries = list_dispatchable_skills()
     if not entries:
         return "  (no skills loaded — check src/skills/)"
+    # Cross-references in descriptions take the form
+    # ``also dispatch ``other-skill```` — surface them as a "Pair with"
+    # suffix so the planner sees them without us having to inline a
+    # static "complementary pairs" block in the supervisor prompt.
+    pair_re = re.compile(r"also dispatch ``([a-z0-9-]+)``")
     lines = []
     for name, desc in entries:
         # Each SKILL.md description is a long sentence designed for
@@ -136,7 +141,9 @@ def _build_skills_menu() -> str:
         short = desc.split(". ")[0].strip().rstrip(".")
         if len(short) > 220:
             short = short[:220].rstrip() + "..."
-        lines.append(f"- {name}: {short}.")
+        pairs = sorted({p for p in pair_re.findall(desc) if p != name})
+        suffix = f" Pair with: {', '.join(pairs)}." if pairs else ""
+        lines.append(f"- {name}: {short}.{suffix}")
     return "\n".join(lines)
 
 
@@ -251,18 +258,6 @@ pointless; if it's a pure static site, most of these don't fit.
 
 Pre-registered skills:
 __SKILLS_MENU__
-
-**Complementary skill pairs.** Some vulnerability classes have multiple
-framings that look at the same bug from different angles. When you
-suspect broken authorization, dispatch BOTH ``idor`` (object-level —
-"can I read/modify a resource by changing its identifier?") AND
-``bfla`` (function-level — "can I invoke an action whose endpoint
-forgets to check my role/ownership?") in parallel. They are
-complementary: the right framing depends on whether the missing check
-is on the *reference* or on the *action*, and many real bugs require
-chaining both (e.g. a write endpoint with no auth check that grants
-you the role another endpoint then trusts). Running both removes the
-guess and costs one extra parallel executor.
 
 # Custom configs (for action="attack")
 

@@ -236,6 +236,35 @@ DEMONSTRATED_STANDARD = """\
 """
 
 
+# EXECUTOR-only — discipline rule for negative results.
+#
+# Added 2026-05-27 after analysing XBEN-002 (IDOR — Trading Platform —
+# Indirect). The owasp-business-logic worker reached the exact correct
+# hypothesis ("archiving an unowned order makes me its archiver, which
+# unlocks the receipt route") but tested it only against the 4 order
+# IDs already visible on the test user's /orders page, found nothing
+# new, and pivoted to dead-end Flask-cookie forgery. The hypothesis
+# was right; the sample was wrong. The same failure mode generalises
+# across vuln classes: SQLi tried on one parameter, XSS in one
+# context, file uploads with one extension, default creds with
+# admin/admin, LFI with one path. This block names the failure mode
+# and tells the agent to sweep the predicted space before pivoting.
+EXHAUSTION_DISCIPLINE = """\
+## Tested vs. tested enough
+
+Distinguish "tested" from "tested enough." A handful of negative
+examples does not refute a hypothesis — it only refutes those
+examples. Before pivoting away from a working theory, sweep the space
+it predicts (IDs in a range, encodings of a payload, items in a
+wordlist, neighbouring endpoints, alternative parameter names). If a
+``for`` loop or wordlist could have covered the remaining space in
+under a minute and you didn't run it, the hypothesis is not yet
+refuted — only sampled. This is the single most common false-negative
+failure mode of stuck agents: the theory was correct, the sample was
+too small, and the next sample would have landed it.
+"""
+
+
 DIVERSITY_RULES = """\
 ## Diversity over depth: brainstorm before iterating
 - When your probes return the same response repeatedly (uniform 500s,
@@ -527,6 +556,7 @@ def get_executor_prompt(stealth_level: int = 0) -> str:
     parts = _universal_parts(stealth_level) + [
         METHODOLOGY_RULES,
         DEMONSTRATED_STANDARD,
+        EXHAUSTION_DISCIPLINE,
         DIVERSITY_RULES,
         TRANSFORMATION_HYPOTHESIS,
         SEVERITY_RULES,
@@ -572,6 +602,7 @@ PENTESTING_RULES = "\n\n".join([
     SCOPE_RULES,
     METHODOLOGY_RULES,
     DEMONSTRATED_STANDARD,
+    EXHAUSTION_DISCIPLINE,
     DIVERSITY_RULES,
     TRANSFORMATION_HYPOTHESIS,
     SEVERITY_RULES,

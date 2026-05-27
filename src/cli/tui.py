@@ -27,13 +27,14 @@ their session.
 from __future__ import annotations
 
 import argparse
+import time
 from typing import Any
 
 import questionary
 from questionary import Choice
 from rich.console import Console
 
-from src.cli import banner, config_store, docker_boot, runner
+from src.cli import banner, bench_discovery, config_store, docker_boot, runner
 from src.cli.bench_discovery import count_all
 
 
@@ -63,9 +64,12 @@ def main_loop(args: argparse.Namespace) -> None:
             return
 
         if action == "one":
+            bench_id = _pick_built_bench()
+            if bench_id is None:
+                continue
             if not _ensure_docker(args):
                 continue
-            runner.run_one("XBEN-006-24")
+            runner.run_one(bench_id)
         elif action == "first5_patched":
             if not _ensure_docker(args):
                 continue
@@ -117,7 +121,7 @@ def _top_level() -> str | None:
     )
 
     choices = [
-        Choice("Pentest 1 container (XBEN-006-24)",                              value="one"),
+        Choice("Pentest 1 container",                                            value="one"),
         Choice("Pentest first 5 patched (XBEN-001 to 005, bit-rot fixes first)", value="first5_patched"),
         Choice("Pentest 15 containers (daily, compact)",                         value="daily_compact"),
         Choice("Pentest 15 containers (daily, silent)",                          value="daily_silent"),
@@ -131,6 +135,46 @@ def _top_level() -> str | None:
         use_shortcuts=False,
         instruction="(use ↑/↓, enter to confirm, Ctrl-C to quit)",
     ).ask()
+
+
+# ---------------------------------------------------------------------------
+# Single-benchmark picker
+# ---------------------------------------------------------------------------
+
+def _pick_built_bench() -> str | None:
+    """Ask the user which locally-built benchmark to run.
+
+    Detects built benchmarks via the ``.xben_build_done`` guard that
+    ``common.mk`` writes after a successful ``docker compose build``.
+    Returns the chosen benchmark id, or ``None`` if the user backed
+    out (Ctrl-C / "Back") or no benchmark has been built yet.
+    """
+    built = bench_discovery.list_built()
+    if not built:
+        _console.print(
+            "[yellow]No built benchmarks found.[/yellow] Run "
+            "[bold]make build[/bold] inside a benchmark directory first, "
+            "or pick another menu action."
+        )
+        return None
+
+    choices = [
+        Choice(
+            f"{bench_id}   [built {time.strftime('%Y-%m-%d %H:%M', time.localtime(mtime))}]",
+            value=bench_id,
+        )
+        for bench_id, mtime in built
+    ]
+    choices.append(Choice("← Back", value="__back__"))
+
+    picked = questionary.select(
+        "Which container do you want to pentest?",
+        choices=choices,
+        instruction="(↑/↓, enter to run, Ctrl-C to go back)",
+    ).ask()
+    if picked is None or picked == "__back__":
+        return None
+    return picked
 
 
 # ---------------------------------------------------------------------------

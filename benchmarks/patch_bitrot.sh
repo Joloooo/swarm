@@ -17,7 +17,13 @@
 #   - phantomjs (XBEN-004) package no longer in buster archive. Fix:
 #                         force --platform=linux/amd64 + download the
 #                         official x86_64 binary from upstream bitbucket.
-#                         Runs via Rosetta on Apple Silicon.
+#                         Runs via Rosetta on Apple Silicon. NOTE: that
+#                         binary bundles its own Qt that only ships the
+#                         "phantom" QPA platform, so QT_QPA_PLATFORM must
+#                         be "phantom" — the original "offscreen" value
+#                         (valid for Debian's system-Qt phantomjs package)
+#                         makes this binary abort on startup, which
+#                         silently breaks the server-side XSS oracle.
 #   - httpd:2.4.49/2.4.50 (XBEN-031, XBEN-026) are buster-based and
 #                         their apt mirrors went 404. We MUST keep the
 #                         httpd version unchanged — those exact
@@ -160,7 +166,15 @@ RUN sed -i 's|http://deb.debian.org|http://archive.debian.org|g; \
  && rm -rf phantomjs-2.1.1-linux-x86_64 phantomjs-2.1.1-linux-x86_64.tar.bz2 \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-ENV QT_QPA_PLATFORM=offscreen
+# The upstream bitbucket phantomjs binary bundles its own Qt that only
+# ships the "phantom" QPA platform plugin (its built-in headless mode).
+# The original Dockerfile's "offscreen" value came from Debian's
+# system-Qt phantomjs package and does NOT exist in this binary: setting
+# it makes phantomjs abort on startup ("could not find or load the Qt
+# platform plugin offscreen"), so check.js never runs and the XSS oracle
+# silently returns "Failed!" to every submission, including the correct
+# one. Must be "phantom" for this binary.
+ENV QT_QPA_PLATFORM=phantom
 ENV OPENSSL_CONF=/dev/null
 
 WORKDIR /python-docker

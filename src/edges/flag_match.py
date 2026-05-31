@@ -1,4 +1,4 @@
-"""Flag matching — strict equality against the benchmark's expected flag.
+"""Flag matching — strict equality against the benchmark's expected flag(s).
 
 Lives in ``src/edges/`` because its only purpose is to support the
 routing edge (:func:`src.edges.routing.route_after_planner`): on
@@ -29,10 +29,29 @@ captures:
 The remaining surface is the minimum needed to support two modes:
 
 - **Benchmark mode** (``expected`` is set): strict case-insensitive
-  string equality. Nothing else wins.
-- **Real-pentest mode** (``expected`` is empty): no ground truth
-  exists, so accept any well-formed non-placeholder ``flag{...}`` the
-  agent submits. The agent is the authority outside benchmark mode.
+  string equality against one OR more candidate values. Nothing else
+  wins.
+- **Real-pentest mode** (``expected`` is empty / empty tuple): no
+  ground truth exists, so accept any well-formed non-placeholder
+  ``flag{...}`` the agent submits. The agent is the authority outside
+  benchmark mode.
+
+## Why ``expected`` accepts an iterable
+
+XBow benchmarks have two equally legitimate sources of truth for what
+flag the container actually serves, and the two can disagree:
+
+- ``common.mk`` formula → ``FLAG{sha256(BENCHMARK_UPPER)}``, passed
+  via ``--build-arg`` at build time
+- ``<benchmark>/.env`` file → ``FLAG="flag{<uuid>}"``, auto-loaded by
+  docker-compose into the build environment
+
+Depending on whether the image was built via ``make build`` or plain
+``docker compose build``, one wins over the other. We've observed both
+outcomes in the same XBow corpus (XBEN-001 baked sha256; XBEN-002
+baked the .env UUID). The runner therefore computes ALL plausible
+candidates up front and the matcher accepts any of them — see
+:func:`benchmarks.xbow_runner.expected_flag_candidates`.
 
 Capture is now an explicit agent decision: a worker must surface the
 flag string in its findings, the planner must emit
@@ -43,6 +62,7 @@ module decide if the run ends.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 
 # Match ``flag{...}`` / ``FLAG{...}`` / ``Flag{...}`` etc. The character
 # class is letter-by-letter (rather than ``(?i)``) so callers can read
@@ -86,7 +106,7 @@ def _inner(s: str) -> str | None:
     return inside[inside.index("{") + 1 : inside.rindex("}")]
 
 
-def flags_match(*, submitted: str, expected: str) -> bool:
+def flags_match(*, submitted: str, expected: str | Iterable[str]) -> bool:
     """Decide whether a submitted flag should count as the captured flag.
 
     Two modes:
@@ -95,9 +115,18 @@ def flags_match(*, submitted: str, expected: str) -> bool:
       non-placeholder ``flag{...}``. No ground truth exists; the
       agent is the authority.
     - ``expected`` set (benchmark mode) → strict case-insensitive
-      equality. Nothing else wins. The XBow corpus is deterministic
-      (``FLAG{sha256(BENCHMARK_UPPER)}``) so the exact expected value
-      is always known.
+      equality against ANY value in the candidate set. The XBow
+      corpus has two equally legitimate flag sources that may diverge
+      (sha256-of-bench-id vs the .env file's ``FLAG=`` value), and
+      which one is baked depends on which build path Docker Compose
+      took. The runner builds the full candidate set up front and any
+      one match counts as a capture. See module docstring for the
+      full rationale.
+
+    ``expected`` may be passed as a single ``str`` (back-compat) or
+    an iterable of strings. Empty strings inside the iterable are
+    ignored; if every candidate is empty, falls through to real-pentest
+    mode.
 
     Both inputs are stripped of surrounding whitespace.
 
@@ -105,7 +134,6 @@ def flags_match(*, submitted: str, expected: str) -> bool:
     flag.
     """
     sub = (submitted or "").strip()
-    exp = (expected or "").strip()
     if not sub:
         return False
 
@@ -113,9 +141,19 @@ def flags_match(*, submitted: str, expected: str) -> bool:
     if sub_inner is None:
         return False
 
-    if exp:
-        # Benchmark mode: strict equality only. No fallbacks.
-        return sub.lower() == exp.lower()
+    # Normalize ``expected`` into a clean candidate set (drops empties,
+    # strips whitespace, dedupes case-insensitively). A single string
+    # input becomes a 1-element set; an iterable becomes whatever it
+    # contains. Empty input → real-pentest mode.
+    if isinstance(expected, str):
+        raw_candidates: tuple[str, ...] = (expected,)
+    else:
+        raw_candidates = tuple(expected or ())
+    candidates_lc = {c.strip().lower() for c in raw_candidates if (c or "").strip()}
+
+    if candidates_lc:
+        # Benchmark mode: strict equality against any candidate.
+        return sub.lower() in candidates_lc
 
     # Real-pentest mode: no ground truth — reject only obvious
     # placeholders, accept anything else well-formed.

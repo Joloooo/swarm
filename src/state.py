@@ -261,9 +261,45 @@ class SwarmGraphState(TypedDict, total=False):
     # Read by:
     #   - src.nodes.planner.PlannerNode.execute (planner prompt addendum
     #     and the `_maybe_force_recovery` safety net)
-    #   - src.edges.routing.route_after_planner (compares submitted vs
-    #     expected on action="submit_flag")
+    #   - src.observability.live for display ("expected: ..." line)
+    # NOTE: This field is the **primary / display** candidate only. The
+    # set of strings actually accepted by ``flags_match`` is
+    # ``expected_flag_candidates`` below — a benchmark may have multiple
+    # equally-legitimate flag values depending on which build path
+    # produced the image (see the xbow_runner docstring).
     expected_flag: str
+
+    # Full set of candidate strings any of which counts as a captured
+    # flag. Populated by the benchmark runner alongside
+    # ``expected_flag``; typically contains:
+    #
+    #   * the sha256-of-bench-id prediction (``common.mk`` formula),
+    #   * the value parsed from ``<benchmark>/.env``,
+    #   * the value read from ``/flag`` inside the running container.
+    #
+    # All three sources exist in the XBow corpus and can disagree
+    # depending on whether the image was built via ``make build``
+    # (Makefile-export FLAG wins) or plain ``docker compose build``
+    # (.env autoload wins). Building the candidate set up front and
+    # accepting any match closes the entire class of
+    # "captured-but-rejected" false negatives.
+    #
+    # Read by every caller of
+    # :func:`src.edges.flag_match.flags_match`:
+    #   - :class:`src.nodes.base.flag_watcher.FlagWatcherCallback`
+    #     (worker-side eager scan)
+    #   - :func:`src.nodes.base.skill_runner._run_skill_agent_impl`
+    #     (per-node end-of-turn scan that emits ``flag_auto_verified``)
+    #   - :func:`src.edges.routing.route_after_planner`
+    #     (planner's ``action="submit_flag"`` verdict)
+    #   - :func:`src.observability.live.bench_finish`
+    #     (post-run match indicator)
+    #   - :func:`benchmarks.xbow_runner.run_one` (final scoring)
+    #
+    # Empty tuple in non-benchmark / real-pentest mode — every consumer
+    # then falls through to ``expected_flag``'s emptiness check and
+    # uses real-pentest semantics in :func:`flags_match`.
+    expected_flag_candidates: tuple[str, ...]
 
     # Append-only list of flag strings the planner has explicitly
     # submitted via ``action="submit_flag"``. The routing edge

@@ -791,11 +791,22 @@ async def _run_skill_agent_impl(
     # ``state.captured_flag`` reducer). See the module docstring of
     # ``src.nodes.base.flag_watcher`` for the full incident retro.
     from src.nodes.base.flag_watcher import FlagWatcherCallback
-    expected_flag_for_callback = (state or {}).get("expected_flag") or ""
+    # Pass the full candidate set to the watcher — see
+    # :func:`src.edges.flag_match.flags_match` for why benchmarks can
+    # legitimately have multiple expected flag values. Falls back to
+    # the (back-compat) single ``expected_flag`` field if the runner
+    # didn't populate the candidates tuple.
+    expected_flag_candidates_for_callback: tuple[str, ...] = tuple(
+        (state or {}).get("expected_flag_candidates") or ()
+    )
+    if not expected_flag_candidates_for_callback:
+        single = (state or {}).get("expected_flag") or ""
+        if single:
+            expected_flag_candidates_for_callback = (single,)
     worker_callbacks: list = []
-    if expected_flag_for_callback:
+    if expected_flag_candidates_for_callback:
         worker_callbacks.append(FlagWatcherCallback(
-            expected_flag=expected_flag_for_callback,
+            expected_flag=expected_flag_candidates_for_callback,
             agent_id=config.agent_id,
         ))
     call_config = make_call_config(
@@ -1390,13 +1401,23 @@ async def _run_skill_agent_impl(
     # is a no-op — capture remains planner-driven.
     captured_flag_value: str | None = None
     expected_flag = (state or {}).get("expected_flag") or ""
+    # Full candidate set the matcher accepts — see
+    # :func:`src.edges.flag_match.flags_match` for why benchmarks can
+    # have multiple legitimate expected values. Falls back to the
+    # single ``expected_flag`` when the runner didn't populate the
+    # candidates tuple (back-compat).
+    expected_flag_candidates: tuple[str, ...] = tuple(
+        (state or {}).get("expected_flag_candidates") or ()
+    )
+    if not expected_flag_candidates and expected_flag:
+        expected_flag_candidates = (expected_flag,)
     # Counters that always end up in the auto-verify summary event,
     # so post-mortem can see "we scanned N tool messages, looked at
     # K candidate flag-shaped strings, matched 0" without re-reading
     # the entire worker trace.
     tool_msgs_scanned = 0
     candidates_seen = 0
-    if expected_flag and last_snapshot:
+    if expected_flag_candidates and last_snapshot:
         from src.edges.flag_match import extract_flags, flags_match
         scanned_msgs = last_snapshot.get("messages", []) or []
         for m in scanned_msgs:
@@ -1418,12 +1439,16 @@ async def _run_skill_agent_impl(
                 continue
             for candidate in extract_flags(content_str):
                 candidates_seen += 1
-                if flags_match(submitted=candidate, expected=expected_flag):
+                if flags_match(
+                    submitted=candidate,
+                    expected=expected_flag_candidates,
+                ):
                     captured_flag_value = candidate
                     node.log.info(
                         "[%s] auto-verified flag in tool output: %s "
-                        "(matches expected_flag)",
+                        "(matches any of %d expected candidates)",
                         config.agent_id, candidate,
+                        len(expected_flag_candidates),
                     )
                     break
             if captured_flag_value:
@@ -1448,6 +1473,7 @@ async def _run_skill_agent_impl(
                 agent_id=config.agent_id,
                 node=node.name,
                 expected_flag=expected_flag,
+                expected_flag_candidates=list(expected_flag_candidates),
                 captured_flag=captured_flag_value or "",
                 matched=captured_flag_value is not None,
                 tool_msgs_scanned=tool_msgs_scanned,

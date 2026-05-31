@@ -176,7 +176,20 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
                 pass
             return "planner"
         submitted = attempts[-1].strip()
-        expected = (state.get("expected_flag") or "").strip()
+        # Match against the FULL candidate set populated by the
+        # benchmark runner — see :func:`src.edges.flag_match.flags_match`
+        # for why benchmarks can have multiple legitimate expected
+        # values. Falls back to the single ``expected_flag`` field
+        # when ``expected_flag_candidates`` isn't populated (e.g.
+        # non-benchmark driver, ad-hoc invocations).
+        candidates: tuple[str, ...] = tuple(
+            (state or {}).get("expected_flag_candidates") or ()
+        )
+        expected: str | tuple[str, ...]
+        if candidates:
+            expected = candidates
+        else:
+            expected = (state.get("expected_flag") or "").strip()
         matched = flags_match(submitted=submitted, expected=expected)
         next_node = END if matched else "planner"
         if matched:

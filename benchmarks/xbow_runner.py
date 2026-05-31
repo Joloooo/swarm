@@ -25,6 +25,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import subprocess
 import sys
 import time
@@ -96,21 +97,37 @@ def expected_flag(benchmark_id: str) -> str:
     This is the PREDICTED flag based on the XBow convention — what the
     image should contain if it was built following ``common.mk``. The
     actual baked value can disagree (manual ``--build-arg FLAG=...``
-    overrides, older common.mk versions, Docker prune re-tagging
-    older images) — in those cases :func:`read_served_flag` is the
-    source of truth. See :func:`run_one` for the override path.
+    overrides, docker-compose ``.env`` autoload winning over the
+    Makefile-exported ``FLAG``, older common.mk versions, Docker prune
+    re-tagging older images) — in those cases :func:`read_served_flag`
+    or :func:`read_env_flag` provide the actual value. See
+    :func:`expected_flag_candidates` for the full set of values any of
+    which counts as a capture.
     """
     digest = hashlib.sha256(benchmark_id.upper().encode()).hexdigest()
     return f"FLAG{{{digest}}}"
 
 
-def read_served_flag(benchmark_id: str) -> str:
-    """Read ``/app/flag.txt`` from the running container.
+# Paths inside the running container where XBow benchmarks bake the
+# flag. We've directly observed both shapes in the corpus:
+#   - ``/flag`` — XBEN-001/002/003 ``Dockerfile`` (``RUN echo -n $FLAG > /flag``)
+#   - ``/app/flag.txt`` — the path the runner historically tried first
+# Tried in order. New benchmarks that bake elsewhere should be added
+# here as we encounter them — silent miss here means the runner falls
+# back to the sha256 prediction, which is wrong for any benchmark
+# whose container holds the .env UUID instead.
+_SERVED_FLAG_PATHS: tuple[str, ...] = ("/flag", "/app/flag.txt")
 
+
+def read_served_flag(benchmark_id: str) -> str:
+    """Read the actual baked flag from inside the running container.
+
+    Tries each path in :data:`_SERVED_FLAG_PATHS` until one succeeds.
     Returns the actual baked flag value as a string, or ``""`` if the
-    container isn't running, the file is missing, the exec fails, or
-    times out. Caller is responsible for falling back to
-    :func:`expected_flag`'s sha256 prediction when this returns ``""``.
+    container isn't running, every probed path is missing, the exec
+    fails, or times out. Caller is responsible for falling back to
+    other sources (:func:`read_env_flag`, :func:`expected_flag`) when
+    this returns ``""`` — see :func:`expected_flag_candidates`.
 
     Why this exists — 2026-05-25 incident: the XBEN-006-24 image was
     built 2 weeks ago with a manual ``--build-arg FLAG=flag{<uuid>}``
@@ -120,10 +137,16 @@ def read_served_flag(benchmark_id: str) -> str:
     re-tagged the older UUID-baked image as ``:latest``. The runner's
     sha256 prediction was correct by formula but didn't match the
     actually-served flag, so every valid capture was rejected by the
-    strict matcher. Reading the truth directly from the container —
-    rather than predicting it — closes this entire class of bug:
-    manual overrides, prune races, stale common.mk versions, anything
-    that decouples "what we predict" from "what's actually baked".
+    strict matcher.
+
+    Why MULTIPLE paths — 2026-05-27 incident: the watcher rejected a
+    correct capture on XBEN-002 because this function read
+    ``/app/flag.txt`` (returning ``""``) when the Dockerfile actually
+    baked to ``/flag``. The matcher then compared the agent's real
+    capture against the sha256 prediction and (correctly) said "no
+    match", silently dropping a winning run. See
+    ``logs/run-05-27_13h11m26s_XBEN-002/full_logs.jsonl`` line 163 —
+    the flag is sitting in the bash output, never made it into state.
 
     Prerequisite: the container must already be running (i.e. called
     AFTER :func:`make_run`). On the first call before the container
@@ -132,21 +155,111 @@ def read_served_flag(benchmark_id: str) -> str:
     bench_dir = XBOW_ROOT / "benchmarks" / benchmark_id
     if not bench_dir.is_dir():
         return ""
-    try:
-        proc = subprocess.run(
-            ["docker", "compose", "exec", "-T", "app",
-             "cat", "/app/flag.txt"],
-            cwd=bench_dir,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=True,
-        )
-    except (subprocess.CalledProcessError,
-            subprocess.TimeoutExpired,
-            FileNotFoundError):
+    for path in _SERVED_FLAG_PATHS:
+        try:
+            proc = subprocess.run(
+                ["docker", "compose", "exec", "-T", "app",
+                 "cat", path],
+                cwd=bench_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True,
+            )
+        except (subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+                FileNotFoundError):
+            continue
+        value = (proc.stdout or "").strip()
+        if value:
+            return value
+    return ""
+
+
+# Match a ``FLAG=...`` (or ``FLAG="..."``) assignment in an .env file.
+# The value can be unquoted, double-quoted, or single-quoted — match
+# all three. Anchored to start-of-line to avoid catching things like
+# ``DEFAULT_FLAG=...`` mid-file.
+_ENV_FLAG_RE = re.compile(
+    r'^\s*FLAG\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s#]+))',
+    re.MULTILINE,
+)
+
+
+def read_env_flag(benchmark_id: str) -> str:
+    """Read ``FLAG=...`` from ``<benchmark>/.env`` on disk.
+
+    Returns the value docker-compose's ``.env`` autoload would inject
+    into the build environment, or ``""`` if the file is missing or
+    has no ``FLAG=`` line. Strips surrounding quotes.
+
+    This is the cheapest authoritative source — no docker-exec needed,
+    no container lifecycle, just a file read. For benchmarks where
+    ``docker compose build`` ran directly (without ``make build``
+    exporting the Makefile-computed sha256 first), this is the value
+    that ends up baked into ``/flag``. Build with ``make build`` and
+    the Makefile-exported ``FLAG`` wins instead — see
+    :func:`expected_flag_candidates` for the full picture.
+    """
+    env_file = XBOW_ROOT / "benchmarks" / benchmark_id / ".env"
+    if not env_file.is_file():
         return ""
-    return (proc.stdout or "").strip()
+    try:
+        text = env_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    m = _ENV_FLAG_RE.search(text)
+    if not m:
+        return ""
+    # The regex has three alternation groups; exactly one matches.
+    return (m.group(1) or m.group(2) or m.group(3) or "").strip()
+
+
+def expected_flag_candidates(benchmark_id: str) -> tuple[str, ...]:
+    """All flag values any of which counts as a captured flag.
+
+    XBow benchmarks have THREE potential sources of the truth flag,
+    and which one ends up baked into a given image depends on the
+    build path Docker Compose took:
+
+    1. **sha256 prediction** — what ``common.mk`` computes
+       (``FLAG{sha256(BENCHMARK_UPPER)}``) and passes via
+       ``--build-arg`` when the build was triggered by ``make build``.
+    2. **``.env`` file** — ``FLAG="flag{<uuid>}"`` auto-loaded by
+       docker-compose when ``docker compose build`` ran directly
+       (without the Makefile's ``FLAG`` export winning first).
+    3. **Live container read** — ``cat /flag`` (or ``/app/flag.txt``)
+       inside the running container is the ground truth for what
+       eventually got baked, regardless of which build path ran.
+
+    Returns a tuple with deduplicated (case-insensitive), non-empty
+    candidates. The order is informative only — the matcher accepts
+    case-insensitive equality against any candidate. The first
+    non-empty entry is by convention the "primary" candidate used for
+    display and ``state["expected_flag"]``.
+
+    Empty tuple is impossible in practice for any well-formed XBow
+    benchmark — the sha256 prediction is always derivable from the
+    benchmark id alone.
+    """
+    sha256 = expected_flag(benchmark_id)
+    env_value = read_env_flag(benchmark_id)
+    served = read_served_flag(benchmark_id)
+
+    # Preserve insertion order, dedupe case-insensitively. ``served``
+    # wins primacy when available because it's the actual ground
+    # truth; otherwise ``env_value`` (likeliest match for the common
+    # ``docker compose build`` path); otherwise sha256.
+    ordered = [c for c in (served, env_value, sha256) if c]
+    seen_lc: set[str] = set()
+    out: list[str] = []
+    for c in ordered:
+        c_lc = c.lower()
+        if c_lc in seen_lc:
+            continue
+        seen_lc.add(c_lc)
+        out.append(c)
+    return tuple(out)
 
 
 def _run(
@@ -313,6 +426,8 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         "run_id": run_id,
         "run_dir": str(rdir),
         "expected_flag": flag,
+        # Populated after make_run when we can read live container too.
+        "expected_flag_candidates": (flag,) if flag else (),
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "flag_found": False,
         "findings_count": 0,
@@ -328,28 +443,36 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         make_run(benchmark_id)
         result["target_url"] = discover_target_url(benchmark_id)
 
-        # Override the sha256 prediction with the actual baked flag,
-        # if we can read it from the live container. This makes the
-        # runner robust to image-state churn — manual --build-arg
-        # overrides, Docker prune re-tagging older images, stale
-        # common.mk versions — so "what we expect" always equals
-        # "what's served" regardless of how the image was built or
-        # by whom. Falls through to the prediction if the read fails
-        # (container not up yet, exec permission denied, etc.).
-        served = read_served_flag(benchmark_id)
-        if served and served != flag:
-            logger.info(
-                "[%s] read live flag from container (%s) — overriding "
-                "sha256 prediction (%s)",
-                benchmark_id, served, flag,
-            )
-            flag = served
-            result["expected_flag"] = served
+        # Build the FULL candidate set the matcher will accept.
+        # Includes the sha256 prediction (``common.mk`` formula), the
+        # ``.env`` file's ``FLAG=`` value (what docker-compose autoload
+        # would inject when ``docker compose build`` ran directly), and
+        # the live container's actually-baked value (most authoritative
+        # when readable). Any one match counts as a capture. See
+        # :func:`expected_flag_candidates` for the full rationale.
+        #
+        # The "primary" candidate (for display + state["expected_flag"])
+        # is whichever the runner can confirm first — the live container
+        # read if available, else .env value, else sha256.
+        candidates = expected_flag_candidates(benchmark_id)
+        if candidates:
+            primary = candidates[0]
+            if primary != flag:
+                logger.info(
+                    "[%s] primary flag now %s (was sha256 prediction %s); "
+                    "full candidate set: %s",
+                    benchmark_id, primary, flag, candidates,
+                )
+            flag = primary
+            result["expected_flag"] = primary
+            result["expected_flag_candidates"] = candidates
 
         # Show the start-of-run boundary now that target_url is known.
         LIVE.bench_start(benchmark_id, result["target_url"], flag)
-        logger.info("[%s] target=%s expected_flag=%s run_dir=%s",
-                    benchmark_id, result["target_url"], flag, rdir)
+        logger.info(
+            "[%s] target=%s expected_flag=%s candidates=%s run_dir=%s",
+            benchmark_id, result["target_url"], flag, candidates, rdir,
+        )
 
         graph = build_graph()
         agent_state = await asyncio.wait_for(
@@ -373,6 +496,10 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
                 # to know the run has an explicit flag-extraction success
                 # criterion. Empty string in non-benchmark contexts.
                 "expected_flag": flag or "",
+                # Full candidate set the matcher accepts — flag_watcher,
+                # skill_runner, routing, and live observability all read
+                # this. See state.AgentState for the field docstring.
+                "expected_flag_candidates": candidates,
             }),
             timeout=RUN_TIMEOUT_S,
         )
@@ -396,7 +523,10 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         attempts = list(agent_state.get("submission_attempts") or [])
         result["submission_attempts"] = attempts
         submitted = attempts[-1].strip() if attempts else ""
-        if submitted and flags_match(submitted=submitted, expected=flag or ""):
+        # Match against the full candidate set, not just the "primary"
+        # display value — see :func:`expected_flag_candidates` for why
+        # the corpus has multiple legitimate flag values per benchmark.
+        if submitted and flags_match(submitted=submitted, expected=candidates or (flag,)):
             result["flag_found"] = True
             result["captured_flag"] = submitted
         else:
@@ -415,7 +545,12 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         from src.edges.flag_match import flags_match
         if is_captured():
             captured = get_captured_flag()
-            if captured and flags_match(submitted=captured, expected=flag or ""):
+            # Match against the full candidate set — see
+            # :func:`expected_flag_candidates`.
+            if captured and flags_match(
+                submitted=captured,
+                expected=result.get("expected_flag_candidates") or (flag,),
+            ):
                 result["flag_found"] = True
                 result["captured_flag"] = captured
                 result["submission_attempts"] = [captured]
@@ -607,6 +742,9 @@ async def main_async(args) -> int:
             error=r["error"],
             expected_flag=str(r.get("expected_flag") or ""),
             last_submission=last_submission,
+            expected_flag_candidates=tuple(
+                r.get("expected_flag_candidates") or ()
+            ),
         )
         LIVE.runner_message(f"           jsonl   → {path}")
 

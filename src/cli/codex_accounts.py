@@ -45,10 +45,17 @@ import sys
 import tempfile
 from pathlib import Path
 
-# The main login — left untouched. Display name is yours to set.
+# The main login — left untouched (whatever account is signed in here).
 CODEX_HOME = Path.home() / ".codex"
 MAIN = "main"
-MAIN_LABEL = "jolocorp"
+
+# Friendly names by ChatGPT account_id, so the main slot (~/.codex) shows
+# WHICH account is logged in regardless of which one it is. Extra accounts
+# are named by their directory instead. Add entries as you add accounts.
+ACCOUNT_NAMES = {
+    "90a0fb07-555d-436f-bfc7-6b5f6650db4a": "chainmatics",   # hello@chainmatics.net
+    "94fc52f7-e083-4f0d-bf1a-f9fe630b5efe": "jolocorp",      # zviadjolokhava@gmail.com
+}
 
 # Extra accounts live here, one CODEX_HOME dir each.
 ACCOUNTS_DIR = Path.home() / ".codex-accounts"
@@ -112,7 +119,13 @@ def order() -> list[str]:
 
 
 def display_name(name: str) -> str:
-    return f"{MAIN_LABEL} (main)" if name == MAIN else name
+    """Friendly label. The main slot is named by *which* account is signed
+    into ~/.codex (via ``ACCOUNT_NAMES``), falling back to ``main (~/.codex)``
+    for an unknown login. Extra accounts use their directory name."""
+    if name != MAIN:
+        return name
+    friendly = ACCOUNT_NAMES.get(account_id(MAIN) or "")
+    return f"{friendly} (main)" if friendly else "main (~/.codex)"
 
 
 def account_id(name: str) -> str | None:

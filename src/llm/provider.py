@@ -309,6 +309,19 @@ def get_llm(config: LLMConfig | None = None) -> BaseChatModel:
     if config.provider == Provider.CODEX:
         from src.llm.codex import CODEX_API_ENDPOINT, ChatCodex
 
+        # Guard against a stale account selection: if SWARM_CODEX_HOME points
+        # at a dir with no auth.json (e.g. an extra account that was removed),
+        # fall back to the default ~/.codex main login instead of crashing
+        # every worker with FileNotFoundError.
+        codex_home = config.codex_home
+        if codex_home and not os.path.exists(os.path.join(codex_home, "auth.json")):
+            logger.warning(
+                "SWARM_CODEX_HOME=%s has no auth.json — falling back to ~/.codex. "
+                "Stale account selection? Run `unset SWARM_CODEX_HOME`.",
+                codex_home,
+            )
+            codex_home = None
+
         _log_provider_diagnostic(config, CODEX_API_ENDPOINT)
         return ChatCodex(
             model=config.model,
@@ -318,7 +331,7 @@ def get_llm(config: LLMConfig | None = None) -> BaseChatModel:
             reasoning_summary=config.reasoning_summary,
             # None → ChatCodex defaults to ~/.codex (main login). Set only
             # when the TUI/env selected an extra account. See LLMConfig above.
-            codex_home=config.codex_home,
+            codex_home=codex_home,
         )
 
     raise ValueError(f"Unknown provider: {config.provider}")

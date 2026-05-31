@@ -148,15 +148,11 @@ def _top_level() -> str | None:
         else "Pentest all XBEN benchmarks  (submodule not initialised)"
     )
 
-    # TEMPORARY emergency Codex-account switcher. Only surfaces when at
-    # least one login snapshot exists in ~/.codex-accounts/. Fully additive
-    # — remove this block + the helpers below and the menu is unchanged.
-    accounts = codex_accounts.snapshots()
-
-    choices: list[Choice] = []
-    if accounts:
-        choices.append(Choice(_account_label(), value="__codex_switch__"))
-    choices += [
+    # TEMPORARY emergency Codex-account switcher row. Always shown (the main
+    # login always exists); Tab cycles main → extra accounts. Fully additive
+    # — remove this row + the helpers below and the menu is unchanged.
+    choices: list[Choice] = [
+        Choice(_account_label(), value="__codex_switch__"),
         Choice("xbow benchmark  (pick one or queue several to run in order)",    value="xbow"),
         Choice("Pentest first 5 patched (XBEN-001 to 005, bit-rot fixes first)", value="first5_patched"),
         Choice("Pentest 15 containers (daily, compact)",                         value="daily_compact"),
@@ -166,18 +162,13 @@ def _top_level() -> str | None:
         Choice("Quit",                                                           value="quit"),
     ]
 
-    instruction = "(use ↑/↓, enter to confirm, Ctrl-C to quit)"
-    if accounts:
-        instruction += "  ·  Tab: switch Codex account"
-
     question = questionary.select(
         "What do you want to do?",
         choices=choices,
         use_shortcuts=False,
-        instruction=instruction,
+        instruction="(use ↑/↓, enter to confirm, Ctrl-C to quit)  ·  Tab: switch Codex account",
     )
-    if accounts:
-        _bind_account_tab(question)
+    _bind_account_tab(question)
     return question.ask()
 
 
@@ -186,23 +177,27 @@ def _top_level() -> str | None:
 # ---------------------------------------------------------------------------
 
 def _account_label() -> list[tuple[str, str]]:
-    """Title for the Codex-account row — active account + saved set.
+    """Title for the Codex-account row — selected account + the cycle set.
 
     Rebuilt live on every Tab press (see :func:`_bind_account_tab`) so the
-    user always sees which OAuth token the next run will use.
+    user always sees which OAuth token the next run will use. The account_id
+    tail disambiguates even before the main login is renamed.
     """
-    names = codex_accounts.snapshots()
-    act = codex_accounts.active()
+    sel = codex_accounts.selected()
+    names = codex_accounts.order()
     segs: list[tuple[str, str]] = [("fg:ansiyellow bold", "🔑 Codex account: ")]
-    if act:
-        segs.append(("fg:ansibrightcyan bold", act))
-    else:
-        segs.append(("fg:ansired", "(current login not saved)"))
+    segs.append(("fg:ansibrightcyan bold", codex_accounts.display_name(sel)))
+    acc = codex_accounts.account_id(sel)
+    if acc:
+        segs.append(("fg:ansibrightblack", f"  …{acc[-6:]}"))
     if len(names) >= 2:
         segs.append(("", "   ·  Tab/enter to switch  "))
-        segs.append(("fg:ansibrightblack", "[" + " · ".join(names) + "]"))
-    elif len(names) == 1:
-        segs.append(("fg:ansibrightblack", "   ·  capture the other account to enable switching"))
+        segs.append((
+            "fg:ansibrightblack",
+            "[" + " · ".join(codex_accounts.display_name(n) for n in names) + "]",
+        ))
+    else:
+        segs.append(("fg:ansibrightblack", "   ·  (no extra accounts yet — capture one)"))
     return segs
 
 

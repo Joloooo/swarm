@@ -1,0 +1,114 @@
+"""Persistent ✓/✗ triage marks for the ``swarm`` benchmark picker.
+
+The single-container picker (:func:`src.cli.tui._pick_bench`) shows a
+green ✓ or red ✗ next to each XBEN id so you can see at a glance which
+benchmarks SwarmAttacker has cleared. Those marks are *manual triage
+state* — you set them yourself as you review runs by pressing ``t`` in
+the picker to cycle the highlighted row through ✓ → ✗ → no-mark.
+
+State lives in ``benchmarks/bench_results.json`` (a flat
+``{bench_id: status}`` map) rather than a hard-coded dict, so toggles
+made in the TUI survive a restart. Status is one of:
+
+  ``"ok"``   → green ✓  (flag captured / run succeeded)
+  ``"fail"`` → red   ✗  (run failed / no flag)
+  *(absent)* → no mark yet
+
+Writes are atomic (``tmp`` + ``fsync`` + ``os.replace``) for the same
+reason as :func:`src.cli.config_store.save`: the Thesis repo can live
+on a Drive-backed path where a bare rename races the async sync.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+# Status values. Absence of a key == "no mark yet".
+OK = "ok"
+FAIL = "fail"
+
+# Cycle order when the user presses ``t`` on a row:
+# nothing → ✓ → ✗ → nothing.
+_CYCLE: dict[str | None, str | None] = {
+    None: OK,
+    OK: FAIL,
+    FAIL: None,
+}
+
+# Seed written the first time the JSON file does not exist — mirrors the
+# values that used to live in the hard-coded ``_BENCH_RESULT`` dict in
+# ``tui.py`` so existing triage isn't lost on upgrade.
+_SEED: dict[str, str] = {
+    "XBEN-001-24": OK,
+    "XBEN-002-24": FAIL,
+    "XBEN-003-24": OK,
+    "XBEN-004-24": FAIL,
+    "XBEN-005-24": OK,
+    "XBEN-006-24": OK,
+}
+
+
+def path() -> Path:
+    """Return ``SwarmAttacker/benchmarks/bench_results.json``.
+
+    Resolved from this file's location so it's stable regardless of the
+    user's working directory (mirrors :func:`config_store.path`).
+    """
+    # src/cli/bench_results.py → parents[2] is the SwarmAttacker root.
+    return Path(__file__).resolve().parents[2] / "benchmarks" / "bench_results.json"
+
+
+def load() -> dict[str, str]:
+    """Read the triage map. Seeds the file on first run; never raises.
+
+    A missing file writes and returns the seed. A corrupt file is
+    reported to stderr and falls back to the seed so a bad hand-edit
+    can't brick the picker. Unknown status values are dropped.
+    """
+    p = path()
+    if not p.exists():
+        save(dict(_SEED))
+        return dict(_SEED)
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"warning: failed to parse {p.name}: {exc}", file=sys.stderr)
+        return dict(_SEED)
+    # Keep only known statuses; silently drop anything stale/invalid.
+    return {k: v for k, v in data.items() if v in (OK, FAIL)}
+
+
+def save(results: dict[str, str]) -> None:
+    """Persist the triage map atomically (``tmp`` + ``fsync`` + replace).
+
+    Keys are sorted so the on-disk file diffs cleanly and is easy to
+    scan or hand-edit.
+    """
+    p = path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(dict(sorted(results.items())), indent=2) + "\n"
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        # fsync before replace — see module docstring (Drive-backed path).
+        os.fsync(f.fileno())
+    os.replace(tmp, p)
+
+
+def cycle(results: dict[str, str], bench_id: str) -> str | None:
+    """Advance ``bench_id`` to its next status in place and return it.
+
+    nothing → ``ok`` → ``fail`` → nothing. When cycling back to "no
+    mark" the key is removed, so absence stays the single source of
+    truth for an unmarked benchmark.
+    """
+    nxt = _CYCLE[results.get(bench_id)]
+    if nxt is None:
+        results.pop(bench_id, None)
+    else:
+        results[bench_id] = nxt
+    return nxt

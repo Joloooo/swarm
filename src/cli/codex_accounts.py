@@ -1,30 +1,38 @@
-"""TEMPORARY / EMERGENCY — switch the active Codex login between accounts.
+"""TEMPORARY / EMERGENCY — pick which Codex account the next run uses.
 
-This is an on-the-side helper, **not** a core feature. It deliberately does
-NOT touch the token/provider code in ``src/llm/`` (``codex.py`` /
-``provider.py``). It works purely by swapping the one file the Codex client
-already reads at run start::
+This is an on-the-side helper, **not** a core feature. It never touches the
+main login and never overwrites ``~/.codex/auth.json``.
 
-    ~/.codex/auth.json          ← the "live" login (what ChatCodex loads)
+Model
+-----
+* **main**  — the normal login at ``~/.codex/auth.json`` (e.g. *jolocorp*).
+  This is the DEFAULT and is left completely untouched. When no extra
+  account is selected, the swarm behaves exactly as before.
+* **extra accounts** — full ``auth.json`` copies kept OUTSIDE the repo, one
+  self-contained CODEX_HOME directory per account::
 
-Per-account full copies of that file are kept OUTSIDE the repo, because they
-contain OAuth access + refresh tokens::
+      ~/.codex-accounts/<name>/auth.json
 
-    ~/.codex-accounts/<name>.json
+Switching does **not** move any files. It just sets/clears one env var::
 
-Switching = atomically copy a snapshot over ``~/.codex/auth.json``. The next
-``swarm`` run is a fresh subprocess whose ``load_tokens()`` reads the swapped
-file, so it picks up the new account with zero changes to the agent code.
+      SWARM_CODEX_HOME = ""                              → main (~/.codex)
+      SWARM_CODEX_HOME = ~/.codex-accounts/<name>        → that extra account
 
-To fully revert: delete this module, drop the Tab hook in ``tui.py``, and
-remove ``~/.codex-accounts/``. Nothing else depends on it.
+A ``swarm`` run is a fresh subprocess that inherits this env
+(``runner._spawn`` passes ``env=os.environ.copy()``); ``LLMConfig`` reads
+``SWARM_CODEX_HOME`` and hands it to ``ChatCodex(codex_home=...)``, whose
+``load_tokens`` reads ``<home>/auth.json``. Unset → ``~/.codex`` → main.
 
-CLI usage (handy for capturing a login after signing into it)::
+To fully revert: delete this module + the Tab hook in ``tui.py`` + the
+``codex_home`` field in ``src/llm/provider.py``, and remove
+``~/.codex-accounts/``. The default path is unchanged either way.
+
+CLI::
 
     uv run python -m src.cli.codex_accounts list
-    uv run python -m src.cli.codex_accounts active
-    uv run python -m src.cli.codex_accounts capture jolocorp
-    uv run python -m src.cli.codex_accounts switch  hello-chainmatics
+    uv run python -m src.cli.codex_accounts selected
+    uv run python -m src.cli.codex_accounts capture <name>   # add an extra account
+    uv run python -m src.cli.codex_accounts select  <name>   # or 'main'
     uv run python -m src.cli.codex_accounts cycle
 """
 
@@ -37,28 +45,27 @@ import sys
 import tempfile
 from pathlib import Path
 
+# The main login — left untouched. Display name is yours to set.
 CODEX_HOME = Path.home() / ".codex"
-LIVE = CODEX_HOME / "auth.json"
-SNAP_DIR = Path.home() / ".codex-accounts"
+MAIN = "main"
+MAIN_LABEL = "jolocorp"
 
-# Display / cycle order. Names not present on disk are skipped, and any
-# extra snapshots found on disk are appended (sorted) after these.
-PREFERRED_ORDER = ["jolocorp", "hello-chainmatics"]
+# Extra accounts live here, one CODEX_HOME dir each.
+ACCOUNTS_DIR = Path.home() / ".codex-accounts"
+
+# The env var the provider reads to redirect ChatCodex at an extra account.
+ENV_VAR = "SWARM_CODEX_HOME"
 
 
 # ---------------------------------------------------------------------------
 # Token introspection (read-only; never prints secrets)
 # ---------------------------------------------------------------------------
 
-def _account_id(path: Path) -> str | None:
-    """Return the ChatGPT account id stored in an auth.json, or None.
-
-    Prefers the explicit ``tokens.account_id`` field; falls back to the
-    ``chatgpt_account_id`` claim inside the (unverified) access-token JWT —
-    same resolution order as ``src.llm.codex.load_tokens``.
-    """
+def _account_id_of(auth_file: Path) -> str | None:
+    """ChatGPT account id from an auth.json, or None. Mirrors the resolution
+    order in ``src.llm.codex.load_tokens`` (explicit field, then JWT claim)."""
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(auth_file.read_text())
     except (OSError, json.JSONDecodeError):
         return None
     tokens = data.get("tokens") or {}
@@ -71,59 +78,112 @@ def _account_id(path: Path) -> str | None:
     try:
         padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
         claims = json.loads(base64.urlsafe_b64decode(padded))
-    except Exception:  # noqa: BLE001 — malformed token → just "unknown"
+    except Exception:  # noqa: BLE001 — malformed token → "unknown"
         return None
-    auth = claims.get("https://api.openai.com/auth") or {}
-    return auth.get("chatgpt_account_id") or None
+    return (claims.get("https://api.openai.com/auth") or {}).get("chatgpt_account_id") or None
 
 
 # ---------------------------------------------------------------------------
-# Snapshot inventory
+# Inventory
 # ---------------------------------------------------------------------------
 
-def snapshots() -> list[str]:
-    """Names of saved accounts (``~/.codex-accounts/<name>.json``).
+def home_for(name: str) -> Path:
+    """CODEX_HOME directory for an account name (``main`` → ``~/.codex``)."""
+    return CODEX_HOME if name == MAIN else ACCOUNTS_DIR / name
 
-    Ordered by ``PREFERRED_ORDER`` first, then any extras alphabetically.
-    """
-    if not SNAP_DIR.is_dir():
+
+def _auth_file(name: str) -> Path:
+    return home_for(name) / "auth.json"
+
+
+def extra() -> list[str]:
+    """Names of saved extra accounts (subdirs with an auth.json), sorted."""
+    if not ACCOUNTS_DIR.is_dir():
         return []
-    names = {p.stem for p in SNAP_DIR.glob("*.json")}
-    ordered = [n for n in PREFERRED_ORDER if n in names]
-    ordered += sorted(names - set(ordered))
-    return ordered
+    return sorted(
+        p.name for p in ACCOUNTS_DIR.iterdir()
+        if p.is_dir() and (p / "auth.json").is_file()
+    )
 
 
-def active() -> str | None:
-    """Name of the snapshot whose account matches the live ``auth.json``.
+def order() -> list[str]:
+    """Cycle order: main first, then extra accounts alphabetically."""
+    return [MAIN, *extra()]
 
-    Returns None if there is no live login, or the live login hasn't been
-    captured as a snapshot yet (a useful cue to ``capture`` it).
+
+def display_name(name: str) -> str:
+    return f"{MAIN_LABEL} (main)" if name == MAIN else name
+
+
+def account_id(name: str) -> str | None:
+    return _account_id_of(_auth_file(name))
+
+
+# ---------------------------------------------------------------------------
+# Selection (env var only — no files are moved)
+# ---------------------------------------------------------------------------
+
+def selected() -> str:
+    """Currently-selected account for the NEXT run.
+
+    Reads ``SWARM_CODEX_HOME``: unset/empty → main; a path that matches a
+    saved extra account → that name; anything else → main (safe fallback).
     """
-    if not LIVE.exists():
-        return None
-    live_id = _account_id(LIVE)
-    if not live_id:
-        return None
-    for name in snapshots():
-        if _account_id(SNAP_DIR / f"{name}.json") == live_id:
+    raw = os.environ.get(ENV_VAR, "").strip()
+    if not raw:
+        return MAIN
+    chosen = Path(raw)
+    for name in extra():
+        if home_for(name) == chosen:
             return name
-    return None
+    return MAIN
+
+
+def select(name: str) -> None:
+    """Choose which account the next run uses. ``main`` clears the override."""
+    if name == MAIN:
+        os.environ.pop(ENV_VAR, None)
+    else:
+        os.environ[ENV_VAR] = str(home_for(name))
+
+
+def cycle() -> str:
+    """Advance the selection to the next account, round-robin. Returns it.
+
+    No-op (returns current) when there are no extra accounts to cycle to.
+    """
+    names = order()
+    if len(names) < 2:
+        return selected()
+    cur = selected()
+    nxt = names[(names.index(cur) + 1) % len(names)] if cur in names else MAIN
+    select(nxt)
+    return nxt
 
 
 # ---------------------------------------------------------------------------
-# Mutations (atomic file swaps, 0600 perms, fsync for Drive-backed homes)
+# Capture an extra account (atomic, 0600, fsync for Drive-backed homes)
 # ---------------------------------------------------------------------------
+
+def capture(name: str) -> Path:
+    """Save the current live ``~/.codex/auth.json`` as extra account ``name``.
+
+    Used when you've signed into an *additional* account and want to register
+    it for switching. Never used for the main login. Refuses ``main``.
+    """
+    if name == MAIN:
+        raise ValueError("refusing to capture over the main login name")
+    live = CODEX_HOME / "auth.json"
+    if not live.exists():
+        raise FileNotFoundError(f"No live login at {live}. Sign in with `codex` first.")
+    dst = ACCOUNTS_DIR / name / "auth.json"
+    _atomic_copy(live, dst)
+    return dst
+
 
 def _atomic_copy(src: Path, dst: Path) -> None:
-    """Copy ``src`` → ``dst`` atomically with 0600 perms.
-
-    Writes a temp file in the destination dir, fsyncs it, then
-    ``os.replace`` (atomic on POSIX) so a half-written auth.json can never
-    be observed by a concurrently-starting run.
-    """
     data = src.read_bytes()
-    dst.parent.mkdir(mode=0o700, exist_ok=True)
+    dst.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(dst.parent), prefix=".tmp-auth-")
     try:
         with os.fdopen(fd, "wb") as f:
@@ -132,45 +192,10 @@ def _atomic_copy(src: Path, dst: Path) -> None:
             os.fsync(f.fileno())
         os.chmod(tmp, 0o600)
         os.replace(tmp, dst)
-        tmp = ""  # replaced — nothing to clean up
+        tmp = ""
     finally:
         if tmp and os.path.exists(tmp):
             os.unlink(tmp)
-
-
-def capture(name: str) -> Path:
-    """Save the current live login as snapshot ``name``; return its path."""
-    if not LIVE.exists():
-        raise FileNotFoundError(
-            f"No live login at {LIVE}. Run `codex` and sign in first."
-        )
-    dst = SNAP_DIR / f"{name}.json"
-    _atomic_copy(LIVE, dst)
-    return dst
-
-
-def switch_to(name: str) -> bool:
-    """Make snapshot ``name`` the live login. False if it doesn't exist."""
-    src = SNAP_DIR / f"{name}.json"
-    if not src.exists():
-        return False
-    _atomic_copy(src, LIVE)
-    return True
-
-
-def cycle() -> str | None:
-    """Switch the live login to the next saved account, round-robin.
-
-    No-op (returns the current active name) when fewer than two snapshots
-    exist. Returns the newly-active account name on success.
-    """
-    names = snapshots()
-    if len(names) < 2:
-        return active()
-    cur = active()
-    nxt = names[(names.index(cur) + 1) % len(names)] if cur in names else names[0]
-    switch_to(nxt)
-    return nxt
 
 
 # ---------------------------------------------------------------------------
@@ -181,44 +206,42 @@ def _main(argv: list[str]) -> int:
     cmd = argv[0] if argv else "list"
 
     if cmd == "list":
-        names = snapshots()
-        act = active()
-        if not names:
-            print(f"(no snapshots in {SNAP_DIR})")
-            return 0
-        for n in names:
-            acc = _account_id(SNAP_DIR / f"{n}.json") or "?"
-            mark = " *active*" if n == act else ""
-            print(f"  {n:<20s} account_id=…{acc[-12:]}{mark}")
-        if act is None:
-            print("  (live login is not one of the saved snapshots)")
+        sel = selected()
+        for name in order():
+            acc = account_id(name) or "?"
+            mark = " *selected*" if name == sel else ""
+            print(f"  {display_name(name):<22s} account_id=…{acc[-12:]}{mark}")
+        if not extra():
+            print(f"  (no extra accounts in {ACCOUNTS_DIR} — use `capture <name>`)")
         return 0
 
-    if cmd == "active":
-        print(active() or "(unknown / not captured)")
+    if cmd == "selected":
+        print(display_name(selected()))
         return 0
 
     if cmd == "capture":
         if len(argv) < 2:
             print("usage: capture <name>", file=sys.stderr)
             return 2
-        path = capture(argv[1])
-        print(f"captured live login → {path}")
+        print(f"captured live login → {capture(argv[1])}")
         return 0
 
-    if cmd == "switch":
+    if cmd == "select":
         if len(argv) < 2:
-            print("usage: switch <name>", file=sys.stderr)
+            print("usage: select <name|main>", file=sys.stderr)
             return 2
-        if switch_to(argv[1]):
-            print(f"live login is now: {argv[1]}")
-            return 0
-        print(f"no snapshot named {argv[1]!r} in {SNAP_DIR}", file=sys.stderr)
-        return 1
+        name = argv[1]
+        if name != MAIN and name not in extra():
+            print(f"unknown account {name!r}. known: {', '.join(order())}", file=sys.stderr)
+            return 1
+        select(name)
+        # NOTE: this only affects the current process. The TUI sets it live;
+        # from a shell, `export SWARM_CODEX_HOME=...` is the persistent form.
+        print(f"selected: {display_name(name)}  ({ENV_VAR}={os.environ.get(ENV_VAR, '<unset → main>')})")
+        return 0
 
     if cmd == "cycle":
-        new = cycle()
-        print(f"live login is now: {new or '(unknown)'}")
+        print(f"selected: {display_name(cycle())}")
         return 0
 
     print(__doc__)

@@ -31,9 +31,17 @@ from typing import Any
 
 import questionary
 from questionary import Choice
+from questionary.prompts.common import InquirerControl
 from rich.console import Console
 
-from src.cli import banner, bench_discovery, config_store, docker_boot, runner
+from src.cli import (
+    banner,
+    bench_discovery,
+    bench_results,
+    config_store,
+    docker_boot,
+    runner,
+)
 from src.cli.bench_discovery import count_all
 
 
@@ -45,20 +53,10 @@ _console = Console(stderr=True)
 # XBEN catalogue.
 _PICKER_LIMIT = 50
 
-# Manually-maintained record of the most recent SwarmAttacker run per
-# benchmark. Edit this dict as you triage runs — it drives the ✓/✗
-# marks shown next to each id in the picker. Missing keys render as
-# "no mark yet".
-#   "ok"   → green ✓ (flag captured / run succeeded)
-#   "fail" → red   ✗ (run failed / no flag)
-_BENCH_RESULT: dict[str, str] = {
-    "XBEN-001-24": "ok",
-    "XBEN-002-24": "fail",
-    "XBEN-003-24": "ok",
-    "XBEN-004-24": "fail",
-    "XBEN-005-24": "ok",
-    "XBEN-006-24": "ok",
-}
+# The ✓/✗ marks next to each benchmark are *manual triage state* — you
+# set them yourself by pressing ``t`` in the picker to cycle the
+# highlighted row through ✓ → ✗ → no-mark. They persist in
+# ``benchmarks/bench_results.json`` via :mod:`src.cli.bench_results`.
 
 
 # ---------------------------------------------------------------------------
@@ -165,9 +163,11 @@ def _pick_bench() -> str | None:
     """Ask the user which benchmark to run.
 
     Lists the first ``_PICKER_LIMIT`` XBEN benchmarks (sorted by id)
-    and annotates each with the manual ✓/✗ mark from
-    ``_BENCH_RESULT``. Returns the chosen id, or ``None`` if the user
-    backed out (Ctrl-C / "Back") or the submodule is missing.
+    and annotates each with its manual ✓/✗ triage mark (loaded from
+    ``benchmarks/bench_results.json``). Pressing ``t`` on a row cycles
+    that mark ✓ → ✗ → none and saves it — see :func:`_bind_toggle`.
+    Returns the chosen id, or ``None`` if the user backed out (Ctrl-C /
+    "Back") or the submodule is missing.
     """
     ids = bench_discovery.list_ids(limit=_PICKER_LIMIT)
     if not ids:
@@ -178,16 +178,21 @@ def _pick_bench() -> str | None:
         )
         return None
 
+    results = bench_results.load()
     choices = [
-        Choice(title=_bench_label(bench_id), value=bench_id) for bench_id in ids
+        Choice(title=_bench_label(bench_id, results.get(bench_id)), value=bench_id)
+        for bench_id in ids
     ]
     choices.append(Choice("← Back", value="__back__"))
 
-    picked = questionary.select(
+    question = questionary.select(
         "Which container do you want to pentest?",
         choices=choices,
-        instruction="(↑/↓, enter to run, Ctrl-C to go back)",
-    ).ask()
+        instruction="(↑/↓, enter to run, t to mark ✓/✗, Ctrl-C to go back)",
+    )
+    _bind_toggle(question, results)
+
+    picked = question.ask()
     if picked is None or picked == "__back__":
         return None
     return picked
@@ -196,15 +201,48 @@ def _pick_bench() -> str | None:
 # prompt_toolkit formatted-text segments. questionary.Choice.title
 # accepts a list of (style, text) tuples; we use that to colour the
 # ✓ / ✗ mark while leaving the benchmark id in the terminal default.
-def _bench_label(bench_id: str) -> list[tuple[str, str]]:
-    result = _BENCH_RESULT.get(bench_id)
-    if result == "ok":
+def _bench_label(bench_id: str, result: str | None) -> list[tuple[str, str]]:
+    if result == bench_results.OK:
         mark = ("fg:ansigreen bold", "✓")
-    elif result == "fail":
+    elif result == bench_results.FAIL:
         mark = ("fg:ansired bold", "✗")
     else:
         mark = ("", " ")
     return [mark, ("", f"  {bench_id}")]
+
+
+def _bind_toggle(question: questionary.Question, results: dict[str, str]) -> None:
+    """Wire ``t`` in the picker to cycle the highlighted row's ✓/✗ mark.
+
+    ``questionary.select`` builds a prompt_toolkit ``Application`` but
+    exposes no hook for extra key bindings, so we reach into the
+    finished app: locate its ``InquirerControl`` (the control that
+    renders the rows), then register ``t`` to cycle the pointed-at
+    benchmark through nothing → ✓ → ✗, persist the change, and rewrite
+    that row's title so the new mark shows immediately. The ``← Back``
+    row (and any non-benchmark value) is ignored.
+
+    ``t`` is free here: the picker uses default ``use_jk_keys`` (only
+    ``j``/``k`` are bound for navigation) and no search filter, so the
+    binding can't collide with movement or typing.
+    """
+    app = question.application
+    ic = next(
+        c
+        for c in app.layout.find_all_controls()
+        if isinstance(c, InquirerControl)
+    )
+
+    @app.key_bindings.add("t", eager=True)
+    def _toggle(event) -> None:  # noqa: ANN001 (prompt_toolkit event)
+        choice = ic.get_pointed_at()
+        bench_id = choice.value
+        if bench_id == "__back__":
+            return
+        bench_results.cycle(results, bench_id)
+        bench_results.save(results)
+        choice.title = _bench_label(bench_id, results.get(bench_id))
+        event.app.invalidate()
 
 
 # ---------------------------------------------------------------------------

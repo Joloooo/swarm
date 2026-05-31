@@ -38,6 +38,7 @@ from src.cli import (
     banner,
     bench_discovery,
     bench_results,
+    codex_accounts,
     config_store,
     docker_boot,
     runner,
@@ -81,13 +82,22 @@ def main_loop(args: argparse.Namespace) -> None:
             _console.print("[dim]👋 bye[/dim]")
             return
 
-        if action == "one":
-            bench_id = _pick_bench()
-            if bench_id is None:
+        # TEMPORARY emergency affordance: Enter (or Tab) on the Codex-account
+        # row cycles the live login. Re-loop so the menu redraws with the new
+        # active account. See _bind_account_tab / src.cli.codex_accounts.
+        if action == "__codex_switch__":
+            new = codex_accounts.cycle()
+            if new:
+                _console.print(f"[cyan]🔑 Codex account → {new}[/cyan]")
+            continue
+
+        if action == "xbow":
+            run_list = _pick_bench()
+            if not run_list:
                 continue
             if not _ensure_docker(args):
                 continue
-            runner.run_one(bench_id)
+            runner.run_queue(run_list)
         elif action == "first5_patched":
             if not _ensure_docker(args):
                 continue
@@ -138,8 +148,16 @@ def _top_level() -> str | None:
         else "Pentest all XBEN benchmarks  (submodule not initialised)"
     )
 
-    choices = [
-        Choice("Pentest 1 container",                                            value="one"),
+    # TEMPORARY emergency Codex-account switcher. Only surfaces when at
+    # least one login snapshot exists in ~/.codex-accounts/. Fully additive
+    # — remove this block + the helpers below and the menu is unchanged.
+    accounts = codex_accounts.snapshots()
+
+    choices: list[Choice] = []
+    if accounts:
+        choices.append(Choice(_account_label(), value="__codex_switch__"))
+    choices += [
+        Choice("xbow benchmark  (pick one or queue several to run in order)",    value="xbow"),
         Choice("Pentest first 5 patched (XBEN-001 to 005, bit-rot fixes first)", value="first5_patched"),
         Choice("Pentest 15 containers (daily, compact)",                         value="daily_compact"),
         Choice("Pentest 15 containers (daily, silent)",                          value="daily_silent"),
@@ -147,27 +165,107 @@ def _top_level() -> str | None:
         Choice("Edit config",                                                    value="config"),
         Choice("Quit",                                                           value="quit"),
     ]
-    return questionary.select(
+
+    instruction = "(use ↑/↓, enter to confirm, Ctrl-C to quit)"
+    if accounts:
+        instruction += "  ·  Tab: switch Codex account"
+
+    question = questionary.select(
         "What do you want to do?",
         choices=choices,
         use_shortcuts=False,
-        instruction="(use ↑/↓, enter to confirm, Ctrl-C to quit)",
-    ).ask()
+        instruction=instruction,
+    )
+    if accounts:
+        _bind_account_tab(question)
+    return question.ask()
+
+
+# ---------------------------------------------------------------------------
+# TEMPORARY emergency Codex-account switcher (Tab on the top-level menu)
+# ---------------------------------------------------------------------------
+
+def _account_label() -> list[tuple[str, str]]:
+    """Title for the Codex-account row — active account + saved set.
+
+    Rebuilt live on every Tab press (see :func:`_bind_account_tab`) so the
+    user always sees which OAuth token the next run will use.
+    """
+    names = codex_accounts.snapshots()
+    act = codex_accounts.active()
+    segs: list[tuple[str, str]] = [("fg:ansiyellow bold", "🔑 Codex account: ")]
+    if act:
+        segs.append(("fg:ansibrightcyan bold", act))
+    else:
+        segs.append(("fg:ansired", "(current login not saved)"))
+    if len(names) >= 2:
+        segs.append(("", "   ·  Tab/enter to switch  "))
+        segs.append(("fg:ansibrightblack", "[" + " · ".join(names) + "]"))
+    elif len(names) == 1:
+        segs.append(("fg:ansibrightblack", "   ·  capture the other account to enable switching"))
+    return segs
+
+
+def _bind_account_tab(question: questionary.Question) -> None:
+    """Bind Tab on the top-level menu to cycle the active Codex account.
+
+    Swaps ~/.codex/auth.json between the snapshots in ~/.codex-accounts/
+    via :mod:`src.cli.codex_accounts`, then rebuilds the account row's
+    label and redraws — so switching happens without leaving the menu.
+    Mirrors the reach-into-the-app pattern used by :func:`_bind_keys`.
+    """
+    app = question.application
+    ic = next(
+        c
+        for c in app.layout.find_all_controls()
+        if isinstance(c, InquirerControl)
+    )
+
+    @app.key_bindings.add("tab", eager=True)
+    def _switch(event) -> None:  # noqa: ANN001 (prompt_toolkit event)
+        codex_accounts.cycle()
+        for choice in ic.choices:
+            if choice.value == "__codex_switch__":
+                choice.title = _account_label()
+        app.invalidate()
 
 
 # ---------------------------------------------------------------------------
 # Single-benchmark picker
 # ---------------------------------------------------------------------------
 
-def _pick_bench() -> str | None:
-    """Ask the user which benchmark to run.
+# Multi-line key legend shown under the question. questionary renders
+# the ``instruction`` string as part of the prompt block (above the
+# rows) and redraws it every frame, so a bulleted block here stays
+# visible and pinned to the question no matter how the list scrolls.
+_PICKER_LEGEND = (
+    "\n"
+    "   • ↑/↓      move\n"
+    "   • r        queue / unqueue  →  runs 1st, 2nd, 3rd … in that order\n"
+    "   • t        mark result  →  ✓ ok · ✗ fail · none\n"
+    "   • enter    run the queue  (or just the highlighted row if nothing is queued)\n"
+    "   • Ctrl-C   back"
+)
 
-    Lists the first ``_PICKER_LIMIT`` XBEN benchmarks (sorted by id)
-    and annotates each with its manual ✓/✗ triage mark (loaded from
-    ``benchmarks/bench_results.json``). Pressing ``t`` on a row cycles
-    that mark ✓ → ✗ → none and saves it — see :func:`_bind_toggle`.
-    Returns the chosen id, or ``None`` if the user backed out (Ctrl-C /
-    "Back") or the submodule is missing.
+
+def _pick_bench() -> list[str] | None:
+    """Let the user pick one benchmark — or queue several to run in order.
+
+    Lists the first ``_PICKER_LIMIT`` XBEN benchmarks (sorted by id),
+    each annotated with its manual ✓/✗ triage mark (from
+    ``benchmarks/bench_results.json``). Two keys act on the highlighted
+    row (see :func:`_bind_keys`):
+
+      ``t`` — cycle the result mark ✓ → ✗ → none (persisted).
+      ``r`` — add / remove the benchmark from an ordered run queue,
+              shown as a green ``▸ 1st run`` / ``▸ 2nd run`` suffix.
+
+    Returns the ordered list of benchmark ids to run:
+
+      * a non-empty queue → that queue, in the order it was built;
+      * an empty queue    → just the highlighted row at ``enter``;
+      * ``None``          → the user backed out (Ctrl-C / "Back") or
+                            the submodule is missing.
     """
     ids = bench_discovery.list_ids(limit=_PICKER_LIMIT)
     if not ids:
@@ -179,52 +277,82 @@ def _pick_bench() -> str | None:
         return None
 
     results = bench_results.load()
+    queue: list[str] = []  # ordered run queue, built live with ``r``.
+
     choices = [
-        Choice(title=_bench_label(bench_id, results.get(bench_id)), value=bench_id)
+        Choice(title=_bench_label(bench_id, results.get(bench_id), None), value=bench_id)
         for bench_id in ids
     ]
     choices.append(Choice("← Back", value="__back__"))
 
     question = questionary.select(
-        "Which container do you want to pentest?",
+        "Which benchmark(s) do you want to run?",
         choices=choices,
-        instruction="(↑/↓, enter to run, t to mark ✓/✗, Ctrl-C to go back)",
+        instruction=_PICKER_LEGEND,
     )
-    _bind_toggle(question, results)
+    _bind_keys(question, results, queue)
 
     picked = question.ask()
     if picked is None or picked == "__back__":
         return None
-    return picked
+    return list(queue) if queue else [picked]
+
+
+def _ordinal(n: int) -> str:
+    """1 → ``1st``, 2 → ``2nd``, 3 → ``3rd``, 4 → ``4th``, 11 → ``11th`` …"""
+    if 10 <= (n % 100) <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
 
 
 # prompt_toolkit formatted-text segments. questionary.Choice.title
 # accepts a list of (style, text) tuples; we use that to colour the
-# ✓ / ✗ mark while leaving the benchmark id in the terminal default.
-def _bench_label(bench_id: str, result: str | None) -> list[tuple[str, str]]:
+# ✓ / ✗ result mark and the green run-order suffix while leaving the
+# benchmark id in the terminal default.
+def _bench_label(
+    bench_id: str, result: str | None, queue_pos: int | None
+) -> list[tuple[str, str]]:
     if result == bench_results.OK:
         mark = ("fg:ansigreen bold", "✓")
     elif result == bench_results.FAIL:
         mark = ("fg:ansired bold", "✗")
     else:
         mark = ("", " ")
-    return [mark, ("", f"  {bench_id}")]
+    segments = [mark, ("", f"  {bench_id}")]
+    if queue_pos is not None:
+        segments.append(("fg:ansibrightgreen bold", f"   ▸ {_ordinal(queue_pos)} run"))
+    return segments
 
 
-def _bind_toggle(question: questionary.Question, results: dict[str, str]) -> None:
-    """Wire ``t`` in the picker to cycle the highlighted row's ✓/✗ mark.
+def _bind_keys(
+    question: questionary.Question,
+    results: dict[str, str],
+    queue: list[str],
+) -> None:
+    """Wire ``t`` (cycle result mark) and ``r`` (queue / unqueue) into the picker.
 
     ``questionary.select`` builds a prompt_toolkit ``Application`` but
     exposes no hook for extra key bindings, so we reach into the
     finished app: locate its ``InquirerControl`` (the control that
-    renders the rows), then register ``t`` to cycle the pointed-at
-    benchmark through nothing → ✓ → ✗, persist the change, and rewrite
-    that row's title so the new mark shows immediately. The ``← Back``
-    row (and any non-benchmark value) is ignored.
+    renders the rows), then register the two keys against the
+    pointed-at benchmark.
 
-    ``t`` is free here: the picker uses default ``use_jk_keys`` (only
-    ``j``/``k`` are bound for navigation) and no search filter, so the
-    binding can't collide with movement or typing.
+      ``t`` cycles the result mark nothing → ✓ → ✗ and persists it to
+            ``bench_results.json``.
+      ``r`` appends the benchmark to ``queue`` (or removes it if already
+            queued); the queue's order is the run order.
+
+    After either key, every benchmark row's title is rebuilt from
+    current state — necessary because removing a queued benchmark
+    renumbers all the rows after it. The ``← Back`` row (and any
+    non-benchmark value) is ignored.
+
+    ``t`` / ``r`` are free here: the picker uses default
+    ``use_jk_keys`` (only ``j``/``k`` are bound for navigation) and no
+    search filter, so the bindings can't collide with movement or
+    typing.
     """
     app = question.application
     ic = next(
@@ -233,16 +361,34 @@ def _bind_toggle(question: questionary.Question, results: dict[str, str]) -> Non
         if isinstance(c, InquirerControl)
     )
 
+    def _refresh() -> None:
+        for choice in ic.choices:
+            bench_id = choice.value
+            if bench_id == "__back__":
+                continue
+            pos = queue.index(bench_id) + 1 if bench_id in queue else None
+            choice.title = _bench_label(bench_id, results.get(bench_id), pos)
+        app.invalidate()
+
     @app.key_bindings.add("t", eager=True)
-    def _toggle(event) -> None:  # noqa: ANN001 (prompt_toolkit event)
-        choice = ic.get_pointed_at()
-        bench_id = choice.value
+    def _toggle_mark(event) -> None:  # noqa: ANN001 (prompt_toolkit event)
+        bench_id = ic.get_pointed_at().value
         if bench_id == "__back__":
             return
         bench_results.cycle(results, bench_id)
         bench_results.save(results)
-        choice.title = _bench_label(bench_id, results.get(bench_id))
-        event.app.invalidate()
+        _refresh()
+
+    @app.key_bindings.add("r", eager=True)
+    def _toggle_queue(event) -> None:  # noqa: ANN001 (prompt_toolkit event)
+        bench_id = ic.get_pointed_at().value
+        if bench_id == "__back__":
+            return
+        if bench_id in queue:
+            queue.remove(bench_id)
+        else:
+            queue.append(bench_id)
+        _refresh()
 
 
 # ---------------------------------------------------------------------------

@@ -20,7 +20,12 @@ Types).
 
 ## Objectives
 1. **Reflected XSS**: Test every parameter reflected in the response.
-   Start with `<script>alert(1)</script>`, then try filter bypasses.
+   Start with a harmless probe like `<script>alert(1)</script>`, then try
+   filter bypasses. Note: some checkers grade WHAT the script does, not
+   just that it ran. If the response says it expected a specific value
+   (e.g. "you alerted 1 instead of XSS"), read that as the required token
+   and switch the payload to produce exactly that value — don't keep
+   firing `alert(1)`.
 2. **Stored XSS**: Find input fields that persist data (comments, profiles,
    messages). Inject payloads and check if they execute on page load.
 3. **DOM-based XSS**: Inspect JavaScript source for dangerous sinks
@@ -32,6 +37,21 @@ Types).
    - Encoding: HTML entities, URL encoding, double encoding
    - Case variation: `<ScRiPt>`, `<SCRIPT>`
    - Template literals if framework uses them
+   - **Auto-firing vs interaction handlers**: when nobody will click or
+     hover — a headless checker, or a passive victim who only loads the
+     page (blind/stored XSS) — use handlers that fire on their own:
+     `autofocus onfocus=…`, `<body onload=…>`, `<img onerror=… src=x>`,
+     `<svg onload=…>`, `<details open ontoggle=…>`. AVOID interaction
+     handlers (`onclick`, `onmouseover`) in those cases — with no user
+     action they never fire.
+   - **Re-quote / re-encode a filtered character**: if `'` is blocked use
+     `"` or backticks; if quotes are stripped inside a call, build the
+     string without them — `String.fromCharCode(88,83,83)`, `/XSS/.source`,
+     or HTML entities. Note older headless engines (PhantomJS) don't
+     support ES6 backtick template literals, so `String.fromCharCode` and
+     double quotes are the most portable. A challenge's own example
+     payload may itself contain a filtered character — don't copy it
+     verbatim.
 
 ## input surface
 

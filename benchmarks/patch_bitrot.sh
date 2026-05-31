@@ -14,7 +14,11 @@
 #   - python:2.7.18-slim  built on Debian buster, whose apt repos went
 #                         404 in Jun 2024 when buster reached EOL. Fix:
 #                         rewrite sources.list to archive.debian.org.
-#   - phantomjs (XBEN-004) package no longer in buster archive. Fix:
+#   - phantomjs (the 23 Dalgona XSS benchmarks: XBEN-004 + 008/010/011/
+#                         012/013/015/016/017/018/046/047/048/049/050/051/
+#                         059/062/064/065/070/074/087) package no longer in
+#                         buster archive. Their original Dockerfiles are
+#                         byte-identical. Fix:
 #                         force --platform=linux/amd64 + download the
 #                         official x86_64 binary from upstream bitbucket.
 #                         Runs via Rosetta on Apple Silicon. NOTE: that
@@ -84,6 +88,12 @@ if [ "${#ARGS[@]}" -eq 0 ]; then
     ARGS=(
         XBEN-001-24 XBEN-002-24 XBEN-003-24 XBEN-004-24
         XBEN-026-24 XBEN-031-24 XBEN-032-24 XBEN-041-24 XBEN-044-24
+        # phantomjs Dalgona XSS family (byte-identical Dockerfiles)
+        XBEN-008-24 XBEN-010-24 XBEN-011-24 XBEN-012-24 XBEN-013-24
+        XBEN-015-24 XBEN-016-24 XBEN-017-24 XBEN-018-24 XBEN-046-24
+        XBEN-047-24 XBEN-048-24 XBEN-049-24 XBEN-050-24 XBEN-051-24
+        XBEN-059-24 XBEN-062-24 XBEN-064-24 XBEN-065-24 XBEN-070-24
+        XBEN-074-24 XBEN-087-24
     )
 fi
 
@@ -131,7 +141,13 @@ patch_mysql_dockerfile() {
     echo "  patched: $dockerfile (mysql:5.7.15 -> --platform=linux/amd64 mysql:5.7.44)"
 }
 
-patch_xben004_dockerfile() {
+# Applies to ALL phantomjs-based Dalgona XSS benchmarks — their original
+# Dockerfiles are byte-identical (FROM python:2.7.18-slim, apt phantomjs,
+# @FLAG@ -> secret.txt, flask run). XBEN-004 serves /xss25; the other 22
+# serve /page. The replacement template is structure-identical, only the
+# rotted bits change (archive apt mirror, bitbucket phantomjs binary,
+# QT_QPA_PLATFORM=phantom for that binary's bundled Qt).
+patch_phantomjs_xss_dockerfile() {
     local dockerfile="$1"
     if [ ! -f "$dockerfile" ]; then
         echo "  skip: $dockerfile (not found)"
@@ -344,12 +360,15 @@ for bench in "${ARGS[@]}"; do
                 clear_build_guard "$bench_dir"
             fi
             ;;
-        XBEN-004-24)
+        XBEN-004-24|XBEN-008-24|XBEN-010-24|XBEN-011-24|XBEN-012-24|XBEN-013-24|\
+        XBEN-015-24|XBEN-016-24|XBEN-017-24|XBEN-018-24|XBEN-046-24|XBEN-047-24|\
+        XBEN-048-24|XBEN-049-24|XBEN-050-24|XBEN-051-24|XBEN-059-24|XBEN-062-24|\
+        XBEN-064-24|XBEN-065-24|XBEN-070-24|XBEN-074-24|XBEN-087-24)
             target="$bench_dir/src/Dockerfile"
             if [ "$REVERT" -eq 1 ]; then
                 revert_dockerfile "$target"
             else
-                patch_xben004_dockerfile "$target"
+                patch_phantomjs_xss_dockerfile "$target"
                 clear_build_guard "$bench_dir"
             fi
             ;;

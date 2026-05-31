@@ -1,11 +1,13 @@
 """Tier 1 — read_served_flag tests.
 
-``benchmarks/xbow_runner.read_served_flag`` reads ``/app/flag.txt``
-from the running benchmark container via ``docker compose exec``.
-It's the source of truth for "what flag is the image actually
-serving" — used by :func:`xbow_runner.run_one` to override the
-sha256 prediction so the strict matcher compares against reality
-rather than the convention's prediction.
+``benchmarks/xbow_runner.read_served_flag`` reads the actual baked
+flag from inside the running benchmark container via
+``docker compose exec``, trying each path in
+:data:`xbow_runner._SERVED_FLAG_PATHS` until one succeeds. It's the
+source of truth for "what flag is the image actually serving" — used
+by :func:`xbow_runner.expected_flag_candidates` to feed the
+candidate set so the matcher compares against reality rather than
+the convention's prediction.
 
 Why this matters — 2026-05-25 incident: the XBEN-006-24 image was
 built 2 weeks ago with a manual ``--build-arg FLAG=flag{<uuid>}``
@@ -14,17 +16,24 @@ Docker Desktop's prune cleanup re-tagged the older UUID-baked image
 as ``:latest`` during a brief idle window. The runner's prediction
 (sha256) and the served value (UUID) diverged, the strict matcher
 rejected every valid capture, the run scored as ``flag_found=false``
-despite the agent doing everything correctly. This function reads
-the truth directly so prediction-vs-reality drift can no longer kill
-a run.
+despite the agent doing everything correctly.
 
-These tests pin five behaviours:
+Why MULTIPLE paths — 2026-05-27 incident: an XBEN-002 capture was
+silently dropped because this function read ``/app/flag.txt`` (which
+doesn't exist for that benchmark) and returned ``""``, falling back
+to the sha256 prediction. XBEN-002's Dockerfile actually bakes to
+``/flag``. The function now tries every known path and uses the
+first one that yields a non-empty value.
 
-  1. Happy path — docker exec succeeds, returns the stripped value.
-  2. Container down — exec returns non-zero, function returns "".
-  3. Timeout — exec hangs past the 5s cap, function returns "".
-  4. docker binary missing — function returns "" (no crash).
-  5. Benchmark directory missing — short-circuits before subprocess.
+These tests pin six behaviours:
+
+  1. Happy path — first path (``/flag``) succeeds, return value.
+  2. Fallback — first path fails, second path succeeds, return the
+     second's value.
+  3. Container down — every exec returns non-zero, function returns "".
+  4. Timeout — every exec hangs past the 5s cap, function returns "".
+  5. docker binary missing — function returns "" (no crash).
+  6. Benchmark directory missing — short-circuits before subprocess.
 
 Strategy: monkeypatch ``subprocess.run`` in the xbow_runner module so
 no real docker daemon is touched. Pure Tier-1 — no docker, no
@@ -61,8 +70,9 @@ def bench_id_with_dir(tmp_path, monkeypatch):
 
 
 def test_returns_served_value_when_exec_succeeds(bench_id_with_dir, monkeypatch):
-    """The exact case the new fix targets — exec works, return the
-    value verbatim (stripped of trailing whitespace).
+    """First-path success — exec works on the default path (``/flag``),
+    return the value verbatim (stripped of trailing whitespace). The
+    function exits early; the fallback path is not tried.
     """
     served = "FLAG{9c935b35ad7746d14fa2c01708b767f4cb0a9eaa867e77af44c14592439e53eb}"
     fake_result = subprocess.CompletedProcess(
@@ -80,13 +90,55 @@ def test_returns_served_value_when_exec_succeeds(bench_id_with_dir, monkeypatch)
     result = xbow_runner.read_served_flag(bench_id_with_dir)
     assert result == served
 
-    # Sanity-check the command shape: docker compose exec -T app cat /app/flag.txt
+    # Sanity-check the command shape and that we tried the first
+    # known path (which is ``/flag`` per the XBEN-001/002/003
+    # Dockerfile convention).
     assert len(captured_calls) == 1
     cmd = captured_calls[0]
     assert cmd[:3] == ["docker", "compose", "exec"]
     assert "-T" in cmd
     assert "app" in cmd
-    assert "/app/flag.txt" in cmd
+    # First path tried should be the first entry in _SERVED_FLAG_PATHS.
+    assert cmd[-1] == xbow_runner._SERVED_FLAG_PATHS[0]
+
+
+# ── 1b. Multi-path fallback ────────────────────────────────────────────
+
+
+def test_falls_back_to_second_path_when_first_missing(bench_id_with_dir, monkeypatch):
+    """The function must try every path in :data:`_SERVED_FLAG_PATHS`
+    in order until one succeeds — not give up on the first 404. This
+    is the XBEN-002 regression: ``/flag`` exists, ``/app/flag.txt``
+    doesn't (or vice versa for other benchmarks). Both shapes appear
+    in the corpus.
+    """
+    served = "flag{8b9df79e-91eb-4f4e-8449-5e1d207a0d83}"
+    fail_path = xbow_runner._SERVED_FLAG_PATHS[0]
+    succeed_path = xbow_runner._SERVED_FLAG_PATHS[1]
+
+    captured_calls: list[list] = []
+
+    def fake_run(cmd, **kwargs):
+        captured_calls.append(cmd)
+        # First call (probing the first path) raises as if cat returned
+        # non-zero (file missing inside container).
+        if cmd[-1] == fail_path:
+            raise subprocess.CalledProcessError(
+                returncode=1, cmd=cmd, output="", stderr="cat: no such file",
+            )
+        # Second call (probing the second path) succeeds.
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout=served + "\n", stderr="",
+        )
+
+    monkeypatch.setattr(xbow_runner.subprocess, "run", fake_run)
+
+    result = xbow_runner.read_served_flag(bench_id_with_dir)
+    assert result == served
+    # Both paths should have been tried in order.
+    assert len(captured_calls) == 2
+    assert captured_calls[0][-1] == fail_path
+    assert captured_calls[1][-1] == succeed_path
 
 
 def test_strips_trailing_whitespace(bench_id_with_dir, monkeypatch):

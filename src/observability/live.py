@@ -818,6 +818,7 @@ class _Live:
         error: str | None = None,
         expected_flag: str = "",
         last_submission: str = "",
+        expected_flag_candidates: tuple[str, ...] = (),
     ) -> None:
         """Render the end-of-bench summary line plus an optional
         expected-vs-captured verification block.
@@ -825,10 +826,12 @@ class _Live:
         The verification block exists so a human glancing at the
         terminal can verify the verdict at a glance without trusting
         the LLM's narration: it prints the runner's predicted
-        ``expected_flag`` and the most recent ``last_submission`` from
-        ``state["submission_attempts"]`` side by side, with a ✓/✗
-        marker computed by :func:`src.edges.flag_match.flags_match`.
-        Pure static rendering — no LLM, no narration trust.
+        ``expected_flag`` (the primary candidate) and the most recent
+        ``last_submission`` from ``state["submission_attempts"]`` side
+        by side, with a ✓/✗ marker computed by
+        :func:`src.edges.flag_match.flags_match` against the FULL
+        candidate set (``expected_flag_candidates``) — not just the
+        primary. Pure static rendering — no LLM, no narration trust.
 
         Only printed in benchmark mode (``expected_flag`` non-empty);
         real-pentest runs skip the block since there's no ground truth
@@ -855,10 +858,25 @@ class _Live:
             from src.edges.flag_match import flags_match
 
             _emit(f"           {_paint('expected:', _DIM)}  {expected_flag}")
+            # Render secondary candidates if any exist beyond the
+            # primary — helps a human spot when the sha256 prediction
+            # and .env value disagree at a glance.
+            if expected_flag_candidates and len(expected_flag_candidates) > 1:
+                rest = [c for c in expected_flag_candidates if c != expected_flag]
+                if rest:
+                    _emit(
+                        f"           {_paint('also accept:', _DIM)}  "
+                        f"{', '.join(rest)}"
+                    )
             if last_submission:
+                # Accept any candidate — not just the primary. The
+                # display field above shows the primary for readability;
+                # the matcher checks the full set.
+                check_against: str | tuple[str, ...]
+                check_against = expected_flag_candidates or expected_flag
                 match_ok = flags_match(
                     submitted=last_submission,
-                    expected=expected_flag,
+                    expected=check_against,
                 )
                 marker = (
                     _paint("✓ match", _BOLD, _GREEN) if match_ok

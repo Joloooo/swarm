@@ -68,6 +68,7 @@ decision over Findings the worker explicitly emitted.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 from uuid import UUID
 
@@ -231,9 +232,34 @@ class FlagWatcherCallback(AsyncCallbackHandler):
     # ``skill_runner`` where we catch it intentionally.
     raise_error: bool = True
 
-    def __init__(self, *, expected_flag: str, agent_id: str = ""):
+    def __init__(
+        self,
+        *,
+        expected_flag: str | Iterable[str],
+        agent_id: str = "",
+    ):
+        """Accepts either a single expected flag (back-compat) or an
+        iterable of expected candidates. See
+        :func:`src.edges.flag_match.flags_match` for why benchmarks
+        can legitimately have multiple expected values.
+        """
         super().__init__()
-        self.expected_flag = (expected_flag or "").strip()
+        if isinstance(expected_flag, str):
+            raw_candidates: tuple[str, ...] = (expected_flag,)
+        else:
+            raw_candidates = tuple(expected_flag or ())
+        # Keep a normalized non-empty tuple — used by both the
+        # callback hooks and (rare) external introspection.
+        self.expected_flag_candidates: tuple[str, ...] = tuple(
+            c.strip() for c in raw_candidates if (c or "").strip()
+        )
+        # Back-compat alias: the first candidate (or empty string).
+        # Older callers and tests may still reach for ``expected_flag``.
+        self.expected_flag: str = (
+            self.expected_flag_candidates[0]
+            if self.expected_flag_candidates
+            else ""
+        )
         self.agent_id = agent_id
 
     # ── Own-match path ───────────────────────────────────────────────
@@ -247,7 +273,7 @@ class FlagWatcherCallback(AsyncCallbackHandler):
         **kwargs: Any,
     ) -> None:
         # Real-pentest mode → no oracle, nothing to match against.
-        if not self.expected_flag:
+        if not self.expected_flag_candidates:
             return
         # Defence in depth: if a sibling captured the EXACT same flag
         # while we were running this tool, surface that as a sibling
@@ -266,7 +292,10 @@ class FlagWatcherCallback(AsyncCallbackHandler):
             return
         tool_name = kwargs.get("name") or ""
         for candidate in extract_flags(text):
-            if flags_match(submitted=candidate, expected=self.expected_flag):
+            if flags_match(
+                submitted=candidate,
+                expected=self.expected_flag_candidates,
+            ):
                 # Mark process-globally BEFORE raising, so sibling
                 # workers can see it at their next callback hook.
                 signal_captured(candidate)
@@ -290,7 +319,7 @@ class FlagWatcherCallback(AsyncCallbackHandler):
         ``on_chat_model_start`` instead, but we hook both for
         defensive completeness — a future provider switch shouldn't
         silently break the sibling-cancel path."""
-        if not self.expected_flag:
+        if not self.expected_flag_candidates:
             return
         if is_captured():
             raise SiblingCapturedSignal(
@@ -311,7 +340,7 @@ class FlagWatcherCallback(AsyncCallbackHandler):
         hook in practice — gpt-5.5 calls are 60–90 s each, and this
         is the earliest moment a sibling can abort before that cost
         is paid."""
-        if not self.expected_flag:
+        if not self.expected_flag_candidates:
             return
         if is_captured():
             raise SiblingCapturedSignal(

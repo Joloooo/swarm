@@ -94,6 +94,9 @@ if [ "${#ARGS[@]}" -eq 0 ]; then
         XBEN-047-24 XBEN-048-24 XBEN-049-24 XBEN-050-24 XBEN-051-24
         XBEN-059-24 XBEN-062-24 XBEN-064-24 XBEN-065-24 XBEN-070-24
         XBEN-074-24 XBEN-087-24
+        # mysql / buster / compose-platform bit-rot (first-50 sweep)
+        XBEN-007-24 XBEN-022-24 XBEN-023-24 XBEN-027-24 XBEN-039-24
+        XBEN-040-24 XBEN-043-24
     )
 fi
 
@@ -330,6 +333,80 @@ patch_composer_no_audit_dockerfile() {
     echo "  patched: $dockerfile (composer install --no-security-blocking, twig 1.19.0 preserved)"
 }
 
+patch_buster_apt_dockerfile() {
+    # Generic buster apt-mirror rescue for non-httpd buster images
+    # (XBEN-007: python:3.8-slim-buster). Debian buster reached EOL in
+    # Jun 2024 and deb.debian.org now 404s; rewrite the apt sources to
+    # archive.debian.org and disable Valid-Until on apt-get update so
+    # the existing `apt-get install` step works again. App-layer vuln
+    # (IDOR/GraphQL) is untouched — only the apt mirror changes.
+    local dockerfile="$1"
+    if [ ! -f "$dockerfile" ]; then
+        echo "  skip: $dockerfile (not found)"
+        return 0
+    fi
+    if grep -q "archive.debian.org" "$dockerfile"; then
+        echo "  already patched: $dockerfile"
+        return 0
+    fi
+    if ! grep -qiE "buster" "$dockerfile"; then
+        echo "  skip: $dockerfile (not buster-based)"
+        return 0
+    fi
+    cp "$dockerfile" "${dockerfile}.bitrot_orig"
+    awk '
+        BEGIN { injected = 0 }
+        /^FROM / && !injected {
+            print
+            print ""
+            print "# Patched by patch_bitrot.sh: buster apt mirrors 404 after EOL (Jun 2024)."
+            print "RUN sed -i \\"
+            print "        -e \"s|http://deb.debian.org|http://archive.debian.org|g\" \\"
+            print "        -e \"s|http://security.debian.org|http://archive.debian.org|g\" \\"
+            print "        -e \"/-updates/d\" \\"
+            print "        /etc/apt/sources.list"
+            injected = 1
+            next
+        }
+        /apt-get update/ && $0 !~ /Acquire::Check-Valid-Until/ {
+            gsub(/apt-get update/, "apt-get -o Acquire::Check-Valid-Until=false update")
+        }
+        { print }
+    ' "${dockerfile}.bitrot_orig" > "$dockerfile"
+    echo "  patched: $dockerfile (buster apt -> archive.debian.org)"
+}
+
+patch_compose_mysql_platform() {
+    # XBEN-039/040: the db service is `image: mysql:5.7` with no
+    # platform. The mysql:5.7 tag has no linux/arm64 manifest, so the
+    # pull fails on Apple Silicon before any container starts. Pin
+    # platform: linux/amd64 so it runs via Rosetta (same approach as the
+    # build-based mysql bump). DB version unchanged; app-layer vuln
+    # (SQLi) untouched.
+    local compose="$1"
+    if [ ! -f "$compose" ]; then
+        echo "  skip: $compose (not found)"
+        return 0
+    fi
+    if grep -q "platform: linux/amd64" "$compose"; then
+        echo "  already patched: $compose"
+        return 0
+    fi
+    if ! grep -qE "image: *mysql:5\.7" "$compose"; then
+        echo "  skip: $compose (no mysql:5.7 image service)"
+        return 0
+    fi
+    cp "$compose" "${compose}.bitrot_orig"
+    awk '
+        { print }
+        /image: *mysql:5\.7/ {
+            match($0, /^[ ]*/)
+            print substr($0, RSTART, RLENGTH) "platform: linux/amd64"
+        }
+    ' "${compose}.bitrot_orig" > "$compose"
+    echo "  patched: $compose (db service pinned platform: linux/amd64)"
+}
+
 clear_build_guard() {
     rm -f "$1/.xben_build_done"
 }
@@ -351,7 +428,7 @@ for bench in "${ARGS[@]}"; do
     fi
 
     case "$bench" in
-        XBEN-001-24|XBEN-002-24|XBEN-003-24)
+        XBEN-001-24|XBEN-002-24|XBEN-003-24|XBEN-022-24|XBEN-023-24|XBEN-027-24|XBEN-043-24)
             target="$bench_dir/mysql/Dockerfile"
             if [ "$REVERT" -eq 1 ]; then
                 revert_dockerfile "$target"
@@ -374,6 +451,24 @@ for bench in "${ARGS[@]}"; do
             ;;
         XBEN-005-24)
             echo "  skip: XBEN-005-24 (already buildable, no patch needed)"
+            ;;
+        XBEN-007-24)
+            target="$bench_dir/app/Dockerfile"
+            if [ "$REVERT" -eq 1 ]; then
+                revert_dockerfile "$target"
+            else
+                patch_buster_apt_dockerfile "$target"
+                clear_build_guard "$bench_dir"
+            fi
+            ;;
+        XBEN-039-24|XBEN-040-24)
+            target="$bench_dir/docker-compose.yml"
+            if [ "$REVERT" -eq 1 ]; then
+                revert_dockerfile "$target"
+            else
+                patch_compose_mysql_platform "$target"
+                clear_build_guard "$bench_dir"
+            fi
             ;;
         XBEN-026-24)
             target="$bench_dir/app/Dockerfile"

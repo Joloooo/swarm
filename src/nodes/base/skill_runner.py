@@ -687,7 +687,17 @@ async def _run_skill_agent_impl(
     # ``phase1_findings`` state field. That was dead code; cumulative
     # findings now reach the worker through the seed HumanMessage's
     # "## Confirmed findings" block (see ``_format_findings`` below).
-    system_msg = _build_system_message(config, target_url)
+    #
+    # ``is_benchmark`` gates the playful BENCHMARK_GUIDANCE addendum
+    # (executor-only) — re-introduced 2026-05-31. Detected from the same
+    # state fields the FlagWatcher reads below.
+    is_benchmark = bool(
+        (state or {}).get("expected_flag")
+        or (state or {}).get("expected_flag_candidates")
+    )
+    system_msg = _build_system_message(
+        config, target_url, is_benchmark=is_benchmark,
+    )
 
     # NB: agent construction is now deferred to ``_agent_factory``
     # below so the tier-2 refusal-retry can rebuild the agent with
@@ -826,11 +836,24 @@ async def _run_skill_agent_impl(
     #
     # The agent is reconstructed inside the retry helper because
     # vocab-filter / tier-2 model-swap both rebuild it from scratch.
+    #
+    # The no-progress nudge middleware is shared across the primary and
+    # fallback factories (one per-worker plateau state). It fires only
+    # on byte-identical tool outputs and only re-surfaces the existing
+    # DIVERSITY_RULES guidance — it never stops the worker, so it is
+    # safe in both benchmark and real-pentest mode. See
+    # ``src/nodes/base/no_progress.py``.
+    from src.nodes.base.no_progress import NoProgressNudgeMiddleware
+    _no_progress_mw = NoProgressNudgeMiddleware(
+        agent_id=config.agent_id, log=node.log,
+    )
+
     def _agent_factory(sys_prompt: str):
         return create_agent(
             model=llm,
             tools=config.tools,
             system_prompt=sys_prompt,
+            middleware=[_no_progress_mw],
         )
 
     # Tier-2 fallback factory — only wired when the primary provider
@@ -868,6 +891,7 @@ async def _run_skill_agent_impl(
                 model=fb_llm,
                 tools=config.tools,
                 system_prompt=sys_prompt,
+                middleware=[_no_progress_mw],
             )
 
         fallback_factory = _fallback_agent_factory

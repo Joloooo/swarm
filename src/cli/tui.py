@@ -91,6 +91,12 @@ def main_loop(args: argparse.Namespace) -> None:
                 _console.print(f"[cyan]🔑 Codex account → {new}[/cyan]")
             continue
 
+        # TEMPORARY emergency affordance: fetch + show live 5h/weekly usage
+        # for every account. Read-only (no quota used). See codex_usage.
+        if action == "__codex_usage__":
+            _show_codex_usage()
+            continue
+
         if action == "xbow":
             run_list = _pick_bench()
             if not run_list:
@@ -153,6 +159,7 @@ def _top_level() -> str | None:
     # — remove this row + the helpers below and the menu is unchanged.
     choices: list[Choice] = [
         Choice(_account_label(), value="__codex_switch__"),
+        Choice("📊 Codex usage (5-hour / weekly) — fetch live", value="__codex_usage__"),
         Choice("xbow benchmark  (pick one or queue several to run in order)",    value="xbow"),
         Choice("Pentest first 5 patched (XBEN-001 to 005, bit-rot fixes first)", value="first5_patched"),
         Choice("Pentest 15 containers (daily, compact)",                         value="daily_compact"),
@@ -223,6 +230,63 @@ def _bind_account_tab(question: questionary.Question) -> None:
             if choice.value == "__codex_switch__":
                 choice.title = _account_label()
         app.invalidate()
+
+
+def _show_codex_usage() -> None:
+    """Fetch and print live 5-hour + weekly usage for every account.
+
+    TEMPORARY emergency affordance. Read-only — hits the wham/usage status
+    endpoint per account (no model quota consumed). Lazy-imports
+    :mod:`src.cli.codex_usage` so the TUI's normal startup stays light and
+    the whole feature stays trivially removable.
+    """
+    from rich.table import Table
+
+    from src.cli import codex_usage
+
+    sel = codex_accounts.selected()
+    _console.print("[dim]Fetching Codex usage… (read-only; no quota used)[/dim]")
+
+    table = Table(show_header=True, header_style="bold", title="Codex usage")
+    table.add_column("Account")
+    table.add_column("Plan")
+    table.add_column("5-hour", justify="right")
+    table.add_column("Weekly", justify="right")
+    table.add_column("Weekly resets")
+    table.add_column("Credits")
+
+    def _pct(window) -> str:  # noqa: ANN001
+        if window is None:
+            return "—"
+        p = window.used_percent
+        colour = "red" if p >= 80 else "yellow" if p >= 50 else "green"
+        return f"[{colour}]{p:g}%[/{colour}]"
+
+    for name in codex_accounts.order():
+        disp = codex_accounts.display_name(name) + ("  ◀ selected" if name == sel else "")
+        try:
+            u = codex_usage.fetch_for(name)
+            table.add_row(
+                disp,
+                (u.plan_type or "?"),
+                _pct(u.primary),
+                _pct(u.secondary),
+                u.secondary.reset_human if u.secondary else "—",
+                (u.credits_balance if u.has_credits else "—"),
+            )
+        except codex_usage.CodexAccountAuthError:
+            table.add_row(disp, "[red]revoked[/red]", "—", "—", "—",
+                          "[red]re-login & re-capture[/red]")
+        except Exception as e:  # noqa: BLE001
+            table.add_row(disp, "[red]error[/red]", "—", "—", "—",
+                          f"[red]{type(e).__name__}[/red]")
+
+    _console.print(table)
+    _console.print("[dim][enter] to return to the menu…[/dim]", end=" ")
+    try:
+        input()
+    except (EOFError, KeyboardInterrupt):
+        pass
 
 
 # ---------------------------------------------------------------------------

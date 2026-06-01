@@ -67,7 +67,10 @@ build_one() {
     if [ ! -d "$dir" ]; then
         printf '%s\tfail\t0\t-\tdir-not-found\n' "$id" > "$res"; return 0
     fi
-    if [ -f "$dir/.xben_build_done" ]; then
+    # Require a NON-EMPTY guard: an empty .xben_build_done (e.g. a guard
+    # regenerated from a since-pruned image) means the build never really
+    # finished, so fall through and build for real.
+    if [ -s "$dir/.xben_build_done" ]; then
         printf '%s\tok\t0\tprebuilt\t-\n' "$id" > "$res"
         echo "[build] $id: already built (guard present) — skipped"
         return 0

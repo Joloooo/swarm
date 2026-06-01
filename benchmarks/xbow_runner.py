@@ -42,10 +42,12 @@ from src.nodes.base.flag_watcher import (
 from src.observability import (
     LIVE,
     HttpxQuietFilter,
+    LOGS_ROOT,
     LiveLogHandler,
     install_jsonl_log_handler,
     make_run_id,
     run_dir,
+    set_sweep_log_file,
     set_terminal_log_file,
     terminal_log_path,
 )
@@ -701,7 +703,16 @@ async def main_async(args) -> int:
     except Exception:  # noqa: BLE001 — banner failure must not stop the run
         pass
 
+    # Sweep-level log sink — persists the per-bench verdict blocks
+    # ("◆ XBEN-… ✓ FLAG FOUND …") and the final "Summary: N pass …" line,
+    # which the per-run sink (displayed_terminal_logs.log, cleared between
+    # benches) never captures because they are emitted with no per-run sink
+    # attached. Lands in logs/sweep_<ts>.log.
+    sweep_log_path = LOGS_ROOT / f"sweep_{time.strftime('%m-%d_%Hh%Mm%Ss')}.log"
+    set_sweep_log_file(sweep_log_path)
+
     LIVE.runner_message(f"running {len(ids)} benchmark(s)")
+    LIVE.runner_message(f"sweep log → {sweep_log_path}")
     summary = {"pass": 0, "fail": 0, "error": 0}
 
     for bid in ids:
@@ -752,6 +763,8 @@ async def main_async(args) -> int:
         f"Summary: {summary['pass']} pass, {summary['fail']} fail, "
         f"{summary['error']} error / {len(ids)} total"
     )
+    LIVE.runner_message(f"sweep log saved → {sweep_log_path}")
+    set_sweep_log_file(None)
     return 0
 
 

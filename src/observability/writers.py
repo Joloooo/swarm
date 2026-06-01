@@ -336,6 +336,17 @@ def uninstall_jsonl_log_handler() -> None:
 _TERMINAL_LOG_FILE: Path | None = None
 
 
+# A SECOND, sweep-level sink. Unlike ``_TERMINAL_LOG_FILE`` (which the
+# benchmark runner points at each run's ``displayed_terminal_logs.log``
+# and then CLEARS to ``None`` between benches), this one stays attached
+# for the whole runner invocation. It exists so the cross-bench lines the
+# per-run sink misses — the ``bench_end`` verdict block ("◆ XBEN-… ✓ FLAG
+# FOUND …") and the final ``Summary: N pass …`` tally, both emitted while
+# the per-run sink is ``None`` — still land in a file. ``write_terminal_
+# line`` / ``write_terminal_chunk`` tee to BOTH sinks. ``None`` disables it.
+_SWEEP_LOG_FILE: Path | None = None
+
+
 # ANSI CSI escape sequences (colours, cursor moves). Stripped so the
 # saved file opens cleanly in plain editors / behaves under ``grep``.
 _ANSI_RE = re.compile(r"\x1B\[[0-9;]*[A-Za-z]")
@@ -361,45 +372,75 @@ def get_terminal_log_file() -> Path | None:
     return _TERMINAL_LOG_FILE
 
 
-def write_terminal_line(line: str) -> None:
-    """Append one line to ``displayed_terminal_logs.log`` if a sink is set.
+def set_sweep_log_file(path: Path | None) -> None:
+    """Set (or clear) the sweep-level sink.
 
-    Strips ANSI escape codes so the file is readable in any editor.
-    The trailing newline is added if not already present. Best-effort —
-    failures swallow silently (LIVE must always print to stderr).
+    Unlike :func:`set_terminal_log_file` (per-bench, cleared between
+    benches), this sink stays attached for the whole runner invocation so
+    the per-bench verdict blocks and the final ``Summary`` line — emitted
+    while the per-run sink is ``None`` — are persisted. ``None`` disables it.
     """
-    path = _TERMINAL_LOG_FILE
+    global _SWEEP_LOG_FILE
     if path is None:
+        _SWEEP_LOG_FILE = None
         return
-    try:
-        stripped = _ANSI_RE.sub("", line)
-        if not stripped.endswith("\n"):
-            stripped += "\n"
-        with _TERMINAL_LOG_LOCK, path.open("a", encoding="utf-8") as f:
-            f.write(stripped)
-    except Exception:
-        # Never let log writes break a run. The screen has the data either way.
-        pass
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _SWEEP_LOG_FILE = path
+
+
+def get_sweep_log_file() -> Path | None:
+    return _SWEEP_LOG_FILE
+
+
+def write_terminal_line(line: str) -> None:
+    """Append one line to the active terminal-log sink(s).
+
+    Tees to the per-run sink (``displayed_terminal_logs.log``) AND, when
+    set, the sweep-level sink (:func:`set_sweep_log_file`) so cross-bench
+    verdict/summary lines are persisted too. Strips ANSI escape codes so
+    the files are readable in any editor. The trailing newline is added if
+    not already present. Best-effort — failures swallow silently (LIVE
+    must always print to stderr).
+    """
+    if _TERMINAL_LOG_FILE is None and _SWEEP_LOG_FILE is None:
+        return
+    stripped = _ANSI_RE.sub("", line)
+    if not stripped.endswith("\n"):
+        stripped += "\n"
+    with _TERMINAL_LOG_LOCK:
+        for path in (_TERMINAL_LOG_FILE, _SWEEP_LOG_FILE):
+            if path is None:
+                continue
+            try:
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(stripped)
+            except Exception:
+                # Never let log writes break a run. The screen has the data either way.
+                pass
 
 
 def write_terminal_chunk(text: str) -> None:
-    """Append a raw chunk (no newline added) to ``displayed_terminal_logs.log``.
+    """Append a raw chunk (no newline added) to the active sink(s).
 
     Used by the streaming reasoning path in ``src/observability/live.py``
     where chunks are sub-line fragments that get concatenated into
     paragraphs as the model emits them. The companion
     :func:`write_terminal_line` would corrupt the stream by injecting a
-    newline after every word.
+    newline after every word. Tees to both the per-run and sweep sinks.
 
     Strips ANSI escape codes so the saved file stays editor-friendly.
     Best-effort: failures swallow silently.
     """
-    path = _TERMINAL_LOG_FILE
-    if path is None or not text:
+    if (_TERMINAL_LOG_FILE is None and _SWEEP_LOG_FILE is None) or not text:
         return
-    try:
-        stripped = _ANSI_RE.sub("", text)
-        with _TERMINAL_LOG_LOCK, path.open("a", encoding="utf-8") as f:
-            f.write(stripped)
-    except Exception:
-        pass
+    stripped = _ANSI_RE.sub("", text)
+    with _TERMINAL_LOG_LOCK:
+        for path in (_TERMINAL_LOG_FILE, _SWEEP_LOG_FILE):
+            if path is None:
+                continue
+            try:
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(stripped)
+            except Exception:
+                pass

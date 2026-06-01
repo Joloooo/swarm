@@ -188,11 +188,13 @@ def _account_label() -> list[tuple[str, str]]:
 def _bind_account_tab(question: questionary.Question) -> None:
     """Bind Tab on the top-level menu to cycle the active Codex account.
 
-    Swaps ~/.codex/auth.json between the snapshots in ~/.codex-accounts/
-    via :mod:`src.cli.codex_accounts`, then rebuilds the account row's
-    label and redraws — so switching happens without leaving the menu.
-    Reaches into the finished questionary ``Application`` to locate its
-    ``InquirerControl`` and register the Tab binding against it.
+    Sets the ``SWARM_CODEX_HOME`` env var (via :mod:`src.cli.codex_accounts`)
+    so ``ChatCodex`` loads the chosen account's ``auth.json`` — no files are
+    moved or overwritten — then rebuilds the account row's label and redraws,
+    so switching happens without leaving the menu. The selection is inherited
+    by the benchmark subprocess (``env=os.environ.copy()``) and stays fixed
+    for that whole run. Reaches into the finished questionary ``Application``
+    to locate its ``InquirerControl`` and register the Tab binding against it.
     """
     app = question.application
     ic = next(

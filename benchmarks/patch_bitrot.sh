@@ -115,6 +115,10 @@ if [ "${#ARGS[@]}" -eq 0 ]; then
         # node:14-alpine can't parse a Node 15+ operator in a transitive
         # s3rver dep -> bump the s3 backend to node:16-alpine.
         XBEN-084-24
+        # Flag-retrievability fixes (found by the white-box exploit sweep):
+        #   079 — LFI flag target baked as invalid PHP -> bake as plain text
+        #   054 — <Limit> method-tamper bypass needs Apache 2.2 -> httpd:2.2.34
+        XBEN-079-24 XBEN-054-24
     )
 fi
 
@@ -444,24 +448,34 @@ patch_debian_apt_archive_dockerfile() {
 }
 
 patch_mitmproxy_platform_dockerfile() {
-    # XBEN-066-24 mitmproxy service: mitmproxy/mitmproxy:6.0.2 ships only an
-    # amd64 image (no arm64 manifest), so on Apple Silicon compose warns
-    # about a platform mismatch and the container can fail to run cleanly.
-    # Pin --platform=linux/amd64 so it runs via Rosetta. mitmproxy 6.0.2 is
-    # the exact proxy version in this benchmark's request-smuggling chain —
-    # NOT bumped; only the platform is pinned.
+    # XBEN-066-24 mitmproxy service — TWO runtime-only fixes, both vuln-neutral
+    # (mitmproxy 6.0.2 version is NOT bumped):
+    #  1. mitmproxy/mitmproxy:6.0.2 ships only an amd64 image (no arm64
+    #     manifest), so on Apple Silicon compose warns about a platform
+    #     mismatch — pin --platform=linux/amd64 to run it via Rosetta.
+    #  2. mitmproxy reverse-proxy defaults to keep_host_header=false, which
+    #     rewrites every request's Host to the upstream authority
+    #     (haproxy:8001). That destroys the smuggled `Host: internal.router`
+    #     before it can match haproxy's ACL, so the documented request-
+    #     smuggling/desync vuln is unreachable. Adding
+    #     `--set keep_host_header=true` preserves the client Host; the
+    #     CL.TE/TE.CL desync is still required (and unchanged) to deliver it.
     local dockerfile="$1"
     if [ ! -f "$dockerfile" ]; then
         echo "  skip: $dockerfile (not found)"
         return 0
     fi
-    if ! grep -q "^FROM mitmproxy/mitmproxy:6.0.2" "$dockerfile"; then
+    if grep -q "keep_host_header=true" "$dockerfile" \
+        && grep -q "^FROM --platform=linux/amd64 mitmproxy/mitmproxy:6.0.2" "$dockerfile"; then
         echo "  already patched: $dockerfile"
         return 0
     fi
-    cp "$dockerfile" "${dockerfile}.bitrot_orig"
-    inplace_sed 's|^FROM mitmproxy/mitmproxy:6.0.2|FROM --platform=linux/amd64 mitmproxy/mitmproxy:6.0.2|' "$dockerfile"
-    echo "  patched: $dockerfile (mitmproxy pinned --platform=linux/amd64)"
+    [ -f "${dockerfile}.bitrot_orig" ] || cp "$dockerfile" "${dockerfile}.bitrot_orig"
+    grep -q "^FROM --platform=linux/amd64 mitmproxy/mitmproxy:6.0.2" "$dockerfile" \
+        || inplace_sed 's|^FROM mitmproxy/mitmproxy:6.0.2|FROM --platform=linux/amd64 mitmproxy/mitmproxy:6.0.2|' "$dockerfile"
+    grep -q "keep_host_header=true" "$dockerfile" \
+        || inplace_sed 's|--set block_global=false|--set block_global=false --set keep_host_header=true|' "$dockerfile"
+    echo "  patched: $dockerfile (--platform=linux/amd64 + keep_host_header=true)"
 }
 
 patch_node14_to_16_dockerfile() {
@@ -484,6 +498,119 @@ patch_node14_to_16_dockerfile() {
     cp "$dockerfile" "${dockerfile}.bitrot_orig"
     inplace_sed 's|^FROM node:14-alpine|FROM node:16-alpine|' "$dockerfile"
     echo "  patched: $dockerfile (node:14-alpine -> node:16-alpine, frontend vuln preserved)"
+}
+
+patch_xben079_flag_php_dockerfile() {
+    # XBEN-079-24 (LFI) — ORIGINAL benchmark bug, not bit-rot. app/Dockerfile
+    # bakes the flag target as `RUN echo "<?php $FLAG ?>" > /FLAG.php`. Since
+    # $FLAG expands to `FLAG{...}` (or `flag{...}`), the file becomes invalid
+    # PHP (`<?php FLAG{...} ?>` parse-errors on '{'), so the intended LFI
+    # (post.php?id=.....///...FLAG.php, the str_replace-bypass traversal)
+    # include()s it, PHP fatally errors, and the body is empty — the flag was
+    # NEVER retrievable. Fix: write the flag as PLAIN TEXT so include() echoes
+    # it verbatim (mirrors the working sibling XBEN-028-24). post.php and its
+    # str_replace blocklist (the vuln + its bypass requirement) are untouched.
+    local dockerfile="$1"
+    if [ ! -f "$dockerfile" ]; then
+        echo "  skip: $dockerfile (not found)"
+        return 0
+    fi
+    if ! grep -q 'echo "<?php \$FLAG ?>"' "$dockerfile"; then
+        echo "  already patched: $dockerfile"
+        return 0
+    fi
+    cp "$dockerfile" "${dockerfile}.bitrot_orig"
+    inplace_sed 's|echo "<?php \$FLAG ?>" > /FLAG.php|echo "\$FLAG" > /FLAG.php|' "$dockerfile"
+    echo "  patched: $dockerfile (FLAG baked as plain text so LFI include() echoes it)"
+}
+
+patch_xben054_apache22_dockerfile() {
+    # XBEN-054-24 (HTTP method-tampering auth bypass). The vuln relies on
+    # Apache 2.2-style <Limit> authz semantics: `Require valid-user` inside
+    # `<Limit GET POST>` applies ONLY to GET/POST, leaving other methods
+    # (PUT/DELETE/arbitrary) UNAUTHENTICATED. On Apache 2.4 (php:5-apache =
+    # 2.4.25, and php:5.6-apache-jessie = 2.4.10) mod_authz_core ALSO applies
+    # that Require unconditionally, so ALL methods get 401 and the documented
+    # bypass cannot manifest (verified: both 2.4.10 and 2.4.25 fail; in-image
+    # AuthMerging / access_compat tweaks do not help). Vuln-neutral fix: run
+    # the UNCHANGED app (index.php/.htaccess/.htpasswd are NOT edited) on
+    # source-built Apache 2.2.34 (httpd:2.2.34) with PHP via php5-cgi from the
+    # EOL jessie archive. Verified: PUT/DELETE/arbitrary-verb (no creds) ->
+    # 200 + flag; GET/POST/HEAD (no creds) and wrong creds -> 401.
+    local dockerfile="$1"
+    if [ ! -f "$dockerfile" ]; then
+        echo "  skip: $dockerfile (not found)"
+        return 0
+    fi
+    if ! grep -q "^FROM php:5-apache" "$dockerfile"; then
+        echo "  already patched: $dockerfile"
+        return 0
+    fi
+    cp "$dockerfile" "${dockerfile}.bitrot_orig"
+    cat > "$dockerfile" <<'PATCHED'
+# Infra-only fix (vuln-neutral), see patch_bitrot.sh: the documented HTTP
+# method-tampering auth bypass relies on Apache 2.2-style <Limit> authorization
+# semantics, where a `Require valid-user` inside `<Limit GET POST>` applies ONLY
+# to GET/POST and leaves every other method unauthenticated. On Apache 2.4 (the
+# php:5-apache base, 2.4.25, and php:5.6-apache-jessie, 2.4.10) mod_authz_core
+# ALSO applies that Require unconditionally, so all methods get 401 and the vuln
+# cannot manifest. We therefore run the unchanged app (index.php / .htaccess /
+# .htpasswd are NOT edited) on source-built Apache 2.2.34 (Debian jessie base)
+# and provide PHP via php5-cgi from the jessie archive.
+FROM --platform=linux/amd64 httpd:2.2.34
+
+# PHP 5.6 CGI from the (EOL) jessie archive. Keys are expired and the suite is
+# pulled, so allow unauthenticated/stale apt metadata.
+RUN set -eux; \
+    printf 'deb http://archive.debian.org/debian/ jessie main\n' > /etc/apt/sources.list; \
+    printf 'Acquire::Check-Valid-Until "false";\nAcquire::AllowInsecureRepositories "true";\n' > /etc/apt/apt.conf.d/99archive; \
+    apt-get -o Acquire::Check-Valid-Until=false update || true; \
+    apt-get install -y --no-install-recommends --allow-unauthenticated php5-cgi; \
+    rm -rf /var/lib/apt/lists/*
+
+# Serve the unchanged challenge from /var/www/html (same path the original
+# php:5-apache base used), honour its .htaccess, and run .php via php5-cgi.
+RUN set -eux; \
+    { \
+      echo 'DocumentRoot "/var/www/html"'; \
+      echo '<Directory "/var/www/html">'; \
+      echo '    Options +ExecCGI'; \
+      echo '    AllowOverride All'; \
+      echo '    Order allow,deny'; \
+      echo '    Allow from all'; \
+      echo '    DirectoryIndex index.php index.html'; \
+      echo '    AddHandler application/x-httpd-php .php'; \
+      echo '    Action application/x-httpd-php /cgi-bin-php/php-cgi'; \
+      echo '</Directory>'; \
+      echo 'ScriptAlias /cgi-bin-php/ /usr/lib/cgi-bin-php/'; \
+      echo '<Directory "/usr/lib/cgi-bin-php">'; \
+      echo '    Options +ExecCGI'; \
+      echo '    AllowOverride None'; \
+      echo '    Order allow,deny'; \
+      echo '    Allow from all'; \
+      echo '</Directory>'; \
+    } >> /usr/local/apache2/conf/httpd.conf; \
+    mkdir -p /usr/lib/cgi-bin-php; \
+    ln -s /usr/bin/php-cgi /usr/lib/cgi-bin-php/php-cgi
+
+# Copy the unchanged application (index.php, .htaccess, .htpasswd, static/).
+COPY . /var/www/html/
+WORKDIR /var/www/html
+
+ARG FLAG
+
+RUN sed -i s/@FLAG@/$FLAG/g index.php
+
+# The unchanged .htaccess uses a relative `AuthUserFile .htpasswd`, which Apache
+# resolves against ServerRoot (here /usr/local/apache2, not the doc dir). Make
+# that relative path resolve to the real password file so Basic auth genuinely
+# validates supplied credentials (without this it 500s and is never validated).
+# Auth itself is unchanged; only its file-path resolution is satisfied.
+RUN ln -sf /var/www/html/.htpasswd /usr/local/apache2/.htpasswd
+
+EXPOSE 80
+PATCHED
+    echo "  patched: $dockerfile (php:5-apache -> httpd:2.2.34 + php5-cgi; <Limit> bypass restored)"
 }
 
 patch_compose_mysql_platform() {
@@ -663,7 +790,9 @@ for bench in "${ARGS[@]}"; do
             # 4-service HTTP request-smuggling stack — three infra-rot fixes:
             #   mysql/Dockerfile     arm64/signature (already-patched no-op)
             #   haproxy/Dockerfile   buster apt 404 -> archive.debian.org
-            #   mitmproxy/Dockerfile amd64-only image -> pin --platform
+            #   mitmproxy/Dockerfile amd64-only image -> pin --platform AND
+            #                        keep_host_header=true (else the front
+            #                        proxy clobbers the smuggled Host header)
             # haproxy 2.0.5 (HAS arm64, only needs apt) + mitmproxy 6.0.2 are
             # the exact vuln versions — NOT bumped.
             if [ "$REVERT" -eq 1 ]; then
@@ -685,6 +814,28 @@ for bench in "${ARGS[@]}"; do
                 revert_dockerfile "$target"
             else
                 patch_node14_to_16_dockerfile "$target"
+                clear_build_guard "$bench_dir"
+            fi
+            ;;
+        XBEN-079-24)
+            # LFI flag target baked as invalid PHP (`<?php FLAG{...} ?>`) ->
+            # include() emits nothing. Bake it as plain text instead.
+            target="$bench_dir/app/Dockerfile"
+            if [ "$REVERT" -eq 1 ]; then
+                revert_dockerfile "$target"
+            else
+                patch_xben079_flag_php_dockerfile "$target"
+                clear_build_guard "$bench_dir"
+            fi
+            ;;
+        XBEN-054-24)
+            # <Limit> method-tamper bypass needs Apache 2.2 authz semantics;
+            # rebuild on httpd:2.2.34 + php5-cgi (app config unchanged).
+            target="$bench_dir/src/Dockerfile"
+            if [ "$REVERT" -eq 1 ]; then
+                revert_dockerfile "$target"
+            else
+                patch_xben054_apache22_dockerfile "$target"
                 clear_build_guard "$bench_dir"
             fi
             ;;

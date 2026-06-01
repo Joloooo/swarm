@@ -112,6 +112,9 @@ if [ "${#ARGS[@]}" -eq 0 ]; then
         # archive.debian.org (base image + versions left unchanged).
         XBEN-067-24 XBEN-089-24 XBEN-090-24 XBEN-091-24 XBEN-093-24
         XBEN-094-24 XBEN-100-24
+        # node:14-alpine can't parse a Node 15+ operator in a transitive
+        # s3rver dep -> bump the s3 backend to node:16-alpine.
+        XBEN-084-24
     )
 fi
 
@@ -440,6 +443,49 @@ patch_debian_apt_archive_dockerfile() {
     echo "  patched: $dockerfile (debian apt -> archive.debian.org, versions preserved)"
 }
 
+patch_mitmproxy_platform_dockerfile() {
+    # XBEN-066-24 mitmproxy service: mitmproxy/mitmproxy:6.0.2 ships only an
+    # amd64 image (no arm64 manifest), so on Apple Silicon compose warns
+    # about a platform mismatch and the container can fail to run cleanly.
+    # Pin --platform=linux/amd64 so it runs via Rosetta. mitmproxy 6.0.2 is
+    # the exact proxy version in this benchmark's request-smuggling chain —
+    # NOT bumped; only the platform is pinned.
+    local dockerfile="$1"
+    if [ ! -f "$dockerfile" ]; then
+        echo "  skip: $dockerfile (not found)"
+        return 0
+    fi
+    if ! grep -q "^FROM mitmproxy/mitmproxy:6.0.2" "$dockerfile"; then
+        echo "  already patched: $dockerfile"
+        return 0
+    fi
+    cp "$dockerfile" "${dockerfile}.bitrot_orig"
+    inplace_sed 's|^FROM mitmproxy/mitmproxy:6.0.2|FROM --platform=linux/amd64 mitmproxy/mitmproxy:6.0.2|' "$dockerfile"
+    echo "  patched: $dockerfile (mitmproxy pinned --platform=linux/amd64)"
+}
+
+patch_node14_to_16_dockerfile() {
+    # XBEN-084-24 s3 service: pinned node:14-alpine. s3rver's transitive dep
+    # @so-ric/colorspace uses the `||=` operator (Node 15+), which the Node
+    # 14 runtime cannot parse — the fake-S3 backend crashes at startup and
+    # its service_healthy gate never lets frontend/nginx come up. Bumping
+    # the s3 BACKEND runtime to node:16-alpine fixes parsing; the
+    # benchmark's vulnerability lives in the frontend bucket-auth logic, so
+    # the s3 runtime bump is vuln-neutral.
+    local dockerfile="$1"
+    if [ ! -f "$dockerfile" ]; then
+        echo "  skip: $dockerfile (not found)"
+        return 0
+    fi
+    if ! grep -q "^FROM node:14-alpine" "$dockerfile"; then
+        echo "  already patched: $dockerfile"
+        return 0
+    fi
+    cp "$dockerfile" "${dockerfile}.bitrot_orig"
+    inplace_sed 's|^FROM node:14-alpine|FROM node:16-alpine|' "$dockerfile"
+    echo "  patched: $dockerfile (node:14-alpine -> node:16-alpine, frontend vuln preserved)"
+}
+
 patch_compose_mysql_platform() {
     # XBEN-039/040: the db service is `image: mysql:5.7` with no
     # platform. The mysql:5.7 tag has no linux/arm64 manifest, so the
@@ -610,6 +656,35 @@ for bench in "${ARGS[@]}"; do
             else
                 patch_mysql_dockerfile "$bench_dir/mysql/Dockerfile"
                 patch_debian_apt_archive_dockerfile "$bench_dir/php/Dockerfile"
+                clear_build_guard "$bench_dir"
+            fi
+            ;;
+        XBEN-066-24)
+            # 4-service HTTP request-smuggling stack — three infra-rot fixes:
+            #   mysql/Dockerfile     arm64/signature (already-patched no-op)
+            #   haproxy/Dockerfile   buster apt 404 -> archive.debian.org
+            #   mitmproxy/Dockerfile amd64-only image -> pin --platform
+            # haproxy 2.0.5 (HAS arm64, only needs apt) + mitmproxy 6.0.2 are
+            # the exact vuln versions — NOT bumped.
+            if [ "$REVERT" -eq 1 ]; then
+                revert_dockerfile "$bench_dir/mysql/Dockerfile"
+                revert_dockerfile "$bench_dir/haproxy/Dockerfile"
+                revert_dockerfile "$bench_dir/mitmproxy/Dockerfile"
+            else
+                patch_mysql_dockerfile "$bench_dir/mysql/Dockerfile"
+                patch_debian_apt_archive_dockerfile "$bench_dir/haproxy/Dockerfile"
+                patch_mitmproxy_platform_dockerfile "$bench_dir/mitmproxy/Dockerfile"
+                clear_build_guard "$bench_dir"
+            fi
+            ;;
+        XBEN-084-24)
+            # s3 backend on node:14-alpine can't parse a Node 15+ `||=` in a
+            # transitive s3rver dep -> backend crashes -> stack never starts.
+            target="$bench_dir/s3/Dockerfile"
+            if [ "$REVERT" -eq 1 ]; then
+                revert_dockerfile "$target"
+            else
+                patch_node14_to_16_dockerfile "$target"
                 clear_build_guard "$bench_dir"
             fi
             ;;

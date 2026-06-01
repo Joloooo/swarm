@@ -650,6 +650,60 @@ def load_list_file(path: Path) -> list[str]:
     return ids
 
 
+def _setup_usage_guard(args, ids: list[str]):
+    """Build the per-benchmark usage-guard callback, or ``None``.
+
+    Active only when ``--usage-guard`` is set AND the sweep has more than one
+    benchmark — a single highlighted run never waits (the TUI scope decision).
+    Threshold / margin resolve from the CLI flags, then the ``SWARM_USAGE_*``
+    env vars, then the :mod:`src.cli.usage_guard` defaults (70% / 5 min).
+
+    The returned zero-arg callable runs one pre-benchmark check: it blocks
+    until the selected account's 5-hour usage is under threshold, or raises
+    :class:`usage_guard.UsageGuardAbort` after the configured retries — the
+    caller turns that into an early sweep stop.
+    """
+    if not getattr(args, "usage_guard", False) or len(ids) <= 1:
+        return None
+
+    import os
+
+    from src.cli import codex_accounts, usage_guard
+
+    account = codex_accounts.selected()
+    threshold = (
+        args.usage_threshold
+        if args.usage_threshold is not None
+        else float(os.environ.get("SWARM_USAGE_THRESHOLD",
+                                  usage_guard.DEFAULT_THRESHOLD_PCT))
+    )
+    margin_min = (
+        args.usage_margin_min
+        if args.usage_margin_min is not None
+        else float(os.environ.get("SWARM_USAGE_MARGIN_MIN", 5))
+    )
+    margin_seconds = int(margin_min * 60)
+
+    # warn-level so it survives a silent sweep (info is suppressed there).
+    LIVE.runner_message(
+        f"usage guard ON — pacing {len(ids)} benchmarks on Codex account "
+        f"'{codex_accounts.display_name(account)}' at ≥{threshold:g}% 5h usage "
+        f"(wait = reset + {margin_min:g}m); on a failed check retries "
+        f"{usage_guard.FETCH_ATTEMPTS}× then aborts the sweep",
+        level="warn",
+    )
+
+    def _guard() -> None:
+        usage_guard.wait_until_clear(
+            account,
+            threshold_percent=threshold,
+            margin_seconds=margin_seconds,
+            log=lambda m, level="info": LIVE.runner_message(m, level=level),
+        )
+
+    return _guard
+
+
 async def main_async(args) -> int:
     ok, docker_error = docker_is_available()
     if not ok:
@@ -694,8 +748,22 @@ async def main_async(args) -> int:
             str((run_dir(make_run_id(benchmark_id=ids[0]))).resolve())
             if ids else None
         )
+        # Surface WHICH Codex account this run will spend on, so the active
+        # selection (SWARM_CODEX_HOME) is verifiable at a glance in the banner
+        # instead of having to grep logs. Best-effort — never blocks the banner.
+        model_info = current_default_config()
+        try:
+            from src.cli import codex_accounts
+            sel = codex_accounts.selected()
+            label = codex_accounts.display_name(sel)
+            acc = codex_accounts.account_id(sel)
+            if acc:
+                label = f"{label}  …{acc[-6:]}"
+            model_info = {**model_info, "codex_account": label}
+        except Exception:  # noqa: BLE001
+            pass
         LIVE.startup_banner(
-            model_info=current_default_config(),
+            model_info=model_info,
             log_dir=first_log_dir,
             bench_ids=list(ids),
             budgets_text=describe_config(),
@@ -713,9 +781,26 @@ async def main_async(args) -> int:
 
     LIVE.runner_message(f"running {len(ids)} benchmark(s)")
     LIVE.runner_message(f"sweep log → {sweep_log_path}")
+
+    # Usage guard: pace a multi-benchmark sweep against the selected Codex
+    # account's 5-hour limit (None for a single-benchmark run). See
+    # src/cli/usage_guard.py.
+    guard = _setup_usage_guard(args, ids)
+
     summary = {"pass": 0, "fail": 0, "error": 0}
+    aborted = False
 
     for bid in ids:
+        # Pace the sweep BEFORE starting this benchmark. On a usage-check
+        # failure the guard retries, then raises UsageGuardAbort — we stop the
+        # sweep rather than run blind into the rate limit.
+        if guard is not None:
+            try:
+                guard()
+            except Exception as exc:  # noqa: BLE001 — UsageGuardAbort etc. → stop
+                LIVE.runner_message(f"usage guard: {exc}", level="error")
+                aborted = True
+                break
         r = await run_one(bid, skip_build=args.skip_build)
         path = write_jsonl(r)
 
@@ -765,6 +850,13 @@ async def main_async(args) -> int:
     )
     LIVE.runner_message(f"sweep log saved → {sweep_log_path}")
     set_sweep_log_file(None)
+    if aborted:
+        LIVE.runner_message(
+            "sweep aborted early by the usage guard (remaining benchmarks "
+            "not run)",
+            level="error",
+        )
+        return 5
     return 0
 
 
@@ -782,6 +874,23 @@ def main() -> None:
                     help="skip benchmark IDs already present in results/xbow_*.jsonl")
     ap.add_argument("--retry-errors", action="store_true",
                     help="with --resume, retry IDs whose previous row had an error")
+    ap.add_argument(
+        "--usage-guard", action="store_true",
+        help="for a multi-benchmark sweep, wait before each benchmark until "
+             "the selected Codex account's 5-hour usage is back under the "
+             "threshold (paces the sweep so it doesn't hit the rate limit). "
+             "No effect on a single-benchmark run.",
+    )
+    ap.add_argument(
+        "--usage-threshold", type=float, default=None,
+        help="usage guard: 5-hour used-percent that triggers a wait "
+             "(default 70, or SWARM_USAGE_THRESHOLD).",
+    )
+    ap.add_argument(
+        "--usage-margin-min", type=float, default=None,
+        help="usage guard: minutes to wait past the window reset, for safety "
+             "(default 5, or SWARM_USAGE_MARGIN_MIN).",
+    )
     verbosity = ap.add_mutually_exclusive_group()
     verbosity.add_argument(
         "--verbose", "-v", action="store_true",

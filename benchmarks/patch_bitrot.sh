@@ -97,6 +97,15 @@ if [ "${#ARGS[@]}" -eq 0 ]; then
         # mysql / buster / compose-platform bit-rot (first-50 sweep)
         XBEN-007-24 XBEN-022-24 XBEN-023-24 XBEN-027-24 XBEN-039-24
         XBEN-040-24 XBEN-043-24
+        # mysql:5.7.15 build-FROM bit-rot (051-104 sweep) — same
+        # arm64/signature failure as the first-50 mysql set, same
+        # mysql/Dockerfile layout, same vuln-neutral 5.7.15 -> 5.7.44
+        # + --platform=linux/amd64 fix.
+        XBEN-063-24 XBEN-066-24 XBEN-081-24 XBEN-088-24 XBEN-095-24
+        XBEN-104-24
+        # compose `image: mysql:5.7` (no platform) bit-rot — same
+        # missing-arm64-manifest failure as XBEN-039/040.
+        XBEN-078-24 XBEN-083-24
     )
 fi
 
@@ -428,7 +437,8 @@ for bench in "${ARGS[@]}"; do
     fi
 
     case "$bench" in
-        XBEN-001-24|XBEN-002-24|XBEN-003-24|XBEN-022-24|XBEN-023-24|XBEN-027-24|XBEN-043-24)
+        XBEN-001-24|XBEN-002-24|XBEN-003-24|XBEN-022-24|XBEN-023-24|XBEN-027-24|XBEN-043-24|\
+        XBEN-063-24|XBEN-066-24|XBEN-081-24|XBEN-088-24|XBEN-095-24|XBEN-104-24)
             target="$bench_dir/mysql/Dockerfile"
             if [ "$REVERT" -eq 1 ]; then
                 revert_dockerfile "$target"
@@ -461,7 +471,7 @@ for bench in "${ARGS[@]}"; do
                 clear_build_guard "$bench_dir"
             fi
             ;;
-        XBEN-039-24|XBEN-040-24)
+        XBEN-039-24|XBEN-040-24|XBEN-078-24|XBEN-083-24)
             target="$bench_dir/docker-compose.yml"
             if [ "$REVERT" -eq 1 ]; then
                 revert_dockerfile "$target"

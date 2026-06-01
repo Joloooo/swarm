@@ -1700,9 +1700,11 @@ class _Live:
         mode = _mode()
 
         if mode == "silent":
+            acct = mi.get("codex_account")
+            tail = f"  acct={acct}" if acct else ""
             _emit(
                 f"=== SwarmAttacker  {provider}/{model}  {mode}  "
-                f"{bench_count} benches ==="
+                f"{bench_count} benches{tail} ==="
             )
             return
 
@@ -1733,6 +1735,12 @@ class _Live:
         rsum = mi.get("reasoning_summary") or "—"
         kv("Provider:   ", f"{provider}   {_paint('Model:', _BOLD)} {model}")
         kv("Reasoning:  ", f"effort={reff}  summary={rsum}")
+
+        # Which Codex login this run spends on — populated by xbow_runner from
+        # the active SWARM_CODEX_HOME selection so it's verifiable at a glance.
+        acct = mi.get("codex_account")
+        if acct:
+            kv("Account:    ", str(acct))
 
         # Budgets / verbosity from describe_config()
         cfg_block = (budgets_text or "").splitlines()
@@ -1767,7 +1775,9 @@ class _Live:
                 preview += f", … ({len(bench_ids)} total)"
             kv("Benches:    ", preview)
 
-        _emit(_paint(rule, _CYAN))
+        # Closing rule — match the opening width (``rule`` from the other
+        # banner helpers is not in scope here; use the computed ``cols``).
+        _emit(_paint("═" * cols, _CYAN))
 
 
 _AGENT_TAG_WIDTH = 24  # fits owasp-input-validation (22) without truncation

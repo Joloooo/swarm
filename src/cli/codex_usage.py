@@ -59,6 +59,10 @@ class Window:
     used_percent: float
     window_seconds: int
     reset_after_seconds: int
+    # Unix epoch (seconds, UTC) at which this window resets. Equals
+    # ``now + reset_after_seconds``; kept so the usage guard can fall back to
+    # it and render a local reset clock time. Default 0 = not provided.
+    reset_at: int = 0
 
     @property
     def name(self) -> str:
@@ -115,6 +119,7 @@ def _window(d: object) -> Window | None:
         used_percent=float(d.get("used_percent", 0) or 0),
         window_seconds=int(d.get("limit_window_seconds", 0) or 0),
         reset_after_seconds=int(d.get("reset_after_seconds", 0) or 0),
+        reset_at=int(d.get("reset_at", 0) or 0),
     )
 
 

@@ -106,6 +106,12 @@ if [ "${#ARGS[@]}" -eq 0 ]; then
         # compose `image: mysql:5.7` (no platform) bit-rot — same
         # missing-arm64-manifest failure as XBEN-039/040.
         XBEN-078-24 XBEN-083-24
+        # buster apt-404 bit-rot (051-104 sweep): EOL Debian buster
+        # mirrors return 404. python:3.8-slim-buster apps + php:7.1-apache
+        # (buster-based) — fixed by rewriting apt sources to
+        # archive.debian.org (base image + versions left unchanged).
+        XBEN-067-24 XBEN-089-24 XBEN-090-24 XBEN-091-24 XBEN-093-24
+        XBEN-094-24 XBEN-100-24
     )
 fi
 
@@ -385,6 +391,55 @@ patch_buster_apt_dockerfile() {
     echo "  patched: $dockerfile (buster apt -> archive.debian.org)"
 }
 
+patch_debian_apt_archive_dockerfile() {
+    # Generic Debian apt-mirror rescue for EOL-suite images whose
+    # Dockerfile does NOT literally contain the suite name — e.g.
+    # php:7.1-apache (XBEN-067, XBEN-081), which sits on Debian buster
+    # but only says `FROM php:7.1-apache`, so patch_buster_apt_dockerfile's
+    # "buster" guard would skip it. The image still pulls fine (no
+    # platform issue), but its baked-in apt sources point at the buster
+    # mirrors that 404'd after EOL. Rewrite them to archive.debian.org and
+    # disable Valid-Until on apt-get update. Base image AND all package
+    # versions are left UNCHANGED — only the apt mirror host changes — so
+    # the app-layer vuln (file upload / command injection) is untouched.
+    local dockerfile="$1"
+    if [ ! -f "$dockerfile" ]; then
+        echo "  skip: $dockerfile (not found)"
+        return 0
+    fi
+    if grep -q "archive.debian.org" "$dockerfile"; then
+        echo "  already patched: $dockerfile"
+        return 0
+    fi
+    if ! grep -qE "^FROM " "$dockerfile"; then
+        echo "  skip: $dockerfile (no FROM line)"
+        return 0
+    fi
+    cp "$dockerfile" "${dockerfile}.bitrot_orig"
+    awk '
+        BEGIN { injected = 0 }
+        /^FROM / && !injected {
+            print
+            print ""
+            print "# Patched by patch_bitrot.sh: this image sits on an EOL Debian"
+            print "# suite whose deb.debian.org mirrors 404; rewrite apt sources to"
+            print "# archive.debian.org. Base image + package versions unchanged."
+            print "RUN sed -i \\"
+            print "        -e \"s|http://deb.debian.org|http://archive.debian.org|g\" \\"
+            print "        -e \"s|http://security.debian.org|http://archive.debian.org|g\" \\"
+            print "        -e \"/-updates/d\" \\"
+            print "        /etc/apt/sources.list"
+            injected = 1
+            next
+        }
+        /apt-get update/ && $0 !~ /Acquire::Check-Valid-Until/ {
+            gsub(/apt-get update/, "apt-get -o Acquire::Check-Valid-Until=false update")
+        }
+        { print }
+    ' "${dockerfile}.bitrot_orig" > "$dockerfile"
+    echo "  patched: $dockerfile (debian apt -> archive.debian.org, versions preserved)"
+}
+
 patch_compose_mysql_platform() {
     # XBEN-039/040: the db service is `image: mysql:5.7` with no
     # platform. The mysql:5.7 tag has no linux/arm64 manifest, so the
@@ -438,7 +493,7 @@ for bench in "${ARGS[@]}"; do
 
     case "$bench" in
         XBEN-001-24|XBEN-002-24|XBEN-003-24|XBEN-022-24|XBEN-023-24|XBEN-027-24|XBEN-043-24|\
-        XBEN-063-24|XBEN-066-24|XBEN-081-24|XBEN-088-24|XBEN-095-24|XBEN-104-24)
+        XBEN-063-24|XBEN-088-24|XBEN-095-24|XBEN-104-24)
             target="$bench_dir/mysql/Dockerfile"
             if [ "$REVERT" -eq 1 ]; then
                 revert_dockerfile "$target"
@@ -522,6 +577,39 @@ for bench in "${ARGS[@]}"; do
                 revert_dockerfile "$target"
             else
                 patch_composer_no_audit_dockerfile "$target"
+                clear_build_guard "$bench_dir"
+            fi
+            ;;
+        XBEN-089-24|XBEN-090-24|XBEN-091-24|XBEN-093-24|XBEN-094-24|XBEN-100-24)
+            # python:3.8-slim-buster apps — buster apt mirrors 404 (EOL).
+            target="$bench_dir/app/Dockerfile"
+            if [ "$REVERT" -eq 1 ]; then
+                revert_dockerfile "$target"
+            else
+                patch_buster_apt_dockerfile "$target"
+                clear_build_guard "$bench_dir"
+            fi
+            ;;
+        XBEN-067-24)
+            # php:7.1-apache (buster-based; Dockerfile has no "buster"
+            # string) — apt sources 404. Keep php 7.1 exactly.
+            target="$bench_dir/php/Dockerfile"
+            if [ "$REVERT" -eq 1 ]; then
+                revert_dockerfile "$target"
+            else
+                patch_debian_apt_archive_dockerfile "$target"
+                clear_build_guard "$bench_dir"
+            fi
+            ;;
+        XBEN-081-24)
+            # Two services rot: mysql (arm64/signature) AND php:7.1-apache
+            # (buster apt 404). Patch both Dockerfiles.
+            if [ "$REVERT" -eq 1 ]; then
+                revert_dockerfile "$bench_dir/mysql/Dockerfile"
+                revert_dockerfile "$bench_dir/php/Dockerfile"
+            else
+                patch_mysql_dockerfile "$bench_dir/mysql/Dockerfile"
+                patch_debian_apt_archive_dockerfile "$bench_dir/php/Dockerfile"
                 clear_build_guard "$bench_dir"
             fi
             ;;

@@ -636,11 +636,36 @@ _TRANSIENT_HINTS = (
     "connecttimeout",
     "connectionreset",
     "connection reset",
+    # 5xx gateway wording — Codex sometimes raises a bare ``CodexAPIError``
+    # (no typed subclass) whose message carries these. The status-code
+    # check below is the primary signal; these catch the case where the
+    # status code is unavailable but the text is unambiguous.
+    "upstream connect error",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "connection timeout",
+    "disconnect/reset",
 )
 
 
 def _looks_transient(err: Exception) -> bool:
-    """Best-effort classifier for retryable supervisor failures."""
+    """Best-effort classifier for retryable supervisor failures.
+
+    A 5xx from Codex's gateway (502/503/504, …) is a server-side
+    capacity/transport blip on OpenAI's side — not our prompt, not our
+    quota — and almost always succeeds on the next try. Match by HTTP
+    status first (``CodexAPIError`` carries ``status_code``); fall back
+    to message/type substrings only when no status is attached. Note the
+    planner's outer loop catches ``CodexCyberPolicyError`` /
+    ``CodexQuotaExceededError`` / ``CodexContextWindowError`` /
+    ``CodexInvalidPromptError`` as *non-retryable* BEFORE this is
+    consulted, so a genuine policy refusal or real quota exhaustion still
+    stops the run — this only governs the transport-error branch.
+    """
+    status = getattr(err, "status_code", None)
+    if isinstance(status, int) and 500 <= status <= 599:
+        return True
     name = type(err).__name__.lower()
     msg = str(err).lower()
     return any(h in name or h in msg for h in _TRANSIENT_HINTS)

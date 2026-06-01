@@ -12,11 +12,12 @@ with no positional argument and no benchmark shortcut. The flow:
         - on Ctrl-C / "Quit", exit cleanly.
 
 Docker bootstrap is **lazy**: ``docker_boot.ensure_ready()`` is only
-called right before a benchmark action is dispatched (Pentest 1 /
-15 daily / 15 silent / all). The menu itself, config edits, and
-Quit never trigger Docker Desktop — SwarmAttacker only needs Docker
-when running pentest containers. ``--no-docker`` still skips the
-bootstrap even for benchmark actions (useful on remote VMs).
+called right before a benchmark run is dispatched (after the user
+picks one or more benchmarks in the xbow picker). The menu itself,
+config edits, and Quit never trigger Docker Desktop — SwarmAttacker
+only needs Docker when running pentest containers. ``--no-docker``
+still skips the bootstrap even for benchmark runs (useful on remote
+VMs).
 
 Ctrl-C policy: ``questionary.select`` returns ``None`` when the user
 hits Ctrl-C. We treat that as "go back one level" rather than
@@ -30,6 +31,10 @@ import argparse
 from typing import Any
 
 import questionary
+from prompt_toolkit.application import Application, get_app
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
 from questionary import Choice
 from questionary.prompts.common import InquirerControl
 from rich.console import Console
@@ -43,16 +48,15 @@ from src.cli import (
     docker_boot,
     runner,
 )
-from src.cli.bench_discovery import count_all
 
 
 _console = Console(stderr=True)
 
 
-# How many benchmarks to surface in the single-container picker (sorted
-# by id, capped). Bump this when you start running deeper into the
-# XBEN catalogue.
-_PICKER_LIMIT = 50
+# The single-container picker shows every XBEN-*-24 benchmark on disk
+# (104 at last count), laid out in a column grid. ``None`` means no cap;
+# set an int here only if you ever need to surface just the first N.
+_PICKER_LIMIT: int | None = None
 
 # The ✓/✗ marks next to each benchmark are *manual triage state* — you
 # set them yourself by pressing ``t`` in the picker to cycle the
@@ -104,22 +108,6 @@ def main_loop(args: argparse.Namespace) -> None:
             if not _ensure_docker(args):
                 continue
             runner.run_queue(run_list)
-        elif action == "first5_patched":
-            if not _ensure_docker(args):
-                continue
-            runner.run_first5_patched()
-        elif action == "daily_compact":
-            if not _ensure_docker(args):
-                continue
-            runner.run_daily(silent=False)
-        elif action == "daily_silent":
-            if not _ensure_docker(args):
-                continue
-            runner.run_daily(silent=True)
-        elif action == "all":
-            if not _ensure_docker(args):
-                continue
-            runner.run_all()
         elif action == "config":
             _config_menu()
 
@@ -147,26 +135,15 @@ def _ensure_docker(args: argparse.Namespace) -> bool:
 # ---------------------------------------------------------------------------
 
 def _top_level() -> str | None:
-    n_all = count_all()
-    all_label = (
-        f"Pentest all {n_all} XBEN benchmarks"
-        if n_all
-        else "Pentest all XBEN benchmarks  (submodule not initialised)"
-    )
-
     # TEMPORARY emergency Codex-account switcher row. Always shown (the main
     # login always exists); Tab cycles main → extra accounts. Fully additive
     # — remove this row + the helpers below and the menu is unchanged.
     choices: list[Choice] = [
         Choice(_account_label(), value="__codex_switch__"),
         Choice("📊 Codex usage (5-hour / weekly) — fetch live", value="__codex_usage__"),
-        Choice("xbow benchmark  (pick one or queue several to run in order)",    value="xbow"),
-        Choice("Pentest first 5 patched (XBEN-001 to 005, bit-rot fixes first)", value="first5_patched"),
-        Choice("Pentest 15 containers (daily, compact)",                         value="daily_compact"),
-        Choice("Pentest 15 containers (daily, silent)",                          value="daily_silent"),
-        Choice(all_label,                                                        value="all", disabled=None if n_all else "submodule missing"),
-        Choice("Edit config",                                                    value="config"),
-        Choice("Quit",                                                           value="quit"),
+        Choice("xbow benchmark  (pick one or queue several to run in order)", value="xbow"),
+        Choice("Edit config",                                                 value="config"),
+        Choice("Quit",                                                        value="quit"),
     ]
 
     question = questionary.select(
@@ -214,7 +191,8 @@ def _bind_account_tab(question: questionary.Question) -> None:
     Swaps ~/.codex/auth.json between the snapshots in ~/.codex-accounts/
     via :mod:`src.cli.codex_accounts`, then rebuilds the account row's
     label and redraws — so switching happens without leaving the menu.
-    Mirrors the reach-into-the-app pattern used by :func:`_bind_keys`.
+    Reaches into the finished questionary ``Application`` to locate its
+    ``InquirerControl`` and register the Tab binding against it.
     """
     app = question.application
     ic = next(
@@ -293,38 +271,84 @@ def _show_codex_usage() -> None:
 # Single-benchmark picker
 # ---------------------------------------------------------------------------
 
-# Multi-line key legend shown under the question. questionary renders
-# the ``instruction`` string as part of the prompt block (above the
-# rows) and redraws it every frame, so a bulleted block here stays
-# visible and pinned to the question no matter how the list scrolls.
-_PICKER_LEGEND = (
-    "\n"
-    "   • ↑/↓      move\n"
-    "   • r        queue / unqueue  →  runs 1st, 2nd, 3rd … in that order\n"
-    "   • t        mark result  →  ✓ ok · ✗ fail · none\n"
-    "   • enter    run the queue  (or just the highlighted row if nothing is queued)\n"
-    "   • Ctrl-C   back"
-)
+# Column-grid geometry. The picker lays every benchmark out in a grid
+# filled column-major (top-to-bottom, then the next column to the right)
+# so the sorted ids still read straight down each column. ``_MAX_COLS``
+# caps the width; fewer columns are used automatically on a narrow
+# terminal. With 104 benchmarks and a wide terminal this is a 26×4 grid
+# instead of a 104-row single column.
+_MAX_COLS = 4
+_GAP = 2             # blank columns between grid cells
+_SUFFIX_RESERVE = 5  # width kept for the green " [N]" run-order suffix
+
+
+def _grid_dims(n: int, width: int, content_w: int) -> tuple[int, int]:
+    """Return ``(rows, cols)`` for an ``n``-cell column-major grid.
+
+    ``cols`` is the most that fit in ``width`` (capped at ``_MAX_COLS``),
+    then shrunk so the last column is never empty; ``rows`` follows.
+    """
+    stride = content_w + _GAP
+    cols = max(1, min(_MAX_COLS, width // stride))
+    cols = min(cols, n)
+    rows = -(-n // cols)   # ceil — height needed for that many columns
+    cols = -(-n // rows)   # drop any now-empty trailing column
+    return rows, cols
+
+
+def _cell_segments(
+    bench_id: str,
+    result: str | None,
+    queue_pos: int | None,
+    selected: bool,
+    content_w: int,
+) -> list[tuple[str, str]]:
+    """Formatted-text segments for one grid cell, padded to ``content_w``.
+
+    The ✓/✗ result mark is coloured, the ``[N]`` run-order suffix is
+    green, and the whole cell is drawn in reverse video when it is the
+    pointed-at benchmark (so the cursor reads as a highlighted bar).
+    """
+    if result == bench_results.OK:
+        segs = [("fg:ansigreen bold", "✓"), ("", " ")]
+    elif result == bench_results.FAIL:
+        segs = [("fg:ansired bold", "✗"), ("", " ")]
+    else:
+        segs = [("", "  ")]
+    segs.append(("", bench_id))
+    if queue_pos is not None:
+        segs.append(("fg:ansibrightgreen bold", f" [{queue_pos}]"))
+    used = sum(len(text) for _, text in segs)
+    if used < content_w:
+        segs.append(("", " " * (content_w - used)))
+    if selected:
+        segs = [((style + " reverse").strip(), text) for style, text in segs]
+    return segs
 
 
 def _pick_bench() -> list[str] | None:
     """Let the user pick one benchmark — or queue several to run in order.
 
-    Lists the first ``_PICKER_LIMIT`` XBEN benchmarks (sorted by id),
-    each annotated with its manual ✓/✗ triage mark (from
-    ``benchmarks/bench_results.json``). Two keys act on the highlighted
-    row (see :func:`_bind_keys`):
+    Every XBEN-*-24 benchmark on disk is shown in a column grid (filled
+    column-major, navigated with the arrow keys), each annotated with its
+    manual ✓/✗ triage mark from ``benchmarks/bench_results.json``. Two
+    keys act on the highlighted cell:
 
-      ``t`` — cycle the result mark ✓ → ✗ → none (persisted).
-      ``r`` — add / remove the benchmark from an ordered run queue,
-              shown as a green ``▸ 1st run`` / ``▸ 2nd run`` suffix.
+      ``t`` — cycle the result mark ✓ → ✗ → none (persisted immediately).
+      ``r`` — add / remove the benchmark from an ordered run queue, shown
+              as a green ``[1]`` / ``[2]`` suffix in run order.
 
     Returns the ordered list of benchmark ids to run:
 
       * a non-empty queue → that queue, in the order it was built;
-      * an empty queue    → just the highlighted row at ``enter``;
-      * ``None``          → the user backed out (Ctrl-C / "Back") or
-                            the submodule is missing.
+      * an empty queue    → just the highlighted cell at ``enter``;
+      * ``None``          → the user backed out (q / Ctrl-C) or the
+                            submodule is missing.
+
+    Unlike the rest of the TUI this is a hand-rolled prompt_toolkit
+    ``Application`` rather than a ``questionary.select`` — questionary
+    only renders a single vertical column, and we need a true grid with
+    left/right navigation so 100+ benchmarks fit on one screen.
     """
     ids = bench_discovery.list_ids(limit=_PICKER_LIMIT)
     if not ids:
@@ -336,118 +360,128 @@ def _pick_bench() -> list[str] | None:
         return None
 
     results = bench_results.load()
-    queue: list[str] = []  # ordered run queue, built live with ``r``.
+    queue: list[str] = []        # ordered run queue, built live with ``r``.
+    state = {"cursor": 0}        # flat index into ``ids`` of the pointed-at cell.
+    n = len(ids)
+    content_w = 2 + max(len(b) for b in ids) + _SUFFIX_RESERVE
 
-    choices = [
-        Choice(title=_bench_label(bench_id, results.get(bench_id), None), value=bench_id)
-        for bench_id in ids
-    ]
-    choices.append(Choice("← Back", value="__back__"))
+    def _width() -> int:
+        try:
+            return get_app().output.get_size().columns or 80
+        except Exception:  # noqa: BLE001 — size unavailable → safe default
+            return 80
 
-    question = questionary.select(
-        "Which benchmark(s) do you want to run?",
-        choices=choices,
-        instruction=_PICKER_LEGEND,
-    )
-    _bind_keys(question, results, queue)
+    def _dims() -> tuple[int, int]:
+        return _grid_dims(n, _width(), content_w)
 
-    picked = question.ask()
-    if picked is None or picked == "__back__":
-        return None
-    return list(queue) if queue else [picked]
+    def _move(dr: int, dc: int) -> None:
+        rows, cols = _dims()
+        i = state["cursor"]
+        row, col = i % rows, i // rows
+        if dc:
+            col = min(max(col + dc, 0), cols - 1)
+        if dr:
+            row = min(max(row + dr, 0), rows - 1)
+        # Clamp into the filled part of the target column (the last column
+        # may be short), so left/right never strand the cursor on a blank.
+        col_len = min((col + 1) * rows, n) - col * rows
+        row = min(row, col_len - 1)
+        state["cursor"] = col * rows + row
 
+    def _render() -> list[tuple[str, str]]:
+        rows, cols = _dims()
+        cur_id = ids[state["cursor"]]
+        out: list[tuple[str, str]] = [
+            ("bold", "Which benchmark(s) do you want to run?"),
+            ("fg:ansibrightblack", f"   ({n} benchmarks)\n"),
+            ("fg:ansibrightblack",
+             "↑/↓/←/→ move · r queue/unqueue · t mark ✓/✗ · "
+             "enter run · q/Ctrl-C back\n"),
+        ]
+        if queue:
+            out.append(("fg:ansibrightgreen bold", f"queue ({len(queue)}): "))
+            out.append(("fg:ansibrightgreen", " → ".join(queue) + "\n"))
+        else:
+            out.append(("fg:ansibrightblack",
+                        f"nothing queued — enter runs {cur_id}\n"))
+        out.append(("", "\n"))
+        for r in range(rows):
+            for c in range(cols):
+                i = c * rows + r
+                if i >= n:
+                    continue
+                bench_id = ids[i]
+                pos = queue.index(bench_id) + 1 if bench_id in queue else None
+                out.extend(_cell_segments(
+                    bench_id, results.get(bench_id), pos,
+                    i == state["cursor"], content_w,
+                ))
+                if c != cols - 1:
+                    out.append(("", " " * _GAP))
+            out.append(("", "\n"))
+        return out
 
-def _ordinal(n: int) -> str:
-    """1 → ``1st``, 2 → ``2nd``, 3 → ``3rd``, 4 → ``4th``, 11 → ``11th`` …"""
-    if 10 <= (n % 100) <= 20:
-        suffix = "th"
-    else:
-        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
-    return f"{n}{suffix}"
+    kb = KeyBindings()
 
+    @kb.add("up", eager=True)
+    @kb.add("k", eager=True)
+    def _(event) -> None:  # noqa: ANN001 (prompt_toolkit event)
+        _move(-1, 0)
 
-# prompt_toolkit formatted-text segments. questionary.Choice.title
-# accepts a list of (style, text) tuples; we use that to colour the
-# ✓ / ✗ result mark and the green run-order suffix while leaving the
-# benchmark id in the terminal default.
-def _bench_label(
-    bench_id: str, result: str | None, queue_pos: int | None
-) -> list[tuple[str, str]]:
-    if result == bench_results.OK:
-        mark = ("fg:ansigreen bold", "✓")
-    elif result == bench_results.FAIL:
-        mark = ("fg:ansired bold", "✗")
-    else:
-        mark = ("", " ")
-    segments = [mark, ("", f"  {bench_id}")]
-    if queue_pos is not None:
-        segments.append(("fg:ansibrightgreen bold", f"   ▸ {_ordinal(queue_pos)} run"))
-    return segments
+    @kb.add("down", eager=True)
+    @kb.add("j", eager=True)
+    def _(event) -> None:  # noqa: ANN001
+        _move(1, 0)
 
+    @kb.add("left", eager=True)
+    @kb.add("h", eager=True)
+    def _(event) -> None:  # noqa: ANN001
+        _move(0, -1)
 
-def _bind_keys(
-    question: questionary.Question,
-    results: dict[str, str],
-    queue: list[str],
-) -> None:
-    """Wire ``t`` (cycle result mark) and ``r`` (queue / unqueue) into the picker.
+    @kb.add("right", eager=True)
+    @kb.add("l", eager=True)
+    def _(event) -> None:  # noqa: ANN001
+        _move(0, 1)
 
-    ``questionary.select`` builds a prompt_toolkit ``Application`` but
-    exposes no hook for extra key bindings, so we reach into the
-    finished app: locate its ``InquirerControl`` (the control that
-    renders the rows), then register the two keys against the
-    pointed-at benchmark.
-
-      ``t`` cycles the result mark nothing → ✓ → ✗ and persists it to
-            ``bench_results.json``.
-      ``r`` appends the benchmark to ``queue`` (or removes it if already
-            queued); the queue's order is the run order.
-
-    After either key, every benchmark row's title is rebuilt from
-    current state — necessary because removing a queued benchmark
-    renumbers all the rows after it. The ``← Back`` row (and any
-    non-benchmark value) is ignored.
-
-    ``t`` / ``r`` are free here: the picker uses default
-    ``use_jk_keys`` (only ``j``/``k`` are bound for navigation) and no
-    search filter, so the bindings can't collide with movement or
-    typing.
-    """
-    app = question.application
-    ic = next(
-        c
-        for c in app.layout.find_all_controls()
-        if isinstance(c, InquirerControl)
-    )
-
-    def _refresh() -> None:
-        for choice in ic.choices:
-            bench_id = choice.value
-            if bench_id == "__back__":
-                continue
-            pos = queue.index(bench_id) + 1 if bench_id in queue else None
-            choice.title = _bench_label(bench_id, results.get(bench_id), pos)
-        app.invalidate()
-
-    @app.key_bindings.add("t", eager=True)
-    def _toggle_mark(event) -> None:  # noqa: ANN001 (prompt_toolkit event)
-        bench_id = ic.get_pointed_at().value
-        if bench_id == "__back__":
-            return
+    @kb.add("t", eager=True)
+    def _(event) -> None:  # noqa: ANN001
+        bench_id = ids[state["cursor"]]
         bench_results.cycle(results, bench_id)
         bench_results.save(results)
-        _refresh()
 
-    @app.key_bindings.add("r", eager=True)
-    def _toggle_queue(event) -> None:  # noqa: ANN001 (prompt_toolkit event)
-        bench_id = ic.get_pointed_at().value
-        if bench_id == "__back__":
-            return
+    @kb.add("r", eager=True)
+    def _(event) -> None:  # noqa: ANN001
+        bench_id = ids[state["cursor"]]
         if bench_id in queue:
             queue.remove(bench_id)
         else:
             queue.append(bench_id)
-        _refresh()
+
+    @kb.add("enter")
+    def _(event) -> None:  # noqa: ANN001
+        event.app.exit(result=list(queue) if queue else [ids[state["cursor"]]])
+
+    @kb.add("q")
+    @kb.add("c-c")
+    def _(event) -> None:  # noqa: ANN001
+        event.app.exit(result=None)
+
+    app = Application(
+        layout=Layout(HSplit([
+            Window(
+                FormattedTextControl(_render, focusable=True, show_cursor=False),
+                always_hide_cursor=True,
+            ),
+        ])),
+        key_bindings=kb,
+        full_screen=False,
+        mouse_support=False,
+        erase_when_done=True,
+    )
+    try:
+        return app.run()
+    except KeyboardInterrupt:
+        return None
 
 
 # ---------------------------------------------------------------------------

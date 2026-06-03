@@ -30,10 +30,16 @@ import os
 import sys
 from pathlib import Path
 
-# Status values. Absence of a key == "no mark yet".
-OK = "ok"
-FAIL = "fail"
-API = "api"  # codex/API or infra crash — run never got a fair attempt.
+# Status values + the run-result classifier live in one neutral module so
+# the terminal verdict (observability.live.bench_end) and these triage
+# marks can never disagree. Re-exported here so existing callers that read
+# ``bench_results.OK`` / ``bench_results.classify`` keep working unchanged.
+from src.benchmark_verdict import API, FAIL, OK, classify
+
+__all__ = [  # noqa: F822 — re-exports for the picker's public surface
+    "OK", "FAIL", "API", "classify",
+    "path", "load", "save", "cycle", "record",
+]
 
 # Cycle order when the user presses ``t`` on a row:
 # nothing → ✓ → ✗ → ~ → nothing.
@@ -118,37 +124,6 @@ def cycle(results: dict[str, str], bench_id: str) -> str | None:
     else:
         results[bench_id] = nxt
     return nxt
-
-
-# Error-string markers that mean "the run crashed before it could give a
-# fair verdict" rather than "the agent tried and failed". ``str.startswith``
-# takes this tuple directly. ``xbow_runner`` records errors as
-# ``"{ExceptionType}: {msg}"``; every codex/provider error subclasses
-# ``CodexAPIError`` (so the type name starts with ``Codex``), refusals are
-# ``RefusalError``, and a hung docker build/up is ``phase '…' timeout``.
-_CRASH_MARKERS: tuple[str, ...] = ("Codex", "RefusalError", "phase '")
-
-
-def classify(flag_found: bool, error: str | None) -> str:
-    """Map an :mod:`benchmarks.xbow_runner` result to a triage status.
-
-    * ``ok``   — a flag was captured. This wins even when a late timeout
-                 fired during graph wrap-up (``flag_found`` is still True),
-                 because the capture itself is what matters.
-    * ``api``  — the run crashed on a codex/provider error or an infra
-                 (docker build/up) timeout, so it never got a fair attempt
-                 and the result is unknown. See :data:`_CRASH_MARKERS`.
-    * ``fail`` — anything else with no flag: the agent ran its full time
-                 budget (``agent timeout after …``), looped out, or gave up.
-    """
-    if flag_found:
-        return OK
-    err = (error or "").strip()
-    if err.startswith("agent timeout after"):
-        return FAIL
-    if err.startswith(_CRASH_MARKERS):
-        return API
-    return FAIL
 
 
 def record(bench_id: str, status: str | None) -> str | None:

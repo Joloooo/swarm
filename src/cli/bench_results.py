@@ -1,17 +1,21 @@
-"""Persistent ✓/✗ triage marks for the ``swarm`` benchmark picker.
+"""Persistent ✓/✗/~ triage marks for the ``swarm`` benchmark picker.
 
 The single-container picker (:func:`src.cli.tui._pick_bench`) shows a
-green ✓ or red ✗ next to each XBEN id so you can see at a glance which
-benchmarks SwarmAttacker has cleared. Those marks are *manual triage
-state* — you set them yourself as you review runs by pressing ``t`` in
-the picker to cycle the highlighted row through ✓ → ✗ → no-mark.
+green ✓, red ✗ or yellow ~ next to each XBEN id so you can see at a
+glance which benchmarks SwarmAttacker has cleared. Those marks are
+*manual triage state* — you set them yourself as you review runs by
+pressing ``t`` in the picker to cycle the highlighted row through
+✓ → ✗ → ~ → no-mark.
 
 State lives in ``benchmarks/bench_results.json`` (a flat
 ``{bench_id: status}`` map) rather than a hard-coded dict, so toggles
 made in the TUI survive a restart. Status is one of:
 
-  ``"ok"``   → green ✓  (flag captured / run succeeded)
-  ``"fail"`` → red   ✗  (run failed / no flag)
+  ``"ok"``   → green  ✓  (flag captured / run succeeded)
+  ``"fail"`` → red    ✗  (run genuinely failed — ran its time budget
+                          or gave up, but found no flag)
+  ``"api"``  → yellow ~  (codex/API or infra crash — the run never got
+                          a fair attempt, so the result is unknown)
   *(absent)* → no mark yet
 
 Writes are atomic (``tmp`` + ``fsync`` + ``os.replace``) for the same
@@ -29,13 +33,15 @@ from pathlib import Path
 # Status values. Absence of a key == "no mark yet".
 OK = "ok"
 FAIL = "fail"
+API = "api"  # codex/API or infra crash — run never got a fair attempt.
 
 # Cycle order when the user presses ``t`` on a row:
-# nothing → ✓ → ✗ → nothing.
+# nothing → ✓ → ✗ → ~ → nothing.
 _CYCLE: dict[str | None, str | None] = {
     None: OK,
     OK: FAIL,
-    FAIL: None,
+    FAIL: API,
+    API: None,
 }
 
 # Seed written the first time the JSON file does not exist — mirrors the
@@ -78,7 +84,7 @@ def load() -> dict[str, str]:
         print(f"warning: failed to parse {p.name}: {exc}", file=sys.stderr)
         return dict(_SEED)
     # Keep only known statuses; silently drop anything stale/invalid.
-    return {k: v for k, v in data.items() if v in (OK, FAIL)}
+    return {k: v for k, v in data.items() if v in (OK, FAIL, API)}
 
 
 def save(results: dict[str, str]) -> None:
@@ -102,9 +108,9 @@ def save(results: dict[str, str]) -> None:
 def cycle(results: dict[str, str], bench_id: str) -> str | None:
     """Advance ``bench_id`` to its next status in place and return it.
 
-    nothing → ``ok`` → ``fail`` → nothing. When cycling back to "no
-    mark" the key is removed, so absence stays the single source of
-    truth for an unmarked benchmark.
+    nothing → ``ok`` → ``fail`` → ``api`` → nothing. When cycling back
+    to "no mark" the key is removed, so absence stays the single source
+    of truth for an unmarked benchmark.
     """
     nxt = _CYCLE[results.get(bench_id)]
     if nxt is None:

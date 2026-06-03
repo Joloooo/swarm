@@ -398,9 +398,22 @@ def _pick_bench() -> list[str] | None:
     def _render() -> list[tuple[str, str]]:
         rows, cols = _dims()
         cur_id = ids[state["cursor"]]
+        # Live tally over the shown benchmarks — recomputed each render so
+        # it updates the instant a ``t`` toggle changes a mark.
+        marks = [results.get(b) for b in ids]
+        n_ok = marks.count(bench_results.OK)
+        n_fail = marks.count(bench_results.FAIL)
+        n_api = marks.count(bench_results.API)
+        n_none = n - n_ok - n_fail - n_api
         out: list[tuple[str, str]] = [
             ("bold", "Which benchmark(s) do you want to run?"),
             ("fg:ansibrightblack", f"   ({n} benchmarks)\n"),
+            ("fg:ansigreen bold", f"   ✓ {n_ok} solved"),
+            ("fg:ansibrightblack", "  ·  "),
+            ("fg:ansired bold", f"✗ {n_fail} failed"),
+            ("fg:ansibrightblack", "  ·  "),
+            ("fg:ansiyellow bold", f"~ {n_api} crashed"),
+            ("fg:ansibrightblack", f"  ·  {n_none} unmarked\n"),
             ("fg:ansibrightblack",
              "↑/↓/←/→ move · r queue/unqueue · t mark ✓/✗/~ · "
              "enter run · q/Ctrl-C back\n"),

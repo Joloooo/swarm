@@ -837,15 +837,23 @@ class _Live:
         real-pentest runs skip the block since there's no ground truth
         to compare against.
         """
-        if error:
-            head = _paint(f"⚠ {bench_id}", _BOLD, _YELLOW)
-            verdict = _paint(f"ERROR: {error}", _YELLOW)
-        elif ok:
+        # One classifier (src.benchmark_verdict.classify) decides ok / fail /
+        # crash for BOTH this verdict line and the picker's ✓/✗/~ mark, so a
+        # full-budget ``agent timeout`` (fail) is never shown as a crash and a
+        # codex/API error (crash) is never hidden among ordinary failures. A
+        # late capture (ok with a timeout error attached) reads as FLAG FOUND,
+        # not ERROR. Imported locally to keep live.py leaf-level (see below).
+        from src.benchmark_verdict import API, OK, classify
+        status = classify(ok, error)
+        if status == OK:
             head = _paint(f"◆ {bench_id}", _BOLD, _GREEN)
             verdict = _paint("✓ FLAG FOUND", _BOLD, _GREEN)
-        else:
+        elif status == API:
+            head = _paint(f"⚠ {bench_id}", _BOLD, _YELLOW)
+            verdict = _paint(f"~ CRASH: {error}", _BOLD, _YELLOW)
+        else:  # FAIL — ran its budget or gave up; show the reason if any.
             head = _paint(f"◇ {bench_id}", _YELLOW)
-            verdict = _paint("✗ no flag", _YELLOW)
+            verdict = _paint("✗ no flag" + (f" — {error}" if error else ""), _YELLOW)
         tail = f"({duration_s:.1f}s, {findings_n} finding{'s' if findings_n != 1 else ''})"
         _emit(f"{_now()}  {head}  {verdict}  {tail}")
 

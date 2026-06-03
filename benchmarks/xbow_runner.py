@@ -55,6 +55,14 @@ from src.observability import (
 
 logger = logging.getLogger(__name__)
 
+# Map the shared run verdict (src.benchmark_verdict) onto the sweep tally
+# buckets: flag → pass, genuine failure → fail, codex/infra crash → crash.
+_SUMMARY_KEY = {
+    bench_results.OK: "pass",
+    bench_results.FAIL: "fail",
+    bench_results.API: "crash",
+}
+
 XBOW_ROOT = Path(__file__).resolve().parents[2] / "Benchmarks" / "xbow-validation"
 RESULTS_DIR = Path(__file__).parent / "results"
 DAILY_LIST = Path(__file__).parent / "daily_15.txt"
@@ -788,7 +796,7 @@ async def main_async(args) -> int:
     # src/cli/usage_guard.py.
     guard = _setup_usage_guard(args, ids)
 
-    summary = {"pass": 0, "fail": 0, "error": 0}
+    summary = {"pass": 0, "fail": 0, "crash": 0}
     aborted = False
 
     for bid in ids:
@@ -805,24 +813,22 @@ async def main_async(args) -> int:
         r = await run_one(bid, skip_build=args.skip_build)
         path = write_jsonl(r)
 
-        # Mirror the verdict into the picker's ✓/✗/~ triage marks so the
-        # TUI grid reflects this run without a manual ``t`` press. The
-        # merge rule in bench_results.record protects a real ok/fail from
-        # being clobbered by a later codex/infra crash. Best-effort — a
-        # triage write must never break the sweep.
+        # Classify the run once — flag (ok) / fail / crash (api) — with the
+        # shared src.benchmark_verdict rule, and use that single verdict for
+        # BOTH the end-of-sweep tally and the picker mark so the terminal,
+        # the Summary line, and the ✓/✗/~ grid can never disagree. A
+        # full-budget ``agent timeout`` counts as fail, not crash.
+        status = bench_results.classify(bool(r["flag_found"]), r.get("error"))
+        summary[_SUMMARY_KEY[status]] += 1
+
+        # Mirror the verdict into the picker's ✓/✗/~ triage marks so the TUI
+        # grid reflects this run without a manual ``t`` press. The merge rule
+        # in bench_results.record protects a real ok/fail from being clobbered
+        # by a later codex/infra crash. Best-effort — must never break sweep.
         try:
-            bench_results.record(
-                bid, bench_results.classify(bool(r["flag_found"]), r.get("error"))
-            )
+            bench_results.record(bid, status)
         except Exception:  # noqa: BLE001 — triage write must not stop the sweep
             logger.exception("[%s] triage mark update failed", bid)
-
-        if r["error"]:
-            summary["error"] += 1
-        elif r["flag_found"]:
-            summary["pass"] += 1
-        else:
-            summary["fail"] += 1
 
         # Pull the most recent submission attempt for the
         # expected-vs-captured verification block in bench_end. Empty
@@ -859,7 +865,7 @@ async def main_async(args) -> int:
 
     LIVE.runner_message(
         f"Summary: {summary['pass']} pass, {summary['fail']} fail, "
-        f"{summary['error']} error / {len(ids)} total"
+        f"{summary['crash']} crash / {len(ids)} total"
     )
     LIVE.runner_message(f"sweep log saved → {sweep_log_path}")
     set_sweep_log_file(None)

@@ -33,6 +33,7 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage
 
+from src.cli import bench_results
 from src.graph import build_graph, config
 from src.nodes.base.flag_watcher import (
     get_captured_flag,
@@ -803,6 +804,18 @@ async def main_async(args) -> int:
                 break
         r = await run_one(bid, skip_build=args.skip_build)
         path = write_jsonl(r)
+
+        # Mirror the verdict into the picker's ✓/✗/~ triage marks so the
+        # TUI grid reflects this run without a manual ``t`` press. The
+        # merge rule in bench_results.record protects a real ok/fail from
+        # being clobbered by a later codex/infra crash. Best-effort — a
+        # triage write must never break the sweep.
+        try:
+            bench_results.record(
+                bid, bench_results.classify(bool(r["flag_found"]), r.get("error"))
+            )
+        except Exception:  # noqa: BLE001 — triage write must not stop the sweep
+            logger.exception("[%s] triage mark update failed", bid)
 
         if r["error"]:
             summary["error"] += 1

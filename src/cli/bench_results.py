@@ -118,3 +118,59 @@ def cycle(results: dict[str, str], bench_id: str) -> str | None:
     else:
         results[bench_id] = nxt
     return nxt
+
+
+# Error-string markers that mean "the run crashed before it could give a
+# fair verdict" rather than "the agent tried and failed". ``str.startswith``
+# takes this tuple directly. ``xbow_runner`` records errors as
+# ``"{ExceptionType}: {msg}"``; every codex/provider error subclasses
+# ``CodexAPIError`` (so the type name starts with ``Codex``), refusals are
+# ``RefusalError``, and a hung docker build/up is ``phase '…' timeout``.
+_CRASH_MARKERS: tuple[str, ...] = ("Codex", "RefusalError", "phase '")
+
+
+def classify(flag_found: bool, error: str | None) -> str:
+    """Map an :mod:`benchmarks.xbow_runner` result to a triage status.
+
+    * ``ok``   — a flag was captured. This wins even when a late timeout
+                 fired during graph wrap-up (``flag_found`` is still True),
+                 because the capture itself is what matters.
+    * ``api``  — the run crashed on a codex/provider error or an infra
+                 (docker build/up) timeout, so it never got a fair attempt
+                 and the result is unknown. See :data:`_CRASH_MARKERS`.
+    * ``fail`` — anything else with no flag: the agent ran its full time
+                 budget (``agent timeout after …``), looped out, or gave up.
+    """
+    if flag_found:
+        return OK
+    err = (error or "").strip()
+    if err.startswith("agent timeout after"):
+        return FAIL
+    if err.startswith(_CRASH_MARKERS):
+        return API
+    return FAIL
+
+
+def record(bench_id: str, status: str | None) -> str | None:
+    """Persist ``status`` for ``bench_id`` (load → merge → atomic save).
+
+    Called by the xbow_runner as each benchmark finishes so the picker's
+    ✓/✗/~ grid reflects the latest run without a manual ``t`` press.
+
+    Merge rule — a codex/API/infra crash (``api``) tells us nothing about
+    the benchmark, so it must never overwrite a real ``ok``/``fail``
+    verdict; it only fills an unmarked slot (or replaces a prior ``api``).
+    A real verdict (``ok``/``fail``) always wins, so a re-run that now
+    solves shows ✓ and a regression shows ✗. Returns the status actually
+    stored (which may be the preserved previous one).
+    """
+    results = load()
+    prev = results.get(bench_id)
+    if status == API and prev in (OK, FAIL):
+        return prev
+    if status is None:
+        results.pop(bench_id, None)
+    else:
+        results[bench_id] = status
+    save(results)
+    return status

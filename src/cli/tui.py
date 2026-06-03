@@ -58,9 +58,10 @@ _console = Console(stderr=True)
 # set an int here only if you ever need to surface just the first N.
 _PICKER_LIMIT: int | None = None
 
-# The ✓/✗ marks next to each benchmark are *manual triage state* — you
+# The ✓/✗/~ marks next to each benchmark are *manual triage state* — you
 # set them yourself by pressing ``t`` in the picker to cycle the
-# highlighted row through ✓ → ✗ → no-mark. They persist in
+# highlighted row through ✓ (solved) → ✗ (genuinely failed) → ~ (yellow:
+# codex/API or infra crash, no fair attempt) → no-mark. They persist in
 # ``benchmarks/bench_results.json`` via :mod:`src.cli.bench_results`.
 
 
@@ -307,7 +308,7 @@ def _cell_segments(
 ) -> list[tuple[str, str]]:
     """Formatted-text segments for one grid cell, padded to ``content_w``.
 
-    The ✓/✗ result mark is coloured, the ``[N]`` run-order suffix is
+    The ✓/✗/~ result mark is coloured, the ``[N]`` run-order suffix is
     green, and the whole cell is drawn in reverse video when it is the
     pointed-at benchmark (so the cursor reads as a highlighted bar).
     """
@@ -315,6 +316,8 @@ def _cell_segments(
         segs = [("fg:ansigreen bold", "✓"), ("", " ")]
     elif result == bench_results.FAIL:
         segs = [("fg:ansired bold", "✗"), ("", " ")]
+    elif result == bench_results.API:
+        segs = [("fg:ansiyellow bold", "~"), ("", " ")]
     else:
         segs = [("", "  ")]
     segs.append(("", bench_id))
@@ -333,10 +336,12 @@ def _pick_bench() -> list[str] | None:
 
     Every XBEN-*-24 benchmark on disk is shown in a column grid (filled
     column-major, navigated with the arrow keys), each annotated with its
-    manual ✓/✗ triage mark from ``benchmarks/bench_results.json``. Two
+    manual ✓/✗/~ triage mark from ``benchmarks/bench_results.json``. Two
     keys act on the highlighted cell:
 
-      ``t`` — cycle the result mark ✓ → ✗ → none (persisted immediately).
+      ``t`` — cycle the result mark ✓ → ✗ → ~ → none (persisted
+              immediately). ✓ solved, ✗ genuinely failed, ~ (yellow)
+              codex/API or infra crash with no fair attempt.
       ``r`` — add / remove the benchmark from an ordered run queue, shown
               as a green ``[1]`` / ``[2]`` suffix in run order.
 
@@ -397,7 +402,7 @@ def _pick_bench() -> list[str] | None:
             ("bold", "Which benchmark(s) do you want to run?"),
             ("fg:ansibrightblack", f"   ({n} benchmarks)\n"),
             ("fg:ansibrightblack",
-             "↑/↓/←/→ move · r queue/unqueue · t mark ✓/✗ · "
+             "↑/↓/←/→ move · r queue/unqueue · t mark ✓/✗/~ · "
              "enter run · q/Ctrl-C back\n"),
         ]
         if queue:

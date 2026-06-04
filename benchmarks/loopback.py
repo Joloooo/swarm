@@ -69,7 +69,9 @@ def acquire() -> str | None:
     file, and a lease held by a dead PID is reclaimed.
     """
     _LEASE_DIR.mkdir(parents=True, exist_ok=True)
-    for ip in sorted(_configured_aliases()):
+    # Sort by the numeric last octet so allocation goes .2, .3, … .21 rather
+    # than the lexical .10, .11, … .2 (cosmetic, but easier to follow in logs).
+    for ip in sorted(_configured_aliases(), key=lambda a: int(a.rsplit(".", 1)[1])):
         lock = _LEASE_DIR / ip
         try:
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)

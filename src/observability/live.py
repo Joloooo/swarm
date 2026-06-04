@@ -605,18 +605,29 @@ def _pad_draw() -> None:
         else:
             time_part = _paint(time_part, _DIM)
         agent_part = _paint(ag, _DIM, _CYAN)
-        meta_bits = []
-        if model:
-            meta_bits.append(_paint(model, _DIM))
-        if effort:
-            meta_bits.append(_paint(f"effort={effort}", _DIM))
-        meta = "  ".join(meta_bits)
         # Verb is the focal point — agent tag and elapsed are dim
-        # context. Pentest verbs cycling in pulsing red are what the
-        # operator's eye lands on.
-        line = f"  {agent_part}  {verb_str}  {time_part}"
-        if meta:
-            line += f"   {meta}"
+        # context. The pentest verbs cycling in pulsing red are what the
+        # operator's eye lands on, on BOTH an LLM-thinking row and a
+        # tool-running row (a ⚙-marked row carrying the command), so the
+        # gap between dispatch and output is never silent either.
+        if entry.get("kind") == "tool":
+            cmd = _inline_newlines(entry.get("cmd") or "")
+            if len(cmd) > 48:
+                cmd = cmd[:47] + "…"
+            gear = _paint("⚙ ", _DIM, _CYAN)
+            line = f"  {agent_part}  {gear}{verb_str}  {time_part}"
+            if cmd:
+                line += f"   {_paint(cmd, _DIM)}"
+        else:
+            meta_bits = []
+            if model:
+                meta_bits.append(_paint(model, _DIM))
+            if effort:
+                meta_bits.append(_paint(f"effort={effort}", _DIM))
+            meta = "  ".join(meta_bits)
+            line = f"  {agent_part}  {verb_str}  {time_part}"
+            if meta:
+                line += f"   {meta}"
         # Approximate trim to terminal width by ANSI-stripping for length
         # math — we deliberately keep the colored line unmodified when
         # it fits, since splitting in the middle of an escape sequence
@@ -1224,6 +1235,20 @@ class _Live:
             self._emit_multiline(
                 "↳ ", reasoning.strip(), color=_BOLD,
             )
+        # Register a live "running" pad row so the gap between this
+        # dispatch and its output isn't silent: the operator sees the
+        # same typewriter verb + ticking elapsed an LLM call gets, marked
+        # ⚙ and carrying the command, until shell_output drops it. Keyed
+        # by agent — a worker runs one command at a time.
+        with _STREAM_LOCK:
+            _PAD[("tool", agent)] = {
+                "started": time.perf_counter(),
+                "agent": agent or "?",
+                "kind": "tool",
+                "cmd": cmd,
+            }
+            _pad_redraw_locked()
+        _ensure_pad_ticker()
 
     def shell_output(
         self,
@@ -1237,6 +1262,11 @@ class _Live:
         mode = _mode()
         if mode == "silent":
             return
+        # Drop this tool's live "running" pad row — the command is done.
+        # The compact output line emitted below redraws the pad without it.
+        if mode == "compact":
+            with _STREAM_LOCK:
+                _PAD.pop(("tool", agent), None)
         if mode == "verbose":
             ts = _now()
             tag = f"[{agent or '?'} @ {ts}]"

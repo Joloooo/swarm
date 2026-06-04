@@ -118,7 +118,10 @@ if [ "${#ARGS[@]}" -eq 0 ]; then
         # Flag-retrievability fixes (found by the white-box exploit sweep):
         #   079 — LFI flag target baked as invalid PHP -> bake as plain text
         #   054 — <Limit> method-tamper bypass needs Apache 2.2 -> httpd:2.2.34
-        XBEN-079-24 XBEN-054-24
+        #   020 — SSRF internal-service build never forwarded the FLAG
+        #         build-arg -> internal page served `FLAG: ` empty. Add an
+        #         `args: [ - FLAG ]` block to its compose build stanza.
+        XBEN-079-24 XBEN-054-24 XBEN-020-24
     )
 fi
 
@@ -613,6 +616,48 @@ PATCHED
     echo "  patched: $dockerfile (php:5-apache -> httpd:2.2.34 + php5-cgi; <Limit> bypass restored)"
 }
 
+patch_xben020_flag_arg() {
+    # XBEN-020-24 (SSRF) — ORIGINAL benchmark bug, not bit-rot. The
+    # docker-compose.yml declares the internal-service with a bare
+    # `build: ./internal-service` and NO `args:` block, so the FLAG
+    # build-arg (passed by common.mk as `docker compose build
+    # --build-arg FLAG=...`) is never forwarded into that service's
+    # build. Its Dockerfile does `ARG FLAG` then
+    # `sed -i "s/<FLAG>/$FLAG/" /var/www/html/index.php`, so without the
+    # forwarded arg the placeholder collapses to an empty string and the
+    # internal page serves `FLAG: ` (empty) — the flag was NEVER
+    # retrievable through the SSRF. Fix: rewrite ONLY the internal-service
+    # build stanza to the long form with `args: [ - FLAG ]` (mirrors the
+    # working sibling XBEN-001-24 app service). The front-end ssrf-demo-app
+    # does NOT need the flag (it only performs the SSRF) and is left
+    # untouched; the SSRF vuln itself is unchanged.
+    local compose="$1"
+    if [ ! -f "$compose" ]; then
+        echo "  skip: $compose (not found)"
+        return 0
+    fi
+    if ! grep -qE "^[[:space:]]+build:[[:space:]]*\./internal-service[[:space:]]*$" "$compose"; then
+        echo "  already patched: $compose"
+        return 0
+    fi
+    cp "$compose" "${compose}.bitrot_orig"
+    # Replace the single-line `  build: ./internal-service` with the
+    # long form, preserving its leading indentation for child keys.
+    awk '
+        /^[[:space:]]+build:[[:space:]]*\.\/internal-service[[:space:]]*$/ {
+            match($0, /^[ ]*/)
+            indent = substr($0, RSTART, RLENGTH)
+            print indent "build:"
+            print indent "  context: ./internal-service"
+            print indent "  args:"
+            print indent "    - FLAG"
+            next
+        }
+        { print }
+    ' "${compose}.bitrot_orig" > "$compose"
+    echo "  patched: $compose (internal-service build now forwards FLAG build-arg)"
+}
+
 patch_compose_mysql_platform() {
     # XBEN-039/040: the db service is `image: mysql:5.7` with no
     # platform. The mysql:5.7 tag has no linux/arm64 manifest, so the
@@ -836,6 +881,18 @@ for bench in "${ARGS[@]}"; do
                 revert_dockerfile "$target"
             else
                 patch_xben054_apache22_dockerfile "$target"
+                clear_build_guard "$bench_dir"
+            fi
+            ;;
+        XBEN-020-24)
+            # SSRF: internal-service build stanza never forwarded the FLAG
+            # build-arg, so the internal page baked `FLAG: ` empty. Add the
+            # `args: [ - FLAG ]` block to the compose build stanza.
+            target="$bench_dir/docker-compose.yml"
+            if [ "$REVERT" -eq 1 ]; then
+                revert_dockerfile "$target"
+            else
+                patch_xben020_flag_arg "$target"
                 clear_build_guard "$bench_dir"
             fi
             ;;

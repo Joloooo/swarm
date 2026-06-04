@@ -149,11 +149,22 @@ why this path was taken and not the others.
 # executor workers need this; it has nothing to do with phase.
 SCOPE_RULES = """\
 ## Scope (operator safety, not refusal triggers)
-- Only test the target URL and paths within the defined scope. Touching
-  out-of-scope hosts could affect third parties — that's the only reason
-  to avoid it. In-scope testing is fully authorized.
-- If you discover credentials, use them only to demonstrate the
-  vulnerability. Don't pivot to other systems.
+- Focus your testing on the target URL you were given. Other open ports
+  and services on the SAME host (same IP) are part of THIS engagement,
+  not third parties — they are in scope and fully authorized. A DIFFERENT
+  host or IP is out of scope; touching it could affect third parties, and
+  that is the only reason to avoid something.
+- The target IP is one machine authorized for testing in full, so a
+  second service on it (SSH on 22, a second web app on another port, an
+  internal API, an object store) is a valid part of the target. Don't let
+  it derail your current task, though: report it so the planner can
+  dispatch a dedicated worker to it, rather than abandoning what you are
+  doing to chase it. Quickly fingerprint and set aside listeners that are
+  clearly not the objective (e.g. a bare SSH / RTSP / AirTunes banner with
+  no application behind it) unless they become relevant.
+- If you discover credentials, you may reuse them against services on the
+  SAME target host — that is demonstrating the vulnerability, not moving
+  to another system. Don't use them against a different host.
 - Don't exfiltrate real user data at scale. Reading /etc/passwd to prove
   LFI is the expected proof-of-concept; dumping a 10M-row user table is
   not — a single representative row is enough evidence.

@@ -374,6 +374,70 @@ def docker_down(benchmark_id: str) -> None:
     )
 
 
+def _ports_leak_onto(ports: str, ip: str) -> bool:
+    """True if a ``docker ps`` *Ports* string publishes on a host address
+    that covers loopback ``ip`` — i.e. a wildcard bind (``0.0.0.0`` / ``::``,
+    which answers on EVERY loopback alias) or ``ip`` itself. Such a binding
+    is reachable on the address this run hands the agent."""
+    return (
+        "0.0.0.0:" in ports
+        or ":::" in ports
+        or "[::]:" in ports
+        or f"{ip}:" in ports
+    )
+
+
+def _purge_contaminating_containers(leased_ip: str) -> None:
+    """Remove running benchmark containers that would leak onto ``leased_ip``.
+
+    A container published on a wildcard host IP (``0.0.0.0`` / ``::``) — or
+    directly on ``leased_ip`` reused from an earlier run — answers on the
+    very address this run hands the agent, so the agent can discover and
+    "solve" that straggler instead of the freshly-launched target.
+    (Observed: a leftover XBEN-096 container produced a false flag-capture
+    while this run's real app sat unprobed on its leased IP.)
+
+    A correctly-isolated run binds a SPECIFIC ``127.0.0.X``, so a
+    wildcard / same-IP publish from an ``xben-*`` container is always a
+    straggler from a crashed or un-torn-down prior run — safe for the
+    harness, which owns these, to force-remove. Non-``xben`` containers
+    are never touched, only flagged loudly so the operator knows the
+    target IP may be contaminated. Best-effort: any docker error is
+    swallowed (a clean-slate check must never abort a run)."""
+    try:
+        out = _run(
+            ["docker", "ps", "--format", "{{.ID}}\t{{.Names}}\t{{.Ports}}"],
+            cwd=XBOW_ROOT, timeout=DISCOVER_TIMEOUT_S, capture=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        cid, name, ports = parts[0], parts[1], parts[2]
+        if not _ports_leak_onto(ports, leased_ip):
+            continue
+        if "xben" in name.lower():
+            try:
+                _run(["docker", "rm", "-f", cid], cwd=XBOW_ROOT,
+                     timeout=DISCOVER_TIMEOUT_S, check=False)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            LIVE.runner_message(
+                f"clean-slate: removed stale benchmark container {name} "
+                f"({ports}) that would leak onto the target IP {leased_ip}",
+                level="warn",
+            )
+        else:
+            LIVE.runner_message(
+                f"clean-slate: container {name} publishes on {ports} and may "
+                f"leak onto the target IP {leased_ip} — left running (not an "
+                "xben container); results on this IP may be contaminated",
+                level="warn",
+            )
+
+
 def discover_target_url(benchmark_id: str) -> str:
     """Return http://localhost:<port> for the first published port."""
     bench_dir = XBOW_ROOT / "benchmarks" / benchmark_id
@@ -598,6 +662,12 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
                 "(run benchmarks/setup_loopback_pool.sh) — using localhost",
                 level="warn",
             )
+        else:
+            # Clean slate: a benchmark container left running by a crashed or
+            # un-torn-down prior run can still answer on this run's leased IP
+            # and be "solved" instead of the freshly-launched target (a false
+            # flag-capture). Remove such stragglers before our own `up`.
+            _purge_contaminating_containers(leased_ip)
         make_run(benchmark_id)
         result["target_url"] = (
             f"http://{leased_ip}" if leased_ip

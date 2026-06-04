@@ -239,6 +239,20 @@ config = SimpleNamespace(
 )
 
 
+# Graph-level recursion limit — the number of LangGraph super-steps
+# (node executions) allowed before a ``GraphRecursionError``. LangGraph's
+# default is 25, but each planner cycle costs ~3-4 super-steps
+# (planner → recon/executor fan-out → summarizer → back to planner), so
+# the default silently caps a run at ~6-8 planner turns — far below
+# ``planner_max_iters`` (default 50). That hidden cap, not the wall clock
+# or the iteration budget, would otherwise be the real terminal. Derive
+# it from ``planner_max_iters`` (×4 for the worst-case per-cycle cost,
+# plus a small constant for the START→planner edge and a trailing
+# summarizer) so the intended budgets stay the real terminals. Scales
+# automatically when SWARM_PLANNER_MAX_ITERS is overridden.
+GRAPH_RECURSION_LIMIT = config.budgets.planner_max_iters * 4 + 10
+
+
 def describe_config() -> str:
     """Pretty-print the active config — log at startup for run snapshots."""
     return (

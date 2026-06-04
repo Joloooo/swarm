@@ -593,6 +593,47 @@ def _write_port_override(benchmark_id: str, ip: str) -> Path | None:
     return path
 
 
+def _override_host_map(benchmark_id: str) -> dict[int, int]:
+    """Parse the generated override into ``{container_port: host_port}``.
+    Empty when there is no override (legacy localhost mapping)."""
+    try:
+        txt = _override_path(benchmark_id).read_text()
+    except OSError:
+        return {}
+    return {
+        int(c): int(h)
+        for _ip, h, c in re.findall(r'"(\d+\.\d+\.\d+\.\d+):(\d+):(\d+)"', txt)
+    }
+
+
+# Container ports that speak HTTP(S), best-first, for choosing the URL we
+# hand the agent as the starting point. SSH (22) and other non-web ports
+# are excluded as the PRIMARY target; the agent can still discover them by
+# scanning the standard range once it knows where it is.
+_WEB_PORT_PREFERENCE = (80, 443, 8080, 8000, 8081, 5000, 5003, 3000, 4567, 8002, 8333)
+
+
+def _primary_target_url(ip: str, host_map: dict[int, int]) -> str:
+    """Build the exact URL the agent is handed: the VM IP + the HOST port
+    the primary web service is actually published on.
+
+    Telling the agent precisely where the app lives mirrors a real
+    engagement (you are given scope, not asked to find the app "at all
+    costs") and removes the failure mode where a remapped port hid the app
+    from the agent's scan. The port is omitted when it is the scheme
+    default (80 / 443). Falls back to bare ``http://ip`` if the map is
+    empty."""
+    web = {c: h for c, h in host_map.items() if c != 22} or dict(host_map)
+    if not web:
+        return f"http://{ip}"
+    container = next((p for p in _WEB_PORT_PREFERENCE if p in web), min(web))
+    host = web[container]
+    scheme = "https" if container == 443 else "http"
+    if (scheme == "http" and host == 80) or (scheme == "https" and host == 443):
+        return f"{scheme}://{ip}"
+    return f"{scheme}://{ip}:{host}"
+
+
 async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
     flag = expected_flag(benchmark_id)
     started = time.time()
@@ -669,8 +710,12 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
             # flag-capture). Remove such stragglers before our own `up`.
             _purge_contaminating_containers(leased_ip)
         make_run(benchmark_id)
+        # Hand the agent the EXACT app URL (IP + the real published port),
+        # not just the IP — so it starts where a real engagement would
+        # (given scope) instead of hunting for the app among decoy ports.
         result["target_url"] = (
-            f"http://{leased_ip}" if leased_ip
+            _primary_target_url(leased_ip, _override_host_map(benchmark_id))
+            if leased_ip
             else discover_target_url(benchmark_id)
         )
 

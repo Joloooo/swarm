@@ -89,3 +89,18 @@ def test_remap_pool_is_20_ports_all_below_10000():
 ])
 def test_ports_leak_onto(ports, ip, expected):
     assert xr._ports_leak_onto(ports, ip) is expected
+
+
+# ── _primary_target_url: hand the agent the exact app URL ────────────
+
+@pytest.mark.parametrize("host_map,expected", [
+    ({5000: 9001}, "http://127.0.0.2:9001"),       # remapped 5000 → exact URL
+    ({80: 80}, "http://127.0.0.2"),                # real :80 → no port in URL
+    ({22: 22, 80: 80}, "http://127.0.0.2"),        # web chosen over SSH
+    ({80: 80, 8081: 8081}, "http://127.0.0.2"),    # primary web port wins
+    ({443: 443}, "https://127.0.0.2"),             # 443 → https, no port
+    ({}, "http://127.0.0.2"),                      # empty map → bare IP
+    ({22: 10022}, "http://127.0.0.2:10022"),       # only SSH → still addressable
+])
+def test_primary_target_url(host_map, expected):
+    assert xr._primary_target_url("127.0.0.2", host_map) == expected

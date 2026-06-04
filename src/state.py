@@ -253,6 +253,16 @@ class SwarmGraphState(TypedDict, total=False):
     # forced `web_search` this run. Capped at 1 to prevent loops.
     # See `_maybe_force_recovery` in src/nodes/planner.py for the rule.
     forced_recoveries: int
+    # Set True ONLY by the planner's iteration-cap path
+    # (`PlannerNode.execute` when `planner_iters > MAX_PLANNER_ITERS`).
+    # In benchmark mode `route_after_planner` refuses to end the run on a
+    # VOLUNTARY `report` — it re-plans instead, so a "we're done"
+    # hallucination cannot terminate the run. This flag is the one
+    # exception: the budget-exhausted `report` it lets reach `END` (else
+    # the cap could never terminate and we'd loop planner→report→planner).
+    # Real-pentest runs never set it; there a voluntary `report` ends the
+    # run as before.
+    budget_exhausted: bool
     # Optional benchmark-mode field. When set (by the xbow_runner or any
     # other benchmark driver), the planner and workers know the run has
     # an explicit success criterion — extracting a string matching this

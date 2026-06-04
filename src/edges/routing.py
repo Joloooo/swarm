@@ -220,6 +220,44 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
         return next_node
 
     if action == "report":
+        # Benchmark-mode hard stop. A VOLUNTARY report does not end the
+        # run: capture (handled at the top of this function → END) and the
+        # iteration budget are the only terminals, so the planner's own
+        # "we're done" decision can't stop the run on a possibly-
+        # hallucinated belief. Re-plan instead.
+        #
+        # The single exception is the iteration-cap path in
+        # ``PlannerNode.execute``, which sets ``budget_exhausted`` — that
+        # report we DO let through, otherwise the cap could never
+        # terminate and we'd loop planner→report→planner forever.
+        #
+        # This needs NO graph change: "planner" is already a declared
+        # destination in the conditional-edge whitelist (src/graph.py), so
+        # re-routing there is a legal transition. Real-pentest runs
+        # (no ``expected_flag``) fall straight through to END as before.
+        benchmark_mode = bool(
+            (state.get("expected_flag") or "").strip()
+            or state.get("expected_flag_candidates")
+        )
+        if benchmark_mode and not state.get("budget_exhausted"):
+            logger.info(
+                "route_after_planner: benchmark-mode report suppressed "
+                "(no capture, budget not exhausted) — re-planning instead "
+                "of ending the run."
+            )
+            try:
+                from src.observability.writers import append_event
+                append_event(
+                    (state or {}).get("run_id"),
+                    "routing_decision",
+                    edge="route_after_planner",
+                    next="planner",
+                    action="report",
+                    reason="benchmark_report_suppressed",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return "planner"
         return _TERMINATE  # bypassed — see _TERMINATE comment above
     if action in {"recon", "web_search"}:
         return action

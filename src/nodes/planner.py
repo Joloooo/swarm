@@ -53,6 +53,7 @@ from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.nodes.base import (
+    BENCHMARK_PROGRESS_FOOTER,
     IDENTITY_PREAMBLE,
     BaseNode,
 )
@@ -192,33 +193,31 @@ your decision. The allowed values for "action" are:
                    single turn — they all dispatch to the same executor.
 - "web_search"   — look up an external fact (CVE details, bypass
                    technique, tool syntax). Also supply "search_query".
-- "submit_flag"  — submit a captured flag for verification. Use this
-                   the moment a worker's report shows a flag was
-                   actually captured from the target (typically in a
-                   "**FINDING:**" block, the digest's "Server responses"
-                   section, or any other worker output that contains a
-                   ``flag{...}`` / ``FLAG{...}`` string the worker
-                   extracted). Supply the exact flag string in the
-                   "flag" field. The framework will verify it; if it is
-                   rejected, your next turn runs again and you should
-                   try a different candidate or keep probing. DO NOT
-                   submit placeholders like ``FLAG{...}``, ``FLAG{x}``,
-                   or example strings. DO NOT re-submit a flag that
-                   already appears in ``submission_attempts`` — the
-                   verifier already rejected it. See the "Submitting a
-                   captured flag" section below for the full contract.
+- "submit_flag"  — declare a flag your workers captured from the target,
+                   as the deliverable of a real engagement. Use this when
+                   a worker's report shows a ``flag{...}`` / ``FLAG{...}``
+                   value that was actually read back FROM the target (a
+                   "**FINDING:**" block or the digest's "Server responses"
+                   section), and supply that exact string in the "flag"
+                   field. Never submit a placeholder (``FLAG{...}``,
+                   ``FLAG{x}``) or a string you invented. See the
+                   "Submitting a captured flag" section below. (In a
+                   scored practice exercise you do NOT need this action —
+                   the run ends on its own when the token appears; just
+                   keep dispatching workers.)
 - "report"       — finalize the run. Aggregate every finding into a
                    report and end the graph. Choose this when you have
                    enough evidence, further tries are unlikely to pay
                    off, or the target is clearly unreachable.
 
-# Submitting a captured flag
+# Submitting a captured flag (real engagements)
 
-When a worker's report shows a captured flag (a ``flag{...}`` or
-``FLAG{...}`` value extracted from the target — NOT a placeholder
-mentioned in narration, NOT the format example in your own prompt, NOT
-a string you invented), you MUST submit it via ``action="submit_flag"``
-so the framework can verify and end the run cleanly.
+In a real engagement there is no scoring oracle — YOU are the authority
+on what counts as the flag. When a worker's report shows a ``flag{...}``
+/ ``FLAG{...}`` value that was actually read back from the target (NOT a
+placeholder mentioned in narration, NOT the format example in your own
+prompt, NOT a string you invented), declare it via
+``action="submit_flag"`` to end the run cleanly.
 
 JSON shape:
 
@@ -234,19 +233,10 @@ Rules:
 
 - The "flag" field is REQUIRED. Copy the exact characters the worker
   emitted — including original case and surrounding ``flag{`` / ``}``.
-- After you submit, one of two things happens:
-  * The submission matches expected (or is well-formed in pentest
-    mode) → the graph ends with a verified flag. You stop.
-  * The submission is rejected → control returns to you with
-    ``submission_attempts`` updated. Read the list and DO NOT submit
-    the same string again. Either submit a different candidate (if a
-    worker captured several flag-like strings) or pivot to attack /
-    web_search to make more progress.
-- If nothing in worker output looks like a captured flag, DO NOT
-  submit one. Pick another action.
-- This action exists ONLY for flag submission. Never use it to "give
-  up" or "indicate the task is finished" — that is what ``report``
-  is for.
+- If nothing in worker output looks like a captured flag, DO NOT submit
+  one. Pick another action.
+- This action exists ONLY for flag submission. Never use it to "give up"
+  or "indicate the task is finished" — that is what ``report`` is for.
 
 # Available attack skills (for action="attack")
 
@@ -1480,23 +1470,35 @@ class PlannerNode(BaseNode):
         # it into the initial state passed to ``graph.ainvoke``.
         run_id = state.get("run_id")
 
-        # Hard cap — force report rather than loop forever.
+        # Hard cap — end the run rather than loop forever.
         if iters > MAX_PLANNER_ITERS:
             self.log.warning(
-                "Supervisor exceeded MAX_PLANNER_ITERS=%d; forcing report.",
+                "Supervisor exceeded MAX_PLANNER_ITERS=%d; ending the run.",
                 MAX_PLANNER_ITERS,
             )
+            benchmark_mode = bool(
+                (state.get("expected_flag") or "").strip()
+                or state.get("expected_flag_candidates")
+            )
+            if benchmark_mode:
+                # Honest verdict: in benchmark mode capture is static, so
+                # reaching the cap means the token never appeared in any
+                # tool output. Say so plainly — do not imply success.
+                cap_msg = (
+                    f"Supervisor reached the iteration budget "
+                    f"({MAX_PLANNER_ITERS}) and the hidden token never "
+                    "appeared in any tool's output. Ending the run; no "
+                    "valid token was captured."
+                )
+            else:
+                cap_msg = (
+                    f"Supervisor reached the iteration budget "
+                    f"({MAX_PLANNER_ITERS}). Ending the run with a report."
+                )
             return {
                 "planner_iters": iters,
                 "next_action": "report",
-                "messages": [
-                    AIMessage(
-                        content=(
-                            f"Supervisor hit iteration cap ({MAX_PLANNER_ITERS}). "
-                            "Forcing report."
-                        )
-                    )
-                ],
+                "messages": [AIMessage(content=cap_msg)],
             }
 
         # Feed the supervisor the full conversation so far. Worker nodes
@@ -1573,27 +1575,26 @@ class PlannerNode(BaseNode):
         if prior_relevant:
             prior_messages.append(HumanMessage(content=prior_relevant))
 
-        # Benchmark-mode hint. Real pentest runs leave ``expected_flag``
+        # Benchmark-mode footer. Real pentest runs leave ``expected_flag``
         # empty and skip this entirely — non-benchmark behaviour is
         # unchanged.
         #
-        # Tells the planner the success criterion: the run only ends
-        # with a verified capture when YOU emit ``action="submit_flag"``
-        # with the exact string a worker extracted from the target.
-        # There is no auto-termination edge — the summariser-side scan
-        # was removed (2026-05-24) because regex-matching ``flag{...}``
-        # over raw HTTP bodies false-positived on template strings and
-        # the agent's own script literals. Capture is your decision.
+        # In benchmark mode capture is fully STATIC: the FlagWatcher
+        # (``src/nodes/base/flag_watcher.py``) scans every worker tool
+        # output and, on a strict match, sets ``captured_flag`` so
+        # ``route_after_summarizer`` / ``route_after_planner`` route to
+        # END. The supervisor never submits or verifies a token. The only
+        # failure mode left is a "we're done" hallucination ending the run
+        # early, so the footer (appended LAST, the most recent thing the
+        # supervisor reads) states the true fact that the run
+        # self-terminates on capture — making the supervisor's own
+        # continued execution proof that no token has appeared yet. See
+        # ``BENCHMARK_PROGRESS_FOOTER`` for the full rationale.
         expected_flag = (state.get("expected_flag") or "").strip()
         if expected_flag:
-            prior_messages.append(HumanMessage(content=(
-                "[SYSTEM NOTE] Benchmark mode: the run only ends with a "
-                "verified capture when you call action=\"submit_flag\" "
-                "with the exact flag string a worker extracted from the "
-                "target. Watch every worker_report's \"Server responses\" "
-                "and \"**FINDING:**\" blocks for a flag-shaped value, "
-                "and submit it the moment you see one."
-            )))
+            prior_messages.append(
+                HumanMessage(content=BENCHMARK_PROGRESS_FOOTER)
+            )
 
         try:
             result = await self._invoke_with_transient_retry(
@@ -1851,27 +1852,45 @@ class PlannerNode(BaseNode):
             if query:
                 update["search_query"] = query
         elif action == "submit_flag":
-            # Append the candidate flag to ``submission_attempts``. The
-            # reducer on the state field is ``operator.add`` so the list
-            # accumulates across turns even when the verifier rejects an
-            # earlier attempt. The routing edge reads ``attempts[-1]``
-            # to verify; if no match, the planner runs again with the
-            # full history visible and is instructed (via the system
-            # prompt) not to re-submit the same string.
             candidate = (decision.get("flag") or "").strip()
-            if not candidate:
+            benchmark_mode = bool(
+                (state.get("expected_flag") or "").strip()
+                or state.get("expected_flag_candidates")
+            )
+            if benchmark_mode:
+                # Benchmark mode: the supervisor does NOT submit. Capture
+                # is fully static — the FlagWatcher scans every tool output
+                # and ends the run the instant the real token appears, so
+                # by the time control reaches here a matching token would
+                # already have terminated the run. A submit_flag decision
+                # is therefore either redundant or a hallucinated value.
+                # Do NOT record it (no resubmit loop, no fabricated entry
+                # in submission_attempts) and do NOT terminate — redirect
+                # to productive work. The benchmark progress footer on the
+                # next turn reminds the supervisor the run self-terminates.
+                self.log.warning(
+                    "planner: action=submit_flag in benchmark mode "
+                    "(candidate=%r) ignored — capture is static; "
+                    "redirecting to web_search.",
+                    candidate[:80],
+                )
+                update["next_action"] = "web_search"
+                update["search_query"] = _build_forced_search_query(None, state)
+            elif not candidate:
                 self.log.warning(
                     "planner: action=submit_flag with empty 'flag' field — "
                     "downgrading to report so the run does not loop."
                 )
                 update["next_action"] = "report"
             else:
+                # Real-pentest mode: no scoring oracle exists, so the agent
+                # is the authority. Record the submission; the routing edge
+                # (``flags_match`` with empty ``expected``) accepts any
+                # well-formed non-placeholder flag and ends the run.
                 update["submission_attempts"] = [candidate]
-                # Add a visible boundary message so the trace shows the
-                # submission moment. The routing edge will decide END vs
-                # planner; either way this message survives in state.
+                # Visible boundary message so the trace shows the moment.
                 update["messages"] = list(new_messages) + [AIMessage(
-                    content=f"🚩 [planner] Submitting flag for verification: {candidate}",
+                    content=f"🚩 [planner] Submitting captured flag: {candidate}",
                     additional_kwargs={"node": "planner", "submitted_flag": candidate},
                 )]
         # recon / report need no extra fields.

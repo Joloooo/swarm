@@ -425,25 +425,56 @@ def _published_target_ports(benchmark_id: str) -> dict[str, list[int]]:
     return svc_ports
 
 
-def _free_host_port(ip: str, preferred: int) -> int:
-    """Return ``preferred`` if it can be bound on ``ip``; otherwise the first
-    free fallback. A host service bound to the wildcard ``*:<preferred>`` (e.g.
-    macOS AirPlay Receiver squats 5000 and 7000) reserves that port on EVERY
-    IP, so the per-VM loopback bind would still fail. In that case we remap to
-    a free high port — the agent discovers the actual port by scanning the
-    target IP, so the exact number doesn't matter to it."""
-    for cand in (preferred, *(preferred + k for k in (10000, 20000, 30000, 40000))):
-        if cand > 65535:
-            continue
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            s.bind((ip, cand))
+# Fallback host ports for a benchmark whose REAL port is held by a
+# host-wide wildcard service (macOS AirPlay Receiver squats *:5000 and
+# *:7000, reserving those ports on EVERY loopback IP). All kept BELOW
+# 10000 on purpose: the agent finds its target by scanning, and a normal
+# recon sweep covers 1-10000 — a high fallback like 15000 lands outside
+# that range and the app becomes undiscoverable (exactly how XBEN-020's
+# app, remapped to 10080, was never found). 20 candidates give ample room
+# to find a free one even when several are already occupied.
+_REMAP_POOL: tuple[int, ...] = tuple(range(9001, 9021))  # 9001..9020
+
+
+def _bindable(ip: str, port: int) -> bool:
+    """True if a TCP socket can bind ``ip:port`` right now (i.e. it's free)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind((ip, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _free_host_port(ip: str, preferred: int, *, taken=frozenset()) -> int:
+    """Choose the host port to publish container port ``preferred`` on for
+    this VM's IP ``ip``.
+
+    Privileged ports (<1024, e.g. 80 / 22) are returned UNCHANGED. A
+    non-root process cannot bind them, so a probe here is meaningless —
+    but Docker Desktop's publisher CAN bind them, so we keep the REAL
+    port. (Probing them used to fail with ``PermissionError`` and get
+    misread as "busy", remapping 80 -> 10080 and hiding the app on a high
+    port — that's the bug this avoids.) If a privileged port is genuinely
+    occupied, ``docker compose up`` surfaces the bind error.
+
+    Non-privileged ports are probed with a real bind. ``preferred`` is
+    kept when free (realistic). When it's held by a wildcard squatter
+    (AirPlay on 5000 / 7000) we fall back to the first free port in
+    :data:`_REMAP_POOL` — all BELOW 10000 so recon's port scan still
+    finds it. ``taken`` excludes host ports already assigned to sibling
+    services in the same benchmark so two squatted ports don't collide on
+    one fallback."""
+    if preferred < 1024:
+        return preferred
+    if preferred not in taken and _bindable(ip, preferred):
+        return preferred
+    for cand in _REMAP_POOL:
+        if cand not in taken and _bindable(ip, cand):
             return cand
-        except OSError:
-            continue
-        finally:
-            s.close()
-    return preferred  # nothing free found; let `up` surface the bind error
+    return preferred  # pool exhausted; let `up` surface the conflict
 
 
 def _write_port_override(benchmark_id: str, ip: str) -> Path | None:
@@ -478,15 +509,18 @@ def _write_port_override(benchmark_id: str, ip: str) -> Path | None:
         "# target with the REAL ports. Removed on teardown.",
         "services:",
     ]
+    used_host_ports: set[int] = set()
     for name, ports in svc_ports.items():
         lines.append(f"  {name}:")
         lines.append("    ports: !override")
         for t in ports:
-            h = _free_host_port(ip, t)
+            h = _free_host_port(ip, t, taken=used_host_ports)
+            used_host_ports.add(h)
             if h != t:
                 LIVE.runner_message(
-                    f"{benchmark_id}: host port {t} busy (e.g. macOS AirPlay on "
-                    f"5000/7000) — publishing container :{t} on {ip}:{h}",
+                    f"{benchmark_id}: host port {t} held by a wildcard service "
+                    f"(e.g. macOS AirPlay on 5000/7000) — publishing container "
+                    f":{t} on {ip}:{h}",
                     level="warn",
                 )
             lines.append(f'      - "{ip}:{h}:{t}"')

@@ -1321,6 +1321,19 @@ class _Live:
     # bar.
     _CONTEXT_WARN_INPUT_TOKENS = 100_000
 
+    def _emit_reasoning_block(self, agent: str, text: str) -> None:
+        """Emit reasoning that was buffered (because another agent held the
+        live stream) as a clean, per-line ``💭 <agent>`` block — the same
+        shape a live stream would have produced, just deferred to this
+        call's finish. Routed through :func:`_emit` so it stays atomic,
+        pad-aware, and teed to the disk log."""
+        ag = _agent_tag(agent)
+        head = _paint("💭 ", _DIM, _CYAN)
+        tag = _paint(f"{ag} ", _DIM, _CYAN)
+        for ln in text.splitlines():
+            if ln.strip():
+                _emit(f"{_now()}  {head}{tag}{_paint(ln, _DIM, _CYAN)}")
+
     def thinking_started(
         self,
         *,
@@ -1413,20 +1426,41 @@ class _Live:
         # uninitialised call sites) → drop silently. Without this
         # guard a stray late delta could open a line that never
         # closes.
-        if self._think_state.get(run_id) is None:
+        st = self._think_state.get(run_id)
+        if st is None:
             return
 
         with _STREAM_LOCK:
-            # Erase the thinking pad so the streaming reasoning paragraph
-            # lands where the spinner row used to sit. The streaming
-            # text is itself a liveness signal — drawing the pad while
-            # text streams below it would interleave a spinner with
-            # the model's words on every tick.
-            _pad_clear()
+            # Option-A concurrency rule: at most ONE call streams its
+            # reasoning live at a time. A call's FIRST delta fixes its mode
+            # for life — "live" only if this is the sole in-flight call AND
+            # no other agent already holds the open line; otherwise
+            # "buffer". Streaming N parallel workers char-by-char makes the
+            # single focus thrash between them (a fragmented, unreadable
+            # smear) and keeps blanking the verb pad. Buffering the others
+            # and dumping each as a clean block when it finishes keeps one
+            # smooth stream when solo and a calm multi-row verb pad when
+            # parallel — exactly the "dynamic when one, tidy when many" feel.
+            mode = st.get("display_mode")
+            if mode is None:
+                solo = len(_PAD) <= 1
+                slot_free = _STREAM_FOCUS["current_agent"] in (None, agent)
+                mode = "live" if (solo and slot_free) else "buffer"
+                st["display_mode"] = mode
 
-            # On focus change, close whatever line is currently open
-            # (if any), then mark that the next write needs to emit
-            # the new agent's line-opening prefix.
+            if mode == "buffer":
+                # Defer, don't drop: thinking_finished flushes this as one
+                # 💭 block so the parallel worker's reasoning is still seen.
+                st.setdefault("buf", []).append(text)
+                return
+
+            # ---- live (solo) path: stream char-by-char as before ----
+            # Erase the thinking pad so the streaming reasoning paragraph
+            # lands where the spinner row used to sit. The streaming text
+            # is itself the liveness signal here.
+            _pad_clear()
+            # On focus (re)claim, close any open line then mark that the
+            # next write must emit this agent's line-opening prefix.
             if _STREAM_FOCUS["current_agent"] != agent:
                 if (
                     _STREAM_FOCUS["current_agent"] is not None
@@ -1478,7 +1512,6 @@ class _Live:
         """
         del model  # banner already shows it; per-call repetition is noise
         state = self._think_state.pop(run_id, None)
-        del state  # presence-only check; no fields are read here
         mode = _mode()
         if mode == "silent":
             # Even silent mode must deregister the call from the pad —
@@ -1494,6 +1527,7 @@ class _Live:
         # call from the pad so the spinner row disappears before the
         # done line is printed — otherwise the operator sees "done…"
         # followed by a flickering row that immediately vanishes.
+        buffered = ""
         with _STREAM_LOCK:
             if _STREAM_FOCUS["current_agent"] == agent:
                 if not _STREAM_FOCUS["at_line_start"]:
@@ -1501,7 +1535,17 @@ class _Live:
                 _STREAM_FOCUS["current_agent"] = None
                 _STREAM_FOCUS["at_line_start"] = True
             _PAD.pop(run_id, None)
+            if state:
+                buffered = "".join(state.get("buf", []))
             _pad_redraw_locked()
+
+        # Flush reasoning that was buffered because OTHER agents held the
+        # live stream while this call ran (Option-A concurrency). Emitting it
+        # now — pad row already gone, lock released (``_emit`` takes it
+        # itself) — surfaces each parallel worker's thinking as one clean
+        # block instead of a char-by-char smear, and BEFORE its done-summary.
+        if buffered.strip():
+            self._emit_reasoning_block(agent, buffered)
 
         ag = _agent_tag(agent)
         rot = peak_input >= self._CONTEXT_WARN_INPUT_TOKENS

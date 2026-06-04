@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -424,6 +425,27 @@ def _published_target_ports(benchmark_id: str) -> dict[str, list[int]]:
     return svc_ports
 
 
+def _free_host_port(ip: str, preferred: int) -> int:
+    """Return ``preferred`` if it can be bound on ``ip``; otherwise the first
+    free fallback. A host service bound to the wildcard ``*:<preferred>`` (e.g.
+    macOS AirPlay Receiver squats 5000 and 7000) reserves that port on EVERY
+    IP, so the per-VM loopback bind would still fail. In that case we remap to
+    a free high port — the agent discovers the actual port by scanning the
+    target IP, so the exact number doesn't matter to it."""
+    for cand in (preferred, *(preferred + k for k in (10000, 20000, 30000, 40000))):
+        if cand > 65535:
+            continue
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind((ip, cand))
+            return cand
+        except OSError:
+            continue
+        finally:
+            s.close()
+    return preferred  # nothing free found; let `up` surface the bind error
+
+
 def _write_port_override(benchmark_id: str, ip: str) -> Path | None:
     """Pin every host-published port of the benchmark to ``ip`` at its real
     number via a generated ``docker-compose.override.yml`` (auto-merged by
@@ -460,7 +482,14 @@ def _write_port_override(benchmark_id: str, ip: str) -> Path | None:
         lines.append(f"  {name}:")
         lines.append("    ports: !override")
         for t in ports:
-            lines.append(f'      - "{ip}:{t}:{t}"')
+            h = _free_host_port(ip, t)
+            if h != t:
+                LIVE.runner_message(
+                    f"{benchmark_id}: host port {t} busy (e.g. macOS AirPlay on "
+                    f"5000/7000) — publishing container :{t} on {ip}:{h}",
+                    level="warn",
+                )
+            lines.append(f'      - "{ip}:{h}:{t}"')
     path = _override_path(benchmark_id)
     path.write_text("\n".join(lines) + "\n")
     return path

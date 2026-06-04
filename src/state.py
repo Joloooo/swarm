@@ -136,6 +136,21 @@ def _summary_inputs_reducer(
     return list(left or []) + list(right or [])
 
 
+def _recon_done_reducer(existing: bool | None, new: bool | None) -> bool:
+    """Sticky-True OR for ``recon_done``.
+
+    Recon fans out into parallel dimension workers (the ``recon`` web/app
+    pass and the ``recon-ports`` network pass — see
+    :func:`src.edges.routing.route_after_planner`). Each branch returns
+    ``recon_done=True``. A plain ``bool`` field would raise
+    ``InvalidUpdateError`` ("can receive only one value per step") on the
+    two concurrent writes; this reducer collapses them. Semantics: once
+    *any* recon branch finishes, recon is done, and a later ``None`` /
+    falsy write from another node can't un-set it.
+    """
+    return bool(existing or new)
+
+
 class SwarmState:
     """Root state for the SwarmAttacker LangGraph graph.
 
@@ -243,8 +258,10 @@ class SwarmGraphState(TypedDict, total=False):
     # turn, not reduced.
     pending_dispatch: list[dict]
     # Convenience flag the planner can check to avoid asking for recon
-    # again when it has already run at least once.
-    recon_done: bool
+    # again when it has already run at least once. Reduced with a
+    # sticky-True OR (``_recon_done_reducer``) because recon fans out
+    # into parallel dimension workers that each write this key.
+    recon_done: Annotated[bool, _recon_done_reducer]
     # Query string the planner asked the web_search node to run. Set
     # only when next_action == "web_search"; read by web_search_node.
     search_query: str

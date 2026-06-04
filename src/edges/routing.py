@@ -259,7 +259,61 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
                 pass
             return "planner"
         return _TERMINATE  # bypassed — see _TERMINATE comment above
-    if action in {"recon", "web_search"}:
+    if action == "recon":
+        # Recon fans out into parallel dimension workers, exactly like
+        # ``attack`` fans out executors above. Each Send lands on the
+        # (dimension-agnostic) recon node carrying a different
+        # ``config_name``; both branches run concurrently with their own
+        # tool budgets and converge on the summarizer barrier (static
+        # ``recon → summarizer`` edge). The ``recon`` branch maps the
+        # web/app surface and becomes the canonical "Application map"
+        # (the summarizer keys ``recon_summary`` on ``config_name ==
+        # "recon"``); the ``recon-ports`` branch scans the network/service
+        # surface so a co-located non-web service (e.g. an object store on
+        # a high port) can't slip past unnoticed. Splitting the budgets is
+        # the point: a single recon worker spends its whole budget on HTTP
+        # and never reaches the port scan.
+        #
+        # No graph change needed — ``recon`` is already a declared Send
+        # destination in the conditional-edge whitelist (src/graph.py).
+        recon_dimensions: tuple[tuple[str, str], ...] = (
+            ("recon", "Parallel recon: map the web/app surface — pages, "
+                      "forms, API routes, directories, technology."),
+            ("recon-ports", "Parallel recon: scan the network/service "
+                            "surface for non-web services and extra ports."),
+        )
+        logger.info(
+            "route_after_planner: fanning out %d parallel recon "
+            "dimension(s): %s.",
+            len(recon_dimensions),
+            ", ".join(name for name, _ in recon_dimensions),
+        )
+        try:
+            from src.observability.writers import append_event
+            append_event(
+                (state or {}).get("run_id"),
+                "routing_decision",
+                edge="route_after_planner",
+                next="recon",
+                action="recon",
+                dimensions=[name for name, _ in recon_dimensions],
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return [
+            Send(
+                "recon",
+                {
+                    **state,
+                    "config_name": name,
+                    "mode": "analyze",
+                    "dispatch_reason": reason,
+                },
+            )
+            for name, reason in recon_dimensions
+        ]
+
+    if action == "web_search":
         return action
 
     logger.warning(

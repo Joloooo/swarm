@@ -1498,6 +1498,12 @@ class PlannerNode(BaseNode):
             return {
                 "planner_iters": iters,
                 "next_action": "report",
+                # The one report the benchmark-mode edge guard lets through
+                # to END — see ``budget_exhausted`` in src/state.py and
+                # ``route_after_planner``. Without it the edge would bounce
+                # this report back to the planner and the cap could never
+                # terminate the run.
+                "budget_exhausted": True,
                 "messages": [AIMessage(content=cap_msg)],
             }
 

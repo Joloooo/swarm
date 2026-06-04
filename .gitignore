@@ -8,6 +8,10 @@ dist/
 .langgraph_api/
 logs/
 
-# `swarm` CLI: per-user persistent config + generated full-benchmark list.
+# `swarm` CLI: per-user persistent config + generated benchmark lists.
 swarm-config.toml
 benchmarks/all_xben_24.txt
+benchmarks/run_queue.txt
+
+# Per-run loopback IP leases (benchmarks/loopback.py) — transient, host-local.
+benchmarks/.loopback_leases/

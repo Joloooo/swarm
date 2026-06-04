@@ -49,7 +49,10 @@ from src.nodes.base.flag_watcher import (
     FlagCapturedSignal,
     SiblingCapturedSignal,
 )
-from src.nodes.base.system_prompt import _build_system_message
+from src.nodes.base.system_prompt import (
+    BENCHMARK_PROGRESS_FOOTER,
+    _build_system_message,
+)
 from src.observability import make_run_id
 from src.observability.state import _count_worker_iterations
 from src.refusals.detect import looks_like_refusal
@@ -760,19 +763,36 @@ async def _run_skill_agent_impl(
             "re-discover what's already mapped or re-probe what's "
             "already been confirmed."
         )
+
+    # Benchmark status footer — appended LAST (after the "Begin testing"
+    # tail) so it is the final thing the worker reads each dispatch. In
+    # benchmark mode capture is fully static (the FlagWatcher scans tool
+    # output and ends the run on the real token), so this keeps a worker
+    # from concluding the exercise is finished on its own and returning
+    # early. See ``BENCHMARK_PROGRESS_FOOTER``. Mirrors the supervisor
+    # footer appended in ``src/nodes/planner.py``.
+    if is_benchmark:
+        seed_parts.append(BENCHMARK_PROGRESS_FOOTER)
+
+    if seed_parts:
         seed_msgs: list = [HumanMessage(content="\n\n".join(seed_parts))]
         node.log.info(
             "[%s] seeding worker with %d context block(s) "
             "(dispatch_reason=%s, findings=%s, recon_summary=%s, "
-            "relevant_summary=%s, web_search=%s, prior_history=%s)",
+            "relevant_summary=%s, web_search=%s, prior_history=%s, "
+            "benchmark_footer=%s)",
             config.agent_id,
-            len(seed_parts) - 1,  # minus the "Begin testing" tail
+            sum(bool(b) for b in (
+                dispatch_block, findings_block, recon_block,
+                relevant_block, web_search_ctx, prior_history,
+            )),
             bool(dispatch_block),
             bool(findings_block),
             bool(recon_block),
             bool(relevant_block),
             bool(web_search_ctx),
             bool(prior_history),
+            is_benchmark,
         )
     else:
         seed_msgs = []

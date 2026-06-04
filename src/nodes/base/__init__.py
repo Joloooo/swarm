@@ -79,6 +79,7 @@ from src.nodes.base.skill_runner import (
     _findings_from_markdown,
 )
 from src.nodes.base.system_prompt import (
+    BENCHMARK_PROGRESS_FOOTER,
     FINDING_FORMAT,
     IDENTITY_PREAMBLE,
     NARRATION_RULES,
@@ -95,6 +96,7 @@ _looks_like_refusal = looks_like_refusal
 
 __all__ = [
     "AgentConfig",
+    "BENCHMARK_PROGRESS_FOOTER",
     "BaseNode",
     "FINDING_FORMAT",
     "FINDING_PATTERN",

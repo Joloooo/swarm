@@ -33,6 +33,7 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage
 
+from benchmarks import loopback
 from src.cli import bench_results
 from src.graph import build_graph, config
 from src.nodes.base.flag_watcher import (
@@ -397,6 +398,74 @@ def discover_target_url(benchmark_id: str) -> str:
     )
 
 
+_OVERRIDE_NAME = "docker-compose.override.yml"
+
+
+def _override_path(benchmark_id: str) -> Path:
+    return XBOW_ROOT / "benchmarks" / benchmark_id / _OVERRIDE_NAME
+
+
+def _published_target_ports(benchmark_id: str) -> dict[str, list[int]]:
+    """``{service: [container_port, ...]}`` for every HOST-published port,
+    read from the compose config. ``expose``-only (internal) ports such as a
+    backing DB are excluded — we only rebind ports the benchmark actually
+    publishes to the host."""
+    bench_dir = XBOW_ROOT / "benchmarks" / benchmark_id
+    out = _run(
+        ["docker", "compose", "config", "--format", "json"],
+        cwd=bench_dir, timeout=DISCOVER_TIMEOUT_S, capture=True,
+    ).stdout
+    cfg = json.loads(out)
+    svc_ports: dict[str, list[int]] = {}
+    for name, svc in (cfg.get("services") or {}).items():
+        targets = [int(p["target"]) for p in (svc.get("ports") or []) if p.get("target")]
+        if targets:
+            svc_ports[name] = targets
+    return svc_ports
+
+
+def _write_port_override(benchmark_id: str, ip: str) -> Path | None:
+    """Pin every host-published port of the benchmark to ``ip`` at its real
+    number via a generated ``docker-compose.override.yml`` (auto-merged by
+    ``docker compose``). The ``!override`` tag REPLACES the benchmark's default
+    random/``0.0.0.0`` publish rather than adding to it — otherwise the
+    ``0.0.0.0`` bind would leak the port onto every loopback IP and break
+    isolation. Returns the override path, or ``None`` if there is nothing to
+    bind or two services collide on one container port (caller then falls back
+    to the legacy localhost mapping)."""
+    # A stale override from a hard-killed prior run would pollute both the
+    # config read below and the merge at `up` — clear it first.
+    _override_path(benchmark_id).unlink(missing_ok=True)
+    svc_ports = _published_target_ports(benchmark_id)
+    if not svc_ports:
+        return None
+    seen: set[int] = set()
+    for ports in svc_ports.values():
+        for t in ports:
+            if t in seen:
+                LIVE.runner_message(
+                    f"{benchmark_id}: duplicate published port {t} across "
+                    "services — using legacy localhost mapping",
+                    level="warn",
+                )
+                return None
+            seen.add(t)
+    lines = [
+        "# generated per-run by xbow_runner — pins this benchmark's ports to",
+        f"# this VM's own loopback IP ({ip}) so the agent scans an isolated",
+        "# target with the REAL ports. Removed on teardown.",
+        "services:",
+    ]
+    for name, ports in svc_ports.items():
+        lines.append(f"  {name}:")
+        lines.append("    ports: !override")
+        for t in ports:
+            lines.append(f'      - "{ip}:{t}:{t}"')
+    path = _override_path(benchmark_id)
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
 async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
     flag = expected_flag(benchmark_id)
     started = time.time()
@@ -447,12 +516,30 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         "error": None,
     }
     agent_state: dict = {}
+    leased_ip: str | None = None
 
     try:
         if not skip_build:
             make_build(benchmark_id)
+        # Give this run its own loopback IP so the benchmark's REAL ports are
+        # bound to a unique host address the agent scans in isolation (see
+        # benchmarks/loopback.py + setup_loopback_pool.sh). Falls back to the
+        # legacy localhost:<random> mapping if the alias pool isn't set up.
+        leased_ip = loopback.acquire()
+        if leased_ip and _write_port_override(benchmark_id, leased_ip) is None:
+            loopback.release(leased_ip)
+            leased_ip = None
+        if not leased_ip:
+            LIVE.runner_message(
+                f"{benchmark_id}: no per-VM loopback IP "
+                "(run benchmarks/setup_loopback_pool.sh) — using localhost",
+                level="warn",
+            )
         make_run(benchmark_id)
-        result["target_url"] = discover_target_url(benchmark_id)
+        result["target_url"] = (
+            f"http://{leased_ip}" if leased_ip
+            else discover_target_url(benchmark_id)
+        )
 
         # Build the FULL candidate set the matcher will accept.
         # Includes the sha256 prediction (``common.mk`` formula), the
@@ -595,6 +682,10 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
             docker_down(benchmark_id)
         except Exception:  # noqa: BLE001
             logger.exception("[%s] docker compose down failed", benchmark_id)
+        # Drop the generated port override and free this run's loopback IP so
+        # the next run (or a parallel sweep process) can reuse it.
+        _override_path(benchmark_id).unlink(missing_ok=True)
+        loopback.release(leased_ip)
         result["duration_s"] = round(time.time() - started, 1)
         # Clear the LIVE file sink so any later (non-bench) log lines
         # from this Python process don't get appended to this run's

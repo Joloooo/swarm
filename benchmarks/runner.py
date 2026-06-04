@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from src.graph import build_graph
+from src.graph import GRAPH_RECURSION_LIMIT, build_graph
 from benchmarks.metrics import compute_metrics, BenchmarkMetrics
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ async def run_benchmark(
         "findings": [],
         "agent_results": [],
         "active_agents": [],
-    })
+    }, config={"recursion_limit": GRAPH_RECURSION_LIMIT})
 
     duration = time.time() - start_time
 

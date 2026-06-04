@@ -41,7 +41,7 @@ def main(args: argparse.Namespace) -> None:
 async def run(user_input: str, target_scope: str = "") -> None:
     from langchain_core.messages import HumanMessage
 
-    from src.graph import graph
+    from src.graph import GRAPH_RECURSION_LIMIT, graph
 
     initial_messages = [HumanMessage(content=user_input)]
     if target_scope:
@@ -65,7 +65,9 @@ async def run(user_input: str, target_scope: str = "") -> None:
     if target_scope:
         initial_state["target_scope"] = target_scope
 
-    result = await graph.ainvoke(initial_state)
+    result = await graph.ainvoke(
+        initial_state, config={"recursion_limit": GRAPH_RECURSION_LIMIT}
+    )
 
     # Print the final report (last message).
     messages = result.get("messages", [])

@@ -36,7 +36,7 @@ from langchain_core.messages import HumanMessage
 
 from benchmarks import loopback
 from src.cli import bench_results
-from src.graph import build_graph, config
+from src.graph import GRAPH_RECURSION_LIMIT, build_graph, config
 from src.nodes.base.flag_watcher import (
     get_captured_flag,
     is_captured,
@@ -776,7 +776,7 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
                 # skill_runner, routing, and live observability all read
                 # this. See state.AgentState for the field docstring.
                 "expected_flag_candidates": candidates,
-            }),
+            }, config={"recursion_limit": GRAPH_RECURSION_LIMIT}),
             timeout=RUN_TIMEOUT_S,
         )
 

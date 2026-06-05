@@ -25,6 +25,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import socket
 import subprocess
@@ -876,7 +877,42 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
     return result
 
 
+def _campaign_results_dir() -> Path | None:
+    """Campaign output dir from ``SWARM_RESULTS_DIR``, or ``None``.
+
+    Set by ``benchmarks/launch_split.py`` when it fans the benchmark set
+    out across ~20 parallel sweep processes. In campaign mode each
+    benchmark's verdict is written to its own ``<dir>/<benchmark_id>.json``
+    file (see :func:`write_jsonl`) instead of being appended to the shared
+    ``results/xbow_<date>.jsonl``. Per-benchmark files never collide, so
+    the parallel processes write concurrently with no lock and no
+    torn-line risk — both of which the shared append has. Unset ⇒ the
+    historical shared-jsonl behaviour, unchanged.
+    """
+    raw = os.environ.get("SWARM_RESULTS_DIR", "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
 def write_jsonl(result: dict) -> Path:
+    """Persist one benchmark result; return the file written.
+
+    Default: append a line to the shared ``results/xbow_<date>.jsonl``.
+    Campaign mode (``SWARM_RESULTS_DIR`` set): write a standalone, atomic
+    ``<dir>/<benchmark_id>.json`` so parallel sweep processes never share
+    a file. Falls back to the shared jsonl if the benchmark id is missing.
+    """
+    campaign = _campaign_results_dir()
+    bid = result.get("benchmark_id")
+    if campaign is not None and bid:
+        campaign.mkdir(parents=True, exist_ok=True)
+        path = campaign / f"{bid}.json"
+        # tmp + replace so a reader (the campaign report polling this dir)
+        # never sees a half-written file — same rationale as the atomic
+        # save in src/cli/bench_results.py for Drive-backed paths.
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(result, indent=2) + "\n")
+        os.replace(tmp, path)
+        return path
     RESULTS_DIR.mkdir(exist_ok=True)
     path = RESULTS_DIR / f"xbow_{time.strftime('%Y%m%d')}.jsonl"
     with open(path, "a") as f:
@@ -891,24 +927,43 @@ def load_recorded_ids(*, skip_errors: bool = False) -> set[str]:
     rerun with ``--resume`` and it will continue with the missing IDs.
     By default every recorded row counts as done, including errors, because
     errors are also useful data for day-to-day benchmark tracking.
+
+    Campaign mode (``SWARM_RESULTS_DIR`` set): results live as one
+    ``<benchmark_id>.json`` per benchmark under the campaign dir, so resume
+    skips what THIS campaign already finished (a re-launch after some
+    sweep windows died) rather than unrelated prior daily runs. When
+    unset, the function reads the shared ``results/xbow_*.jsonl`` exactly
+    as before.
     """
     ids: set[str] = set()
-    if not RESULTS_DIR.exists():
+
+    def _consider(row: dict) -> None:
+        if skip_errors and row.get("error"):
+            return
+        benchmark_id = row.get("benchmark_id")
+        if benchmark_id:
+            ids.add(benchmark_id)
+
+    campaign = _campaign_results_dir()
+    if campaign is not None:
+        if campaign.exists():
+            for path in sorted(campaign.glob("*.json")):
+                try:
+                    _consider(json.loads(path.read_text(encoding="utf-8")))
+                except (json.JSONDecodeError, OSError):
+                    continue
         return ids
 
+    if not RESULTS_DIR.exists():
+        return ids
     for path in sorted(RESULTS_DIR.glob("xbow_*.jsonl")):
         for raw in path.read_text(encoding="utf-8").splitlines():
             if not raw.strip():
                 continue
             try:
-                row = json.loads(raw)
+                _consider(json.loads(raw))
             except json.JSONDecodeError:
                 continue
-            if skip_errors and row.get("error"):
-                continue
-            benchmark_id = row.get("benchmark_id")
-            if benchmark_id:
-                ids.add(benchmark_id)
     return ids
 
 

@@ -141,6 +141,15 @@ config = SimpleNamespace(
     budgets=SimpleNamespace(
         # ── Graph supervisor / planner ──
         planner_max_iters            = _env_int("SWARM_PLANNER_MAX_ITERS",        50),
+        # ── Escalation / dual-planner race (src/orchestration/escalation.py) ──
+        # When the first planner lane is still stuck after this many
+        # planner turns (recon + a couple of attack batches), fork a
+        # SECOND, independent planner lane with a divergence persona and
+        # race them — first capture wins. Only ever fires for the hard
+        # runs that don't win early, so the fast-win path is untouched.
+        # Disable with SWARM_ESCALATION=0.
+        escalation_enabled           = _env_bool("SWARM_ESCALATION",            True),
+        escalation_fork_after_iters  = _env_int("SWARM_ESCALATION_FORK_AFTER",     3),
         # ── Worker agents (per invocation) ──
         worker_max_iterations        = _env_int("SWARM_WORKER_MAX_ITERATIONS",    60),
         # ── Planner-invented "custom" attacks ──

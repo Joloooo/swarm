@@ -1818,12 +1818,6 @@ class _Live:
         kv("Provider:   ", f"{provider}   {_paint('Model:', _BOLD)} {model}")
         kv("Reasoning:  ", f"effort={reff}  summary={rsum}")
 
-        # Which Codex login this run spends on — populated by xbow_runner from
-        # the active SWARM_CODEX_HOME selection so it's verifiable at a glance.
-        acct = mi.get("codex_account")
-        if acct:
-            kv("Account:    ", str(acct))
-
         # Budgets / verbosity from describe_config()
         cfg_block = (budgets_text or "").splitlines()
         if cfg_block:

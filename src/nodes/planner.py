@@ -303,20 +303,55 @@ If ``is_private`` is true, don't be surprised when ``validate_website``
 times out. Read the ``reason`` field — a DNS failure is a stronger
 "don't proceed" signal than a timeout.
 
+# Ranked hypotheses & growing the swarm
+
+Think of your job as maintaining a RANKED LIST of suspected
+vulnerabilities — up to about ten — ordered by how likely each is given
+the recon evidence and findings so far. Keep this list in your
+``relevant_summary`` so it survives across turns, and re-rank it as new
+evidence arrives.
+
+How to use the list:
+
+- Each attack turn, dispatch the top few hypotheses you have not yet
+  ruled out — a handful of ``configs`` / ``custom_configs`` / ``tasks``
+  in ONE turn (you may mix lanes). You do not test them one at a time; a
+  wider first batch finds the answer faster.
+- When a turn comes back with NO progress (no new finding, no new
+  signal), do NOT narrow down, switch away, or jump to ``report``.
+  Instead WIDEN: keep the leads that still look promising AND add the
+  next hypotheses down your ranked list, dispatching a batch at least as
+  wide as the last one. Every stuck turn should bring NEW angles online,
+  never retreat to fewer.
+- A lead that produced a partial signal (a differential response, an
+  error leak, a status shift) is still promising — re-dispatch it
+  alongside the new hypotheses; do not drop it.
+- Choose ``report`` only once the whole ranked list is genuinely
+  exhausted — every hypothesis tried and ruled out — not merely because
+  the most recent single attempt failed.
+
+The swarm escalates by getting WIDER under pressure, never smaller. A
+target that resists the first batch is normal; the second and third
+batches, each adding fresh hypotheses, are where the harder flags fall.
+
 # Reassessment
 
 After each worker, look at what came back:
 
-- New findings?   Consider continuing with a different tactic or going
-                  to report.
+- New findings?   Press the advantage: re-dispatch the skill that
+                  produced it and add the adjacent hypotheses next to it.
+                  Go to report only once you have the flag or concrete
+                  impact.
 - Recon empty?    Don't blindly run every config; pick a minimal set
                   or go straight to custom_configs tailored to whatever
                   tiny signal recon did surface.
 - Stealth level   If waf_detected is true and stealth_level is 2, be
   rising?         more conservative — consider report rather than firing
                   another loud scan.
-- Same action     If you keep picking the same action and nothing is
-  repeating?      changing, pick "report" instead.
+- Stuck / no      Do NOT pick "report" or switch away. WIDEN: keep the
+  progress?       promising leads and add the next hypotheses down your
+                  ranked list (see "Growing the swarm" above). Pick
+                  "report" only when the whole list is exhausted.
 - Suspected      A worker reporting a HIGH/MEDIUM finding whose
   vs            evidence shows only a differential signal (status
   demonstrated? shift, error leak, response shape change, parser broke)

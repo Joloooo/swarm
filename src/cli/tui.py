@@ -199,6 +199,7 @@ def _show_codex_usage() -> None:
     table.add_column("Account")
     table.add_column("Plan")
     table.add_column("5-hour", justify="right")
+    table.add_column("5h resets")
     table.add_column("Weekly", justify="right")
     table.add_column("Weekly resets")
     table.add_column("Credits")
@@ -216,15 +217,16 @@ def _show_codex_usage() -> None:
             (u.email or "~/.codex"),
             (u.plan_type or "?"),
             _pct(u.primary),
+            u.primary.reset_human if u.primary else "—",
             _pct(u.secondary),
             u.secondary.reset_human if u.secondary else "—",
             (u.credits_balance if u.has_credits else "—"),
         )
     except codex_usage.CodexAccountAuthError:
-        table.add_row("~/.codex", "[red]revoked[/red]", "—", "—", "—",
+        table.add_row("~/.codex", "[red]revoked[/red]", "—", "—", "—", "—",
                       "[red]re-login (codex login)[/red]")
     except Exception as e:  # noqa: BLE001
-        table.add_row("~/.codex", "[red]error[/red]", "—", "—", "—",
+        table.add_row("~/.codex", "[red]error[/red]", "—", "—", "—", "—",
                       f"[red]{type(e).__name__}[/red]")
 
     _console.print(table)

@@ -561,7 +561,9 @@ def _config_top(cfg: dict[str, dict[str, Any]]) -> str | None:
         f"custom-tools={b['custom_attack_max_tool_calls']} "
         f"custom-iter={b['custom_attack_max_iterations']} "
         f"llm-tokens={b['llm_max_tokens']} "
-        f"web-chars={b['web_search_max_crawled_chars']}"
+        f"web-chars={b['web_search_max_crawled_chars']} "
+        f"escalation={'on' if b.get('escalation_enabled', True) else 'off'}"
+        f"@{b.get('escalation_fork_after_iters', 3)}"
     )
 
     choices = [
@@ -582,7 +584,7 @@ def _config_top(cfg: dict[str, dict[str, Any]]) -> str | None:
 
 
 def _budgets_submenu(cfg: dict[str, dict[str, Any]]) -> None:
-    """Six int prompts in a loop, with current values as defaults."""
+    """Int prompts + the dual-planner escalation on/off toggle, in a loop."""
     keys: list[tuple[str, str]] = [
         ("planner_max_iters",            "Planner max iterations"),
         ("worker_max_iterations",        "Worker max iterations"),
@@ -590,10 +592,21 @@ def _budgets_submenu(cfg: dict[str, dict[str, Any]]) -> None:
         ("custom_attack_max_iterations", "Custom-skill max iterations"),
         ("llm_max_tokens",               "LLM max output tokens (per call)"),
         ("web_search_max_crawled_chars", "Web-search max chars per source"),
+        ("escalation_fork_after_iters",  "Escalation: fork 2nd planner after N planner turns"),
     ]
     while True:
-        labels = [
-            Choice(f"{label:<36s} {cfg['budgets'][key]}", value=key)
+        # The escalation switch is a bool, so it toggles on select instead
+        # of prompting for an int. Shown first so it's easy to find.
+        enabled = bool(cfg["budgets"].get("escalation_enabled", True))
+        labels: list[Choice] = [
+            Choice(
+                f"{'Escalation (dual planner) on/off':<52s} "
+                f"{'on' if enabled else 'off'}",
+                value="escalation_enabled",
+            )
+        ]
+        labels += [
+            Choice(f"{label:<52s} {cfg['budgets'][key]}", value=key)
             for key, label in keys
         ]
         labels.append(Choice("← Back", value="__back__"))
@@ -605,6 +618,11 @@ def _budgets_submenu(cfg: dict[str, dict[str, Any]]) -> None:
         ).ask()
         if which is None or which == "__back__":
             return
+
+        # Bool toggle — flip and redraw, no text prompt.
+        if which == "escalation_enabled":
+            cfg["budgets"]["escalation_enabled"] = not enabled
+            continue
 
         label = next(lbl for k, lbl in keys if k == which)
         new = questionary.text(

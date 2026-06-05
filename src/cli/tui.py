@@ -109,8 +109,48 @@ def main_loop(args: argparse.Namespace) -> None:
             if not _ensure_docker(args):
                 continue
             runner.run_queue(run_list)
+        elif action == "campaign":
+            _run_campaign(args)
         elif action == "config":
             _config_menu()
+
+
+def _run_campaign(args: argparse.Namespace) -> None:
+    """Fan the full XBEN set out across N parallel Terminal windows.
+
+    Asks how many concurrent windows, bootstraps Docker, then hands off to
+    :func:`benchmarks.launch_split.launch_campaign`, which opens one
+    Terminal window per slice and turns THIS terminal into a live dashboard
+    until every window finishes. Each window inherits the currently-selected
+    Codex account and config because launch_campaign forwards the session's
+    ``SWARM_*`` env (the picker run path relies on the same inheritance).
+
+    Imported lazily so the TUI's normal startup stays light and the
+    benchmarks package isn't pulled in unless a campaign is actually run.
+    """
+    answer = questionary.text(
+        "How many benchmarks to run at once (concurrent Terminal windows)?",
+        default="20",
+        validate=_int_validator,
+        instruction="(all benchmarks are split across this many windows; Ctrl-C cancels)",
+    ).ask()
+    if answer is None:
+        return
+    jobs = int(answer)
+    if not _ensure_docker(args):
+        return
+    _console.print(
+        f"[cyan]🚀 Launching {jobs} concurrent Terminal window(s) over all "
+        f"benchmarks — this terminal becomes the live dashboard.[/cyan]"
+    )
+    from benchmarks.launch_split import launch_campaign
+    try:
+        launch_campaign(jobs=jobs, wait=True)
+    except KeyboardInterrupt:
+        _console.print(
+            "\n[dim]Stopped watching — the Terminal windows keep running. "
+            "Re-attach the dashboard with `campaign_report`.[/dim]"
+        )
 
 
 def _ensure_docker(args: argparse.Namespace) -> bool:
@@ -143,6 +183,7 @@ def _top_level() -> str | None:
         Choice(_account_label(), value="__codex_switch__"),
         Choice("📊 Codex usage (5-hour / weekly) — fetch live", value="__codex_usage__"),
         Choice("xbow benchmark  (pick one or queue several to run in order)", value="xbow"),
+        Choice("🚀 Run ALL benchmarks concurrently  (fan out across N Terminal windows)", value="campaign"),
         Choice("Edit config",                                                 value="config"),
         Choice("Quit",                                                        value="quit"),
     ]

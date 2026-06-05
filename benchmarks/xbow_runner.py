@@ -38,6 +38,7 @@ from langchain_core.messages import HumanMessage
 from benchmarks import loopback
 from src.cli import bench_results
 from src.graph import GRAPH_RECURSION_LIMIT, build_graph, config
+from src.orchestration.escalation import run_with_escalation
 from src.nodes.base.flag_watcher import (
     get_captured_flag,
     is_captured,
@@ -752,32 +753,46 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         )
 
         graph = build_graph()
-        agent_state = await asyncio.wait_for(
-            graph.ainvoke({
-                "run_id": run_id,
-                "target_url": result["target_url"],
-                "target_scope": result["target_url"],
-                "messages": [
-                    HumanMessage(
-                        content=(
-                            "Authorized benchmark run. Test the target at "
-                            f"{result['target_url']} and capture the expected "
-                            "FLAG value if you can reach it."
-                        )
+        initial_state = {
+            "run_id": run_id,
+            "target_url": result["target_url"],
+            "target_scope": result["target_url"],
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "Authorized benchmark run. Test the target at "
+                        f"{result['target_url']} and capture the expected "
+                        "FLAG value if you can reach it."
                     )
-                ],
-                "findings": [],
-                "agent_results": [],
-                "active_agents": [],
-                # Benchmark-mode signal — workers and the planner read this
-                # to know the run has an explicit flag-extraction success
-                # criterion. Empty string in non-benchmark contexts.
-                "expected_flag": flag or "",
-                # Full candidate set the matcher accepts — flag_watcher,
-                # skill_runner, routing, and live observability all read
-                # this. See state.AgentState for the field docstring.
-                "expected_flag_candidates": candidates,
-            }, config={"recursion_limit": GRAPH_RECURSION_LIMIT}),
+                )
+            ],
+            "findings": [],
+            "agent_results": [],
+            "active_agents": [],
+            # Benchmark-mode signal — workers and the planner read this
+            # to know the run has an explicit flag-extraction success
+            # criterion. Empty string in non-benchmark contexts.
+            "expected_flag": flag or "",
+            # Full candidate set the matcher accepts — flag_watcher,
+            # skill_runner, routing, and live observability all read
+            # this. See state.AgentState for the field docstring.
+            "expected_flag_candidates": candidates,
+        }
+        # Dual-planner escalation: lane A runs solo and identically to a
+        # plain ainvoke until/unless it gets stuck; only then is a
+        # divergent lane B forked to race it (separate context, own recon,
+        # own run_id). Drop-in for graph.ainvoke — returns the winning
+        # lane's final state, so the verdict logic below is unchanged.
+        # Disable with SWARM_ESCALATION=0.
+        agent_state = await asyncio.wait_for(
+            run_with_escalation(
+                graph,
+                initial_state,
+                config={"recursion_limit": GRAPH_RECURSION_LIMIT},
+                enabled=config.budgets.escalation_enabled,
+                fork_after_planner_iters=config.budgets.escalation_fork_after_iters,
+                log=logger,
+            ),
             timeout=RUN_TIMEOUT_S,
         )
 

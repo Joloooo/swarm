@@ -303,55 +303,20 @@ If ``is_private`` is true, don't be surprised when ``validate_website``
 times out. Read the ``reason`` field — a DNS failure is a stronger
 "don't proceed" signal than a timeout.
 
-# Ranked hypotheses & growing the swarm
-
-Think of your job as maintaining a RANKED LIST of suspected
-vulnerabilities — up to about ten — ordered by how likely each is given
-the recon evidence and findings so far. Keep this list in your
-``relevant_summary`` so it survives across turns, and re-rank it as new
-evidence arrives.
-
-How to use the list:
-
-- Each attack turn, dispatch the top few hypotheses you have not yet
-  ruled out — a handful of ``configs`` / ``custom_configs`` / ``tasks``
-  in ONE turn (you may mix lanes). You do not test them one at a time; a
-  wider first batch finds the answer faster.
-- When a turn comes back with NO progress (no new finding, no new
-  signal), do NOT narrow down, switch away, or jump to ``report``.
-  Instead WIDEN: keep the leads that still look promising AND add the
-  next hypotheses down your ranked list, dispatching a batch at least as
-  wide as the last one. Every stuck turn should bring NEW angles online,
-  never retreat to fewer.
-- A lead that produced a partial signal (a differential response, an
-  error leak, a status shift) is still promising — re-dispatch it
-  alongside the new hypotheses; do not drop it.
-- Choose ``report`` only once the whole ranked list is genuinely
-  exhausted — every hypothesis tried and ruled out — not merely because
-  the most recent single attempt failed.
-
-The swarm escalates by getting WIDER under pressure, never smaller. A
-target that resists the first batch is normal; the second and third
-batches, each adding fresh hypotheses, are where the harder flags fall.
-
 # Reassessment
 
 After each worker, look at what came back:
 
-- New findings?   Press the advantage: re-dispatch the skill that
-                  produced it and add the adjacent hypotheses next to it.
-                  Go to report only once you have the flag or concrete
-                  impact.
+- New findings?   Consider continuing with a different tactic or going
+                  to report.
 - Recon empty?    Don't blindly run every config; pick a minimal set
                   or go straight to custom_configs tailored to whatever
                   tiny signal recon did surface.
 - Stealth level   If waf_detected is true and stealth_level is 2, be
   rising?         more conservative — consider report rather than firing
                   another loud scan.
-- Stuck / no      Do NOT pick "report" or switch away. WIDEN: keep the
-  progress?       promising leads and add the next hypotheses down your
-                  ranked list (see "Growing the swarm" above). Pick
-                  "report" only when the whole list is exhausted.
+- Same action     If you keep picking the same action and nothing is
+  repeating?      changing, pick "report" instead.
 - Suspected      A worker reporting a HIGH/MEDIUM finding whose
   vs            evidence shows only a differential signal (status
   demonstrated? shift, error leak, response shape change, parser broke)
@@ -1177,8 +1142,18 @@ def _escalation_note(state: SwarmGraphState) -> str | None:
     forks a second, independent planner lane when the first is stuck. It
     seeds that lane's state with ``planner_persona`` (how lane B should
     differ) and ``escalation_brief`` (a one-time snapshot of what lane A
-    had already tried at fork time). This renders both as a single
-    ``[SYSTEM NOTE]``.
+    had already tried at fork time). This renders both — PLUS the
+    "grow wider under pressure" doctrine — as a single ``[SYSTEM NOTE]``.
+
+    The growth doctrine is deliberately scoped to lane B ONLY. Lane A (the
+    solo lane, ``planner_persona`` empty) keeps its original behaviour
+    unchanged: it does not maintain a forced ranked list, does not widen
+    on every stuck turn, and may pick ``report`` when its current line is
+    exhausted. Lane B is the experimental "spend more on the long tail"
+    lane — it is the only one told to keep adding new angles. That split
+    is the whole point: the fast 80-90% path stays exactly as it was, and
+    the wider search only switches on for the runs that lane A could not
+    close.
 
     Returns ``None`` for the normal solo lane (both fields empty), so the
     planner prompt is byte-identical to today on the common path.
@@ -1195,6 +1170,27 @@ def _escalation_note(state: SwarmGraphState) -> str | None:
             "Another independent tester is already pursuing the leads "
             "below — do NOT repeat them. Deliberately take different "
             "angles and surfaces:\n" + brief
+        )
+    if persona:
+        # Lane-B-only growth doctrine — get WIDER under pressure, never
+        # narrower. This is the "+2 more every stuck turn" behaviour the
+        # solo lane intentionally does NOT have.
+        parts.append(
+            "Because you are the divergence lane, you escalate by getting "
+            "WIDER, never narrower. Maintain a RANKED LIST of up to ~10 "
+            "suspected vulnerabilities ordered by likelihood and persist "
+            "it in ``relevant_summary``. Each dispatch round, fire the top "
+            "few you have not ruled out — several ``configs`` / "
+            "``custom_configs`` / ``tasks`` in ONE turn. When a round "
+            "comes back with NO progress (no new finding, no new signal), "
+            "do NOT narrow, switch away, or pick ``report``: keep the "
+            "still-promising leads AND add at least TWO NEW hypotheses "
+            "from your ranked list, dispatching a batch at least as wide "
+            "as the last one. A partial signal (a differential response, "
+            "an error leak, a status shift) still counts as promising — "
+            "carry it alongside the new angles, do not drop it. Choose "
+            "``report`` only once the whole ranked list is genuinely "
+            "exhausted, not because one attempt failed."
         )
     return "\n\n".join(parts)
 

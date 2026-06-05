@@ -1,7 +1,7 @@
-"""TEMPORARY / EMERGENCY — show Codex 5-hour + weekly usage per account.
+"""Show live Codex 5-hour + weekly usage for the ``~/.codex`` login.
 
-Read-only and standalone, pairs with :mod:`src.cli.codex_accounts`. It GETs
-``https://chatgpt.com/backend-api/wham/usage`` with an account's OAuth token —
+Read-only and standalone. It GETs
+``https://chatgpt.com/backend-api/wham/usage`` with the stored OAuth token —
 the same harmless status call the Codex CLI/IDE make constantly. It does NOT
 consume model quota and never writes anything.
 
@@ -15,14 +15,12 @@ Response shape (confirmed live)::
 
 ``primary_window`` is the 5-hour limit; ``secondary_window`` is the weekly one.
 
-To remove: delete this file and the "Codex usage" row + handler in
-``tui.py``. Nothing else imports it.
+Used by the "Codex usage" row in ``tui.py`` and by :mod:`src.cli.usage_guard`,
+which paces benchmark sweeps against the 5-hour window.
 
 CLI::
 
-    uv run python -m src.cli.codex_usage            # the selected account
-    uv run python -m src.cli.codex_usage all        # main + every extra account
-    uv run python -m src.cli.codex_usage <name>     # one account ('main' or extra)
+    uv run python -m src.cli.codex_usage     # the ~/.codex login's usage
 """
 
 from __future__ import annotations
@@ -34,19 +32,18 @@ from pathlib import Path
 
 import httpx
 
-from src.cli import codex_accounts
 from src.llm.codex import load_tokens, refresh_access_token
 
 USAGE_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage"
 
 
 class CodexAccountAuthError(Exception):
-    """The account's stored login was revoked or expired server-side.
+    """The stored Codex login was revoked or expired server-side.
 
     Raised on a 401 from either the refresh endpoint or the usage endpoint.
-    The fix is always the same: sign into that account again and re-capture
-    it (see ``codex_accounts.capture``). Distinguished from generic network
-    errors so the UI can show "re-capture" instead of a raw stack string.
+    The fix is always the same: sign in again with ``codex login``.
+    Distinguished from generic network errors so the UI can show "re-login"
+    instead of a raw stack string.
     """
 
 
@@ -167,47 +164,33 @@ def fetch(codex_home: Path | None = None, *, timeout: float = 15.0) -> Usage:
     )
 
 
-def fetch_for(name: str) -> Usage:
-    """Fetch usage for an account by switcher name ('main' or an extra)."""
-    home = None if name == codex_accounts.MAIN else codex_accounts.home_for(name)
-    return fetch(home)
-
-
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-def _format_plain(name: str, u: Usage) -> str:
+def _format_plain(u: Usage) -> str:
     plan = (u.plan_type or "?").lower()
     p = f"{u.primary.used_percent:g}%" if u.primary else "?"
     s = (
         f"{u.secondary.used_percent:g}% (resets {u.secondary.reset_human})"
         if u.secondary else "?"
     )
-    who = u.email or ""
+    who = u.email or "~/.codex"
     return (
-        f"{codex_accounts.display_name(name):<22s} [{plan}] {who}\n"
+        f"{who:<22s} [{plan}]\n"
         f"    5-hour : {p}\n"
         f"    weekly : {s}\n"
         f"    credits: {u.credits_balance if u.has_credits else 'none'}"
     )
 
 
-def _main(argv: list[str]) -> int:
-    target = argv[0] if argv else codex_accounts.selected()
-    if target == "all":
-        names = codex_accounts.order()
-    else:
-        names = [target]
-
-    rc = 0
-    for name in names:
-        try:
-            print(_format_plain(name, fetch_for(name)))
-        except Exception as e:  # noqa: BLE001
-            print(f"{codex_accounts.display_name(name):<22s} ERROR: {type(e).__name__}: {e}")
-            rc = 1
-    return rc
+def _main(_argv: list[str]) -> int:
+    try:
+        print(_format_plain(fetch()))
+    except Exception as e:  # noqa: BLE001
+        print(f"ERROR: {type(e).__name__}: {e}")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

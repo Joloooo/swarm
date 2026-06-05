@@ -1052,6 +1052,89 @@ def _summarize_recent_evidence(messages: list) -> str | None:
     return "\n".join(lines) if len(lines) > 1 else None
 
 
+def _colocated_service_directive(state: SwarmGraphState) -> str | None:
+    """Force a dispatch at any co-located service recon-ports surfaced.
+
+    ``recon-ports`` files every non-main-app service it finds as an
+    ``exposed-service`` ``**FINDING:**`` carrying the service's base URL
+    (an S3-compatible store on ``:8333``, a second web port, an admin
+    daemon …). These are first-class targets — the objective often lives
+    there — but a single line in a finding list is easy for the planner
+    to skim past while it fixates on the main app. This mirrors the
+    SQLi-on-5xx specialization rule in :func:`_summarize_recent_evidence`:
+    turn the signal into an explicit "you MUST dispatch here" SYSTEM NOTE.
+
+    We suppress the note for a service once an attack worker (anything
+    not ``owasp-recon*``) has already filed a finding referencing the
+    same ``host:port`` — i.e. the lead has been picked up — so the note
+    is pressure to engage, not an endless nag.
+
+    Returns ``None`` when there are no un-engaged co-located services.
+    """
+    findings = list(state.get("findings") or [])
+    if not findings:
+        return None
+
+    from urllib.parse import urlparse
+
+    def _hostport(u: str) -> tuple[str, int | None]:
+        try:
+            p = urlparse(u if "://" in u else f"http://{u}")
+            return (p.hostname or u, p.port)
+        except Exception:
+            return (u, None)
+
+    services: list[tuple[str, str]] = []
+    for f in findings:
+        if (getattr(f, "category", "") or "").lower() != "exposed-service":
+            continue
+        url = (getattr(f, "url", "") or "").strip()
+        if url:
+            services.append((getattr(f, "title", "") or url, url))
+    if not services:
+        return None
+
+    # host:port pairs an attack worker has already engaged (filed a
+    # finding against). Recon's own findings don't count as "engaged".
+    engaged: set[tuple[str, int | None]] = set()
+    for f in findings:
+        if (getattr(f, "agent_id", "") or "").startswith("owasp-recon"):
+            continue
+        u = (getattr(f, "url", "") or "").strip()
+        if u:
+            engaged.add(_hostport(u))
+
+    pending = [(t, u) for (t, u) in services if _hostport(u) not in engaged]
+    if not pending:
+        return None
+
+    lines = [
+        "[SYSTEM NOTE] Recon found one or more services co-located with "
+        "the target on separate ports (the target URL alone never reveals "
+        "these, and the objective often lives in them):"
+    ]
+    seen_urls: set[str] = set()
+    for title, url in pending:
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        lines.append(f"  • {title} — base URL: {url}")
+        if len(seen_urls) >= 6:
+            break
+    lines.append(
+        "  • Specialization rule: a co-located service is a first-class "
+        "target. On your next attack turn, dispatch a worker whose "
+        "objective names one of these base URLs explicitly (put the full "
+        "URL in the dispatch reason so the worker tests it directly with "
+        "its own tools) before pivoting elsewhere. A web proxy or "
+        "`/api/...` route in the main app that merely reads from such a "
+        "store is a VIEW onto it, not the store — if repeated probes "
+        "against that proxy stall, target the service's own base URL "
+        "instead."
+    )
+    return "\n".join(lines)
+
+
 def _build_forced_search_query(finding, state: SwarmGraphState) -> str:
     """Build a focused web-search query from a blocking finding.
 
@@ -1569,6 +1652,21 @@ class PlannerNode(BaseNode):
                 evidence.replace("\n", " | ")[:400],
             )
             prior_messages.append(HumanMessage(content=evidence))
+
+        # Co-located-service dispatch directive. recon-ports files any
+        # non-main-app service (object store, second web port, admin
+        # daemon) as an ``exposed-service`` finding with its base URL;
+        # this turns that into an explicit "MUST dispatch here" SYSTEM
+        # NOTE so the planner targets the co-located service instead of
+        # fixating on a proxy in the main app that only reads from it.
+        # Suppresses itself once an attack worker has engaged the service.
+        service_note = _colocated_service_directive(state)
+        if service_note:
+            self.log.info(
+                "co-located service directive: %s",
+                service_note.replace("\n", " | ")[:300],
+            )
+            prior_messages.append(HumanMessage(content=service_note))
 
         # Surface the prior turn's relevant_summary so the planner can
         # see its own previous notes and rewrite them on this turn. The

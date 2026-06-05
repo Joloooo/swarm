@@ -36,14 +36,12 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from questionary import Choice
-from questionary.prompts.common import InquirerControl
 from rich.console import Console
 
 from src.cli import (
     banner,
     bench_discovery,
     bench_results,
-    codex_accounts,
     config_store,
     docker_boot,
     runner,
@@ -87,17 +85,8 @@ def main_loop(args: argparse.Namespace) -> None:
             _console.print("[dim]👋 bye[/dim]")
             return
 
-        # TEMPORARY emergency affordance: Enter (or Tab) on the Codex-account
-        # row cycles the live login. Re-loop so the menu redraws with the new
-        # active account. See _bind_account_tab / src.cli.codex_accounts.
-        if action == "__codex_switch__":
-            new = codex_accounts.cycle()
-            if new:
-                _console.print(f"[cyan]🔑 Codex account → {new}[/cyan]")
-            continue
-
-        # TEMPORARY emergency affordance: fetch + show live 5h/weekly usage
-        # for every account. Read-only (no quota used). See codex_usage.
+        # Fetch + show live 5h/weekly Codex usage for the ~/.codex login.
+        # Read-only (no quota used). See codex_usage.
         if action == "__codex_usage__":
             _show_codex_usage()
             continue
@@ -121,9 +110,9 @@ def _run_campaign(args: argparse.Namespace) -> None:
     Asks how many concurrent windows, bootstraps Docker, then hands off to
     :func:`benchmarks.launch_split.launch_campaign`, which opens one
     Terminal window per slice and turns THIS terminal into a live dashboard
-    until every window finishes. Each window inherits the currently-selected
-    Codex account and config because launch_campaign forwards the session's
-    ``SWARM_*`` env (the picker run path relies on the same inheritance).
+    until every window finishes. Each window inherits the run config because
+    launch_campaign forwards the session's ``SWARM_*`` env (the picker run
+    path relies on the same inheritance).
 
     Imported lazily so the TUI's normal startup stays light and the
     benchmarks package isn't pulled in unless a campaign is actually run.
@@ -176,11 +165,7 @@ def _ensure_docker(args: argparse.Namespace) -> bool:
 # ---------------------------------------------------------------------------
 
 def _top_level() -> str | None:
-    # TEMPORARY emergency Codex-account switcher row. Always shown (the main
-    # login always exists); Tab cycles main → extra accounts. Fully additive
-    # — remove this row + the helpers below and the menu is unchanged.
     choices: list[Choice] = [
-        Choice(_account_label(), value="__codex_switch__"),
         Choice("📊 Codex usage (5-hour / weekly) — fetch live", value="__codex_usage__"),
         Choice("xbow benchmark  (pick one or queue several to run in order)", value="xbow"),
         Choice("🚀 Run ALL benchmarks concurrently  (fan out across N Terminal windows)", value="campaign"),
@@ -192,81 +177,22 @@ def _top_level() -> str | None:
         "What do you want to do?",
         choices=choices,
         use_shortcuts=False,
-        instruction="(use ↑/↓, enter to confirm, Ctrl-C to quit)  ·  Tab: switch Codex account",
+        instruction="(use ↑/↓, enter to confirm, Ctrl-C to quit)",
     )
-    _bind_account_tab(question)
     return question.ask()
 
 
-# ---------------------------------------------------------------------------
-# TEMPORARY emergency Codex-account switcher (Tab on the top-level menu)
-# ---------------------------------------------------------------------------
-
-def _account_label() -> list[tuple[str, str]]:
-    """Title for the Codex-account row — selected account + the cycle set.
-
-    Rebuilt live on every Tab press (see :func:`_bind_account_tab`) so the
-    user always sees which OAuth token the next run will use. The account_id
-    tail disambiguates even before the main login is renamed.
-    """
-    sel = codex_accounts.selected()
-    names = codex_accounts.order()
-    segs: list[tuple[str, str]] = [("fg:ansiyellow bold", "🔑 Codex account: ")]
-    segs.append(("fg:ansibrightcyan bold", codex_accounts.display_name(sel)))
-    acc = codex_accounts.account_id(sel)
-    if acc:
-        segs.append(("fg:ansibrightblack", f"  …{acc[-6:]}"))
-    if len(names) >= 2:
-        segs.append(("", "   ·  Tab/enter to switch  "))
-        segs.append((
-            "fg:ansibrightblack",
-            "[" + " · ".join(codex_accounts.display_name(n) for n in names) + "]",
-        ))
-    else:
-        segs.append(("fg:ansibrightblack", "   ·  (no extra accounts yet — capture one)"))
-    return segs
-
-
-def _bind_account_tab(question: questionary.Question) -> None:
-    """Bind Tab on the top-level menu to cycle the active Codex account.
-
-    Sets the ``SWARM_CODEX_HOME`` env var (via :mod:`src.cli.codex_accounts`)
-    so ``ChatCodex`` loads the chosen account's ``auth.json`` — no files are
-    moved or overwritten — then rebuilds the account row's label and redraws,
-    so switching happens without leaving the menu. The selection is inherited
-    by the benchmark subprocess (``env=os.environ.copy()``) and stays fixed
-    for that whole run. Reaches into the finished questionary ``Application``
-    to locate its ``InquirerControl`` and register the Tab binding against it.
-    """
-    app = question.application
-    ic = next(
-        c
-        for c in app.layout.find_all_controls()
-        if isinstance(c, InquirerControl)
-    )
-
-    @app.key_bindings.add("tab", eager=True)
-    def _switch(event) -> None:  # noqa: ANN001 (prompt_toolkit event)
-        codex_accounts.cycle()
-        for choice in ic.choices:
-            if choice.value == "__codex_switch__":
-                choice.title = _account_label()
-        app.invalidate()
-
-
 def _show_codex_usage() -> None:
-    """Fetch and print live 5-hour + weekly usage for every account.
+    """Fetch and print live 5-hour + weekly Codex usage for the ~/.codex login.
 
-    TEMPORARY emergency affordance. Read-only — hits the wham/usage status
-    endpoint per account (no model quota consumed). Lazy-imports
-    :mod:`src.cli.codex_usage` so the TUI's normal startup stays light and
-    the whole feature stays trivially removable.
+    Read-only — hits the wham/usage status endpoint (no model quota
+    consumed). Lazy-imports :mod:`src.cli.codex_usage` so the TUI's normal
+    startup stays light.
     """
     from rich.table import Table
 
     from src.cli import codex_usage
 
-    sel = codex_accounts.selected()
     _console.print("[dim]Fetching Codex usage… (read-only; no quota used)[/dim]")
 
     table = Table(show_header=True, header_style="bold", title="Codex usage")
@@ -284,24 +210,22 @@ def _show_codex_usage() -> None:
         colour = "red" if p >= 80 else "yellow" if p >= 50 else "green"
         return f"[{colour}]{p:g}%[/{colour}]"
 
-    for name in codex_accounts.order():
-        disp = codex_accounts.display_name(name) + ("  ◀ selected" if name == sel else "")
-        try:
-            u = codex_usage.fetch_for(name)
-            table.add_row(
-                disp,
-                (u.plan_type or "?"),
-                _pct(u.primary),
-                _pct(u.secondary),
-                u.secondary.reset_human if u.secondary else "—",
-                (u.credits_balance if u.has_credits else "—"),
-            )
-        except codex_usage.CodexAccountAuthError:
-            table.add_row(disp, "[red]revoked[/red]", "—", "—", "—",
-                          "[red]re-login & re-capture[/red]")
-        except Exception as e:  # noqa: BLE001
-            table.add_row(disp, "[red]error[/red]", "—", "—", "—",
-                          f"[red]{type(e).__name__}[/red]")
+    try:
+        u = codex_usage.fetch()
+        table.add_row(
+            (u.email or "~/.codex"),
+            (u.plan_type or "?"),
+            _pct(u.primary),
+            _pct(u.secondary),
+            u.secondary.reset_human if u.secondary else "—",
+            (u.credits_balance if u.has_credits else "—"),
+        )
+    except codex_usage.CodexAccountAuthError:
+        table.add_row("~/.codex", "[red]revoked[/red]", "—", "—", "—",
+                      "[red]re-login (codex login)[/red]")
+    except Exception as e:  # noqa: BLE001
+        table.add_row("~/.codex", "[red]error[/red]", "—", "—", "—",
+                      f"[red]{type(e).__name__}[/red]")
 
     _console.print(table)
     _console.print("[dim][enter] to return to the menu…[/dim]", end=" ")

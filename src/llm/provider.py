@@ -114,15 +114,6 @@ class LLMConfig:
     reasoning_summary: str | None = field(
         default_factory=lambda: getattr(config.budgets, "reasoning_summary", "detailed")
     )
-    # Codex account selection — TEMPORARY emergency switcher (see
-    # ``src/cli/codex_accounts.py``). When ``SWARM_CODEX_HOME`` is set,
-    # ``ChatCodex`` loads tokens from ``<that dir>/auth.json`` instead of the
-    # default ``~/.codex``. Unset → ``None`` → default ``~/.codex`` (the main
-    # / jolocorp login), so behaviour is unchanged unless a switch is active.
-    # Codex-only; silently ignored by other providers.
-    codex_home: str | None = field(
-        default_factory=lambda: os.environ.get("SWARM_CODEX_HOME") or None
-    )
     # Provider-specific kwargs (e.g. base_url for OpenRouter)
     extra: dict[str, Any] | None = None
 
@@ -211,10 +202,6 @@ def current_default_config() -> dict[str, Any]:
                 os.environ.get("SWARM_LOCAL_BASE_URL")
                 or "http://127.0.0.1:8080/v1"
             )
-        if cfg.provider == Provider.CODEX and cfg.codex_home:
-            # Emergency account switcher active — make it obvious in the
-            # banner which (non-default) Codex login this run will use.
-            out["codex_home"] = cfg.codex_home
         return out
     except Exception:  # noqa: BLE001
         return {}
@@ -309,19 +296,8 @@ def get_llm(config: LLMConfig | None = None) -> BaseChatModel:
     if config.provider == Provider.CODEX:
         from src.llm.codex import CODEX_API_ENDPOINT, ChatCodex
 
-        # Guard against a stale account selection: if SWARM_CODEX_HOME points
-        # at a dir with no auth.json (e.g. an extra account that was removed),
-        # fall back to the default ~/.codex main login instead of crashing
-        # every worker with FileNotFoundError.
-        codex_home = config.codex_home
-        if codex_home and not os.path.exists(os.path.join(codex_home, "auth.json")):
-            logger.warning(
-                "SWARM_CODEX_HOME=%s has no auth.json — falling back to ~/.codex. "
-                "Stale account selection? Run `unset SWARM_CODEX_HOME`.",
-                codex_home,
-            )
-            codex_home = None
-
+        # ChatCodex reads the OAuth token from the default ~/.codex/auth.json
+        # and refreshes it on demand (see src/llm/codex.py:_ensure_tokens).
         _log_provider_diagnostic(config, CODEX_API_ENDPOINT)
         return ChatCodex(
             model=config.model,
@@ -329,9 +305,6 @@ def get_llm(config: LLMConfig | None = None) -> BaseChatModel:
             max_tokens=config.max_tokens,
             reasoning_effort=config.reasoning_effort,
             reasoning_summary=config.reasoning_summary,
-            # None → ChatCodex defaults to ~/.codex (main login). Set only
-            # when the TUI/env selected an extra account. See LLMConfig above.
-            codex_home=codex_home,
         )
 
     raise ValueError(f"Unknown provider: {config.provider}")

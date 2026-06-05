@@ -147,7 +147,6 @@ async def run_with_escalation(
     *,
     config: dict,
     enabled: bool = True,
-    fork_after_planner_iters: int = 3,
     fork_after_seconds: float = 600.0,
     lane_b_persona: str = DEFAULT_LANE_B_PERSONA,
     log: logging.Logger | None = None,
@@ -159,20 +158,18 @@ async def run_with_escalation(
     * ``enabled=False`` → plain ``ainvoke`` (zero behavioral change).
     * Lane A streams identically to ``ainvoke`` and its exceptions
       propagate unchanged (the caller's timeout-rescue path still fires).
-    * Lane B is forked once, the FIRST time EITHER trigger trips without a
-      capture, whichever comes first:
-        - ``planner_iters >= fork_after_planner_iters`` — i.e. recon plus
-          two attack rounds are done and the third is about to start
-          (default 3). The win-timing data shows 91% of wins land by the
-          second attack round, so the third round is the natural point to
-          bring a second, divergent searcher online for the long tail.
-        - ``elapsed >= fork_after_seconds`` — a wall-clock backstop
-          (default 600s = 10 min) for runs whose individual workers are
-          slow enough that they haven't reached the third planner round
-          yet but are already past the point where ~87% of wins land.
-      Lane B is best-effort (its errors never propagate). The wall-clock
-      check is evaluated each time lane A yields a graph step, so the time
-      trigger fires at the next step boundary after the threshold.
+    * Lane B is forked once, the first time lane A has spent
+      ``fork_after_seconds`` of wall clock (default 600s = 10 min) without
+      a capture. The win-timing data shows ~87% of wins land within 10
+      minutes, so a run still going past that point is the long tail where
+      a second, divergent searcher earns its keep. (A planner-round
+      trigger was tried and dropped: ``planner_iters`` also counts recon
+      and web_search turns, so it does not faithfully track attack rounds —
+      ``planner_iters=3`` was empirically 0–1 attack rounds, never 2.) The
+      check is evaluated each time lane A yields a graph step — the stream
+      is driven by planner runs — so the fork lands at the first
+      planner-run boundary after the 10-minute threshold. Lane B is
+      best-effort (its errors never propagate).
     * First lane to set ``captured_flag`` wins; the loser is cancelled.
       If neither captures, the lane with more findings is returned (richer
       report).
@@ -219,28 +216,24 @@ async def run_with_escalation(
                     b_res = b_latest["state"]
                 if (b_res or {}).get("captured_flag"):
                     return b_res
-            # Fork trigger — once, the first time EITHER lane A has run
-            # enough planner rounds OR enough wall-clock time has passed
-            # without a capture.
-            iters = int(s.get("planner_iters") or 0)
+            # Fork trigger — once, the first time lane A has spent
+            # ``fork_after_seconds`` of wall clock without a capture. The
+            # check runs whenever lane A yields a graph step (the stream is
+            # driven by planner runs), so the fork lands at the first
+            # planner-run boundary after the 10-minute threshold.
             elapsed = time.monotonic() - t_start
-            hit_rounds = iters >= fork_after_planner_iters
-            hit_time = elapsed >= fork_after_seconds
-            if not fork_attempted and (hit_rounds or hit_time):
+            if not fork_attempted and elapsed >= fork_after_seconds:
                 fork_attempted = True
-                trigger = (
-                    f"{iters} planner turns" if hit_rounds
-                    else f"{elapsed / 60.0:.1f} min elapsed"
-                )
                 try:
                     b_state = build_lane_b_state(
                         initial_state, s, persona=lane_b_persona,
                     )
                     b_task = asyncio.create_task(run_lane_b(b_state))
                     log.info(
-                        "escalation: lane A stuck (%s) — forked divergent "
-                        "lane B (run_id=%s)",
-                        trigger, b_state.get("run_id"),
+                        "escalation: lane A still running after %.1f min "
+                        "without a capture — forked divergent lane B "
+                        "(run_id=%s)",
+                        elapsed / 60.0, b_state.get("run_id"),
                     )
                 except Exception as e:  # noqa: BLE001
                     log.warning("escalation: failed to fork lane B: %s", e)

@@ -10,10 +10,10 @@ sweep never starts a benchmark that would immediately hit a hard rate-limit
 Only the 5-hour window (``primary_window``) matters here; the weekly window
 (``secondary_window``) is ignored by design.
 
-The usage snapshot comes from :func:`src.cli.codex_usage.fetch_for`, which
-hits the same read-only ``/wham/usage`` status endpoint the Codex CLI uses —
-it consumes no model quota and the account it reads is the same one the run
-will spend on (both resolve ``SWARM_CODEX_HOME`` → the selected account).
+The usage snapshot comes from :func:`src.cli.codex_usage.fetch`, which hits
+the same read-only ``/wham/usage`` status endpoint the Codex CLI uses — it
+consumes no model quota and reads the same default ``~/.codex`` login the run
+will spend on.
 
 Timezone safety
 ---------------
@@ -149,13 +149,16 @@ def _fmt_duration(seconds: int) -> str:
     return f"{h}h {m:02d}m" if h else f"{m}m"
 
 
-def _default_fetch(name: str) -> Any:
-    """Fetch live usage for an account by switcher name. Lazy-imports
+def _default_fetch(_label: str) -> Any:
+    """Fetch live usage for the default ``~/.codex`` login. Lazy-imports
     :mod:`src.cli.codex_usage` so importing this module stays cheap and never
     drags ``httpx`` / the LLM stack into ``xbow_runner``'s import-order dance.
+
+    ``_label`` (the display name the guard threads into its log lines) is
+    ignored here — there is exactly one Codex login to read.
     """
     from src.cli import codex_usage
-    return codex_usage.fetch_for(name)
+    return codex_usage.fetch()
 
 
 def _fetch_with_retries(

@@ -439,14 +439,27 @@ class BaseNode(ABC):
         if total_findings > 0:
             return None
         cfg = recent[0].config_name
+        # Lane B (the divergence lane, identified by a non-empty
+        # ``planner_persona``) escalates by widening — keep adding angles
+        # rather than narrowing. Lane A (the solo lane) keeps its original
+        # behaviour: try something different, search, or report. The split
+        # is intentional — only the second lane is told to grow wider.
+        is_lane_b = bool((state.get("planner_persona") or "").strip())
+        if is_lane_b:
+            return (
+                f"Loop detected: skill {cfg!r} has run {window} times in a "
+                "row with 0 findings. Stop re-running it alone — but do NOT "
+                "narrow to a single new skill or jump to report. WIDEN this "
+                "turn: keep any still-promising lead and bring the next "
+                "hypotheses down your ranked list online together (a "
+                "web_search first is fine if you need fresh technique "
+                "ideas). Pick report only once the whole ranked list is "
+                "exhausted."
+            )
         return (
             f"Loop detected: skill {cfg!r} has run {window} times in a row "
-            "with 0 findings. Stop re-running it alone — but do NOT narrow "
-            "to a single new skill or jump to report. WIDEN this turn: keep "
-            "any still-promising lead and bring the next hypotheses down "
-            "your ranked list online together (a web_search first is fine "
-            "if you need fresh technique ideas). Pick report only once the "
-            "whole ranked list is exhausted."
+            "with 0 findings. Try a different skill, do web_search to learn "
+            "more, or pick report if the target seems exhausted."
         )
 
     # ── Tiered refusal-retry chain ──────────────────────────────────

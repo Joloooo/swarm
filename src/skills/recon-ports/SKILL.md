@@ -6,7 +6,7 @@ metadata:
   methodology: owasp
   config_name: recon-ports
   phase: recon
-  tools: [nmap_fast_scan, nmap_service_detection, nmap_default_scripts, nmap_http_enum, nmap_ssl_enum, nmap_specific_ports, nmap_host_discovery, bash]
+  tools: [nmap_full_scan, nmap_fast_scan, nmap_service_detection, nmap_default_scripts, nmap_http_enum, nmap_ssl_enum, nmap_specific_ports, nmap_host_discovery, bash]
   max_tool_calls: 20
   max_iterations: 15
 ---
@@ -19,33 +19,54 @@ duplicate that. Your job is the part it skips: ports and services.
 
 ## Scan FIRST
 
-Your **first tool call must be** `nmap_fast_scan(target)` — top 100 TCP
-ports in ~30 seconds. Do not fetch the homepage; the other recon pass
-owns that. The single most valuable thing you produce is the list of
-open ports and the service behind each, so start there.
+Your **first tool call must be** `nmap_full_scan(target)` — a full TCP
+sweep (`-p-`, all 65535 ports, state only). Against a localhost /
+loopback benchmark target this returns in **~1-2 seconds** because closed
+ports refuse instantly; the tool's longer host-timeout is only a ceiling
+for slow remote hosts, not how long it usually takes. Do not fetch the
+homepage; the other recon pass owns that. Scanning **every** port — not
+just the common ones — is exactly how you find a service on an unusual
+port, like an object store on `:8333` that a top-100 scan would miss.
+
+If `nmap_full_scan` does not return promptly (a genuinely slow or
+filtered remote target — not a localhost benchmark), fall back to
+`nmap_fast_scan(target, top_ports=1000)`.
 
 `target` is the host from the target URL (strip the scheme and any
 path: `http://10.0.0.5:5000/app` → scan `10.0.0.5`). Scan the **host**,
 not a single port — the whole point is to find ports the URL doesn't
 mention.
 
-## Two-pass workflow
+## Scan workflow
 
-1. **Discovery** — `nmap_fast_scan(target)`. Read `hosts[].ports[]` for
-   the open ports. If it returns `ok=True` with `hosts: []`, the host
-   filtered the probes — try `nmap_host_discovery(target, method="tcp-syn")`
-   once before giving up.
-2. **Enrichment** — feed the open ports into
-   `nmap_service_detection(target, ports="...")` (versions, fast) or
-   `nmap_default_scripts(target, ports="...")` (versions + safe NSE).
-   For a TLS port, add `nmap_ssl_enum(target, ports="443")`. For an
-   extra web port, add `nmap_http_enum(target)`.
+1. **Discovery** — `nmap_full_scan(target)`. Reads every TCP port for
+   state and returns only the open ones (`hosts[].ports[]`). No
+   cherry-picking, no arbitrary cutoff — a service on `:8333` or `:9000`
+   is found the same as `:80`. If it returns `ok=True` with `hosts: []`,
+   the host filtered the probes — try
+   `nmap_host_discovery(target, method="tcp-syn")` once before giving up.
+2. **Enrichment** — run service detection **only on the open ports** from
+   step 1, never the whole range:
+   `nmap_service_detection(target, ports="<comma-separated open ports>")`
+   (versions, fast), or `nmap_default_scripts(target, ports="...")`
+   (versions + safe NSE). For a TLS port add
+   `nmap_ssl_enum(target, ports="443")`; for an extra web port add
+   `nmap_http_enum(target)`. Enrichment is the only step that costs real
+   time, and it scales with the number of open ports — which is why you
+   run it on the open list, not the full range.
 
-If a port you expect is missing, you may run `nmap_specific_ports` on a
-short, named list — but do **not** run a full 65535-port sweep,
-`nmap_vuln_scan`, or `nmap_aggressive` in this pass. Those are slow and
-would hold up the rest of recon. A fast pass that finishes is worth far
-more than a thorough one that never returns.
+   **Skip the host-environment decoys when enriching.** On a localhost /
+   loopback target, ports belonging to the developer's machine — not the
+   benchmark — leak onto the address: AirTunes / AirPlay (`5000`, `7000`,
+   with `Server: AirTunes` or RTSP banners) and a MikroTik bandwidth-test
+   daemon (`49152`). Note them once as host noise and do **not** run
+   `-sV` against them — service-probing those non-services is slow and
+   tells you nothing about the benchmark.
+
+Do **not** run `nmap_vuln_scan` or `nmap_aggressive` in this pass — they
+are slow and would hold up the rest of recon. The full state scan plus
+targeted enrichment already cover what matters; a pass that finishes is
+worth far more than a thorough one that never returns.
 
 ## Keep every command bounded
 

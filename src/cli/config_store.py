@@ -77,8 +77,9 @@ KEY_TO_ENV: dict[tuple[str, str], tuple[str, Any, str]] = {
     ("budgets", "llm_max_tokens"):               ("SWARM_LLM_MAX_TOKENS",         4096,     "int"),
     ("budgets", "web_search_max_crawled_chars"): ("SWARM_WEB_MAX_CHARS",          8000,     "int"),
     # Dual-planner escalation race (src/orchestration/escalation.py).
-    ("budgets", "escalation_enabled"):           ("SWARM_ESCALATION",            True,     "bool"),
-    ("budgets", "escalation_fork_after_iters"):  ("SWARM_ESCALATION_FORK_AFTER",    3,     "int"),
+    ("budgets", "escalation_enabled"):              ("SWARM_ESCALATION",            True,  "bool"),
+    ("budgets", "escalation_fork_after_iters"):     ("SWARM_ESCALATION_FORK_AFTER",    3,  "int"),
+    ("budgets", "escalation_fork_after_seconds"):   ("SWARM_ESCALATION_FORK_AFTER_SECONDS", 600, "int"),
     ("model",   "slug"):                         ("SWARM_MODEL",             "gpt-5.5",     "str"),
     ("model",   "reasoning_effort"):             ("SWARM_REASONING_EFFORT",     "low",      "str"),
     ("model",   "reasoning_summary"):            ("SWARM_REASONING_SUMMARY", "detailed",    "str"),

@@ -143,13 +143,19 @@ config = SimpleNamespace(
         planner_max_iters            = _env_int("SWARM_PLANNER_MAX_ITERS",        50),
         # ── Escalation / dual-planner race (src/orchestration/escalation.py) ──
         # When the first planner lane is still stuck after this many
-        # planner turns (recon + a couple of attack batches), fork a
-        # SECOND, independent planner lane with a divergence persona and
-        # race them — first capture wins. Only ever fires for the hard
-        # runs that don't win early, so the fast-win path is untouched.
-        # Disable with SWARM_ESCALATION=0.
-        escalation_enabled           = _env_bool("SWARM_ESCALATION",            True),
-        escalation_fork_after_iters  = _env_int("SWARM_ESCALATION_FORK_AFTER",     3),
+        # planner turns (recon + a couple of attack batches) OR after
+        # ``escalation_fork_after_seconds`` of wall clock — whichever comes
+        # first — fork a SECOND, independent planner lane with a divergence
+        # persona and race them; first capture wins. Only ever fires for
+        # the hard runs that don't win early, so the fast-win path is
+        # untouched. The default fork point (3 planner turns ≈ two attack
+        # rounds done / 600 s) is tuned to the win-timing data: 91% of wins
+        # land by the second attack round and 87% within 10 min, so the
+        # divergent lane comes online exactly for the long tail.
+        # Disable the whole mechanism with SWARM_ESCALATION=0.
+        escalation_enabled            = _env_bool("SWARM_ESCALATION",            True),
+        escalation_fork_after_iters   = _env_int("SWARM_ESCALATION_FORK_AFTER",     3),
+        escalation_fork_after_seconds = _env_int("SWARM_ESCALATION_FORK_AFTER_SECONDS", 600),
         # ── Worker agents (per invocation) ──
         worker_max_iterations        = _env_int("SWARM_WORKER_MAX_ITERATIONS",    60),
         # ── Planner-invented "custom" attacks ──

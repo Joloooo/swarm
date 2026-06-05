@@ -791,6 +791,7 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
                 config={"recursion_limit": GRAPH_RECURSION_LIMIT},
                 enabled=config.budgets.escalation_enabled,
                 fork_after_planner_iters=config.budgets.escalation_fork_after_iters,
+                fork_after_seconds=config.budgets.escalation_fork_after_seconds,
                 log=logger,
             ),
             timeout=RUN_TIMEOUT_S,

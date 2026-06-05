@@ -65,7 +65,10 @@ import tomlkit
 # ---------------------------------------------------------------------------
 
 # Maps (toml_table, toml_key) → (SWARM_ENV_NAME, default_value, kind).
-# kind ∈ {"int", "str"}; bool values are not exposed in the TOML.
+# kind ∈ {"int", "str", "bool"}. ``kind`` is informational — values
+# round-trip via ``str(value)`` in ``load_into_env`` and graph.py reads
+# them with ``_env_bool`` / ``_env_int`` (a TOML ``true`` becomes the env
+# string ``"True"``, which ``_env_bool`` parses back to ``True``).
 KEY_TO_ENV: dict[tuple[str, str], tuple[str, Any, str]] = {
     ("budgets", "planner_max_iters"):            ("SWARM_PLANNER_MAX_ITERS",        50,     "int"),
     ("budgets", "worker_max_iterations"):        ("SWARM_WORKER_MAX_ITERATIONS",    60,     "int"),
@@ -73,6 +76,9 @@ KEY_TO_ENV: dict[tuple[str, str], tuple[str, Any, str]] = {
     ("budgets", "custom_attack_max_iterations"): ("SWARM_CUSTOM_MAX_ITERATIONS",    25,     "int"),
     ("budgets", "llm_max_tokens"):               ("SWARM_LLM_MAX_TOKENS",         4096,     "int"),
     ("budgets", "web_search_max_crawled_chars"): ("SWARM_WEB_MAX_CHARS",          8000,     "int"),
+    # Dual-planner escalation race (src/orchestration/escalation.py).
+    ("budgets", "escalation_enabled"):           ("SWARM_ESCALATION",            True,     "bool"),
+    ("budgets", "escalation_fork_after_iters"):  ("SWARM_ESCALATION_FORK_AFTER",    3,     "int"),
     ("model",   "slug"):                         ("SWARM_MODEL",             "gpt-5.5",     "str"),
     ("model",   "reasoning_effort"):             ("SWARM_REASONING_EFFORT",     "low",      "str"),
     ("model",   "reasoning_summary"):            ("SWARM_REASONING_SUMMARY", "detailed",    "str"),

@@ -1170,6 +1170,35 @@ def _colocated_service_directive(state: SwarmGraphState) -> str | None:
     return "\n".join(lines)
 
 
+def _escalation_note(state: SwarmGraphState) -> str | None:
+    """Render lane B's divergence persona + one-time lead brief, if set.
+
+    The dual-planner orchestrator (:mod:`src.orchestration.escalation`)
+    forks a second, independent planner lane when the first is stuck. It
+    seeds that lane's state with ``planner_persona`` (how lane B should
+    differ) and ``escalation_brief`` (a one-time snapshot of what lane A
+    had already tried at fork time). This renders both as a single
+    ``[SYSTEM NOTE]``.
+
+    Returns ``None`` for the normal solo lane (both fields empty), so the
+    planner prompt is byte-identical to today on the common path.
+    """
+    persona = (state.get("planner_persona") or "").strip()
+    brief = (state.get("escalation_brief") or "").strip()
+    if not persona and not brief:
+        return None
+    parts: list[str] = []
+    if persona:
+        parts.append("[SYSTEM NOTE] " + persona)
+    if brief:
+        parts.append(
+            "Another independent tester is already pursuing the leads "
+            "below — do NOT repeat them. Deliberately take different "
+            "angles and surfaces:\n" + brief
+        )
+    return "\n\n".join(parts)
+
+
 def _build_forced_search_query(finding, state: SwarmGraphState) -> str:
     """Build a focused web-search query from a blocking finding.
 
@@ -1655,6 +1684,18 @@ class PlannerNode(BaseNode):
                     content="No target provided. Ask the user for one via report."
                 )
             ]
+
+        # Dual-planner divergence. Empty (and thus a no-op) for the solo
+        # lane; only set when the escalation orchestrator forked this run
+        # as the independent "lane B" and wants it to take different
+        # angles than the lane already in flight.
+        escalation = _escalation_note(state)
+        if escalation:
+            self.log.info(
+                "escalation persona active: %s",
+                escalation.replace("\n", " | ")[:200],
+            )
+            prior_messages.append(HumanMessage(content=escalation))
 
         # Supervisor-level loop detection. If the same skill has run
         # repeatedly with no findings, surface a SYSTEM NOTE so the LLM

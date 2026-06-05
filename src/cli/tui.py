@@ -129,7 +129,7 @@ def _run_campaign(args: argparse.Namespace) -> None:
     if not _ensure_docker(args):
         return
     _console.print(
-        f"[cyan]🚀 Launching {jobs} concurrent Terminal window(s) over all "
+        f"[cyan]Launching {jobs} concurrent Terminal window(s) over all "
         f"benchmarks — this terminal becomes the live dashboard.[/cyan]"
     )
     from benchmarks.launch_split import launch_campaign
@@ -166,9 +166,9 @@ def _ensure_docker(args: argparse.Namespace) -> bool:
 
 def _top_level() -> str | None:
     choices: list[Choice] = [
-        Choice("📊 Codex usage (5-hour / weekly) — fetch live", value="__codex_usage__"),
+        Choice("Codex usage (5-hour / weekly) — fetch live", value="__codex_usage__"),
         Choice("xbow benchmark  (pick one or queue several to run in order)", value="xbow"),
-        Choice("🚀 Run ALL benchmarks concurrently  (fan out across N Terminal windows)", value="campaign"),
+        Choice("Run ALL benchmarks concurrently  (fan out across N Terminal windows)", value="campaign"),
         Choice("Edit config",                                                 value="config"),
         Choice("Quit",                                                        value="quit"),
     ]

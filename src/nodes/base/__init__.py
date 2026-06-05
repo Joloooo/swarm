@@ -441,8 +441,12 @@ class BaseNode(ABC):
         cfg = recent[0].config_name
         return (
             f"Loop detected: skill {cfg!r} has run {window} times in a row "
-            "with 0 findings. Try a different skill, do web_search to learn "
-            "more, or pick report if the target seems exhausted."
+            "with 0 findings. Stop re-running it alone — but do NOT narrow "
+            "to a single new skill or jump to report. WIDEN this turn: keep "
+            "any still-promising lead and bring the next hypotheses down "
+            "your ranked list online together (a web_search first is fine "
+            "if you need fresh technique ideas). Pick report only once the "
+            "whole ranked list is exhausted."
         )
 
     # ── Tiered refusal-retry chain ──────────────────────────────────

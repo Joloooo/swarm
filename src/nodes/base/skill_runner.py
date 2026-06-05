@@ -1306,16 +1306,99 @@ async def _run_skill_agent_impl(
                 completed=bool(findings),
                 error="model refused" if not findings else None,
             )
+        elif (
+            "recursion limit" in str(e).lower()
+            or type(e).__name__ == "GraphRecursionError"
+        ):
+            # ── Step-budget stop (NOT a crash) ──────────────────────
+            # The worker exhausted its LangGraph ``recursion_limit``
+            # (``config.max_iterations``). The model is still perfectly
+            # reachable — it just ran out of turns. So we do NOT use the
+            # post-crash salvage guesser here (that exists for the case
+            # the LLM channel is dead — a refusal). Instead:
+            #   1. recover the ``**FINDING:**`` blocks the worker already
+            #      wrote before the wall (the success path would have
+            #      parsed these; the old crash path threw them away), and
+            #   2. make ONE forced wrap-up call asking the worker to stop
+            #      and summarize its own work + emit any not-yet-written
+            #      findings.
+            # See src/nodes/base/graceful_wrapup.py for the rationale.
+            node.log.warning(
+                "[%s] reached its step budget (%s) — forcing a graceful "
+                "wrap-up instead of discarding the run.",
+                config.agent_id, str(e)[:160],
+            )
+            from src.nodes.base.graceful_wrapup import force_wrapup_summary
+
+            own_findings = _extract_findings(partial_messages, config.agent_id)
+            wrapup_msg = await force_wrapup_summary(
+                config=config,
+                partial_messages=partial_messages,
+                target_url=target_url,
+                log=node.log,
+                run_id=run_id,
+            )
+            wrapup_findings = (
+                _extract_findings([wrapup_msg], config.agent_id)
+                if wrapup_msg else []
+            )
+            # Dedup by (title, url) — the worker often re-emits in the
+            # wrap-up a finding it had already written in the trace.
+            findings = []
+            _seen_keys: set = set()
+            for f in own_findings + wrapup_findings:
+                key = (getattr(f, "title", ""), getattr(f, "url", ""))
+                if key in _seen_keys:
+                    continue
+                _seen_keys.add(key)
+                findings.append(f)
+
+            trace = [
+                m for m in partial_messages
+                if isinstance(m, (AIMessage, ToolMessage))
+            ]
+            if wrapup_msg:
+                trace.append(wrapup_msg)
+            trace.append(AIMessage(
+                content=(
+                    f"⏱ [{config.agent_id}] reached its step budget and "
+                    f"was asked to wrap up ({e}). This is a completed pass "
+                    f"that ran out of room, not a crash — "
+                    f"{len(findings)} finding(s) recovered from its work. "
+                    "If its lead looked promising, re-dispatch it "
+                    "(optionally with a larger budget) rather than "
+                    "treating it as a dead end."
+                ),
+                additional_kwargs={
+                    "agent_id": config.agent_id,
+                    "budget_stop": True,
+                    "findings_recovered": len(findings),
+                },
+            ))
+            agent_result = AgentResult(
+                agent_id=config.agent_id,
+                methodology=config.methodology,
+                config_name=config.config_name,
+                findings=findings,
+                # Informative, but NOT "model refused" — so the planner's
+                # refusal/repetition logic does not mis-handle it.
+                error="stopped at step budget",
+                # A budget stop is a real, completed pass: count it as a
+                # turn so a worker that ran out of room is not mistaken
+                # for a no-op.
+                completed=True,
+            )
         else:
             node.log.error(f"Agent {config.agent_id} failed: {e}")
-            # Try to salvage a finding from the partial trace before
-            # we throw it away. This is the recovery path for
-            # ``GraphRecursionError`` and similar mid-loop crashes
-            # — see src/refusals/salvage.py for the rationale and the
-            # XBEN-006-24 incident that motivated it. The salvage
-            # call is bounded (one sub-LLM call, ~9 KB prompt) and
-            # silently returns None on failure, so this never makes
-            # the crash path worse.
+            # Genuine crash — not a refusal, not a step-budget stop (e.g.
+            # a tool blew up, a transport error, an unexpected exception).
+            # Here the trace may hold impact the worker never formalized,
+            # so we fall back to the post-crash salvage guesser as a last
+            # resort. See src/refusals/salvage.py for the rationale and
+            # the XBEN-006-24 incident that motivated it. The salvage call
+            # is bounded (one sub-LLM call, ~9 KB prompt) and silently
+            # returns None on failure, so this never makes the crash path
+            # worse.
             salvaged = await try_salvage(
                 config=config,
                 partial_messages=partial_messages,

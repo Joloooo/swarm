@@ -84,32 +84,48 @@ ports and rerun — don't repeat it with the same arguments.
 
 ## What to report — the handoff that matters
 
-For **every open port**, say the port, the service, and the version if
-you have it. Then split them:
+For **every open port**, note the port, the service, and the version if
+you have it. The main target web app (the port in the given URL) is
+already covered by the app recon pass — you do not re-report it. Every
+**other** open service is a lead, and a lead must not be left as a
+sentence in a summary the planner can skim past. **File it as a
+`**FINDING:**`** — that is the only channel guaranteed to put it in
+front of the planner as a first-class target.
 
-- **Web ports** (80, 443, 8080, 8443, or anything `nmap_http_enum`
-  confirms speaks HTTP): note them so the next agents know there is more
-  than one web entry point, but the app recon pass covers the main one.
-- **Non-web services** (databases, object/blob stores, message brokers,
-  caches, admin daemons, anything S3-/MinIO-/Redis-/Mongo-shaped): these
-  are the find. State the service, the port, and — when it speaks HTTP —
-  **write out the full base URL** (`http://<host>:<port>/`) so the
-  planner can dispatch a worker straight at it. Name what it looks like
-  (e.g. "an S3-compatible object store on :8333") so the planner picks
-  the right specialist.
+## File every co-located service as a FINDING (do this, don't just describe)
 
-A co-located service on a high port is exactly the kind of input the
-URL alone never reveals, and it is often where the objective actually
-lives. Surfacing it clearly is the whole reason this pass exists.
+For each open service that is **not** the main target web app — whether
+a non-web service (database, object/blob store, message broker, cache,
+admin daemon, anything S3-/MinIO-/Redis-/Mongo-shaped) **or** a second
+web port (a second nginx, `:8080`, `:8443`, anything `nmap_http_enum`
+confirms speaks HTTP) — write a finding using the standard schema:
+
+```
+**FINDING:**
+Title: Co-located <service> on port <port>
+Severity: medium
+Category: exposed-service
+URL: http://<host>:<port>/
+Evidence: <the nmap line: port, service, version>
+```
+
+Notes:
+- `URL:` is the base URL the next agent should test. Fill it in whenever
+  the service speaks HTTP (object stores, second web ports, admin
+  panels). For a non-HTTP service (raw database, broker) put the
+  `host:port` there instead so the planner still has the address.
+- In the `Title:` / `Evidence:`, name what it looks like (e.g.
+  "an S3-compatible object store on :8333") so the planner picks the
+  right specialist.
+
+Why a finding and not prose: a co-located service on a high port is
+exactly the kind of lead the URL alone never reveals, and it is often
+where the objective actually lives — so it gets first-class treatment,
+every time, not a line in a paragraph.
 
 ## Output
 
-Write plain prose. List open ports and services, then call out any
-non-web base URLs you found and what they appear to be. Keep it short —
-the planner reads this to decide what to test next.
-
-If an open service already qualifies as a finding under the universal
-"Recon findings — what counts" rules above (a known-vulnerable version,
-an exposed admin service, an unauthenticated data store), file it with
-the standard `**FINDING:**` schema. Otherwise just describe what is
-listening.
+After the findings, write a short plain-prose recap: the full open-port
+list, which one is the main web app, and which services you filed as
+findings. Keep it short — the findings carry the leads; the prose is
+just context.

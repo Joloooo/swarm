@@ -530,8 +530,7 @@ def _config_top(cfg: dict[str, dict[str, Any]]) -> str | None:
         f"llm-tokens={b['llm_max_tokens']} "
         f"web-chars={b['web_search_max_crawled_chars']} "
         f"escalation={'on' if b.get('escalation_enabled', True) else 'off'}"
-        f"@{b.get('escalation_fork_after_iters', 3)}it/"
-        f"{b.get('escalation_fork_after_seconds', 600)}s"
+        f"@{b.get('escalation_fork_after_seconds', 600)}s"
     )
 
     choices = [
@@ -560,8 +559,7 @@ def _budgets_submenu(cfg: dict[str, dict[str, Any]]) -> None:
         ("custom_attack_max_iterations", "Custom-skill max iterations"),
         ("llm_max_tokens",               "LLM max output tokens (per call)"),
         ("web_search_max_crawled_chars", "Web-search max chars per source"),
-        ("escalation_fork_after_iters",  "Escalation: fork 2nd planner after N planner turns"),
-        ("escalation_fork_after_seconds", "Escalation: fork 2nd planner after N seconds (OR trigger)"),
+        ("escalation_fork_after_seconds", "Escalation: fork 2nd planner after N seconds"),
     ]
     while True:
         # The escalation switch is a bool, so it toggles on select instead

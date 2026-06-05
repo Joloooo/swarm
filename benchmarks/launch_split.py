@@ -51,6 +51,7 @@ Re-print a finished (or in-flight) campaign any time::
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -136,25 +137,61 @@ def materialize_campaign(campaign: Path, slices: list[list[str]],
         p.write_text("\n".join(slice_ids) + "\n")
 
 
+# SWARM_* vars the campaign owns per-session — never forwarded from the
+# parent env (the launcher sets these itself, fresh, for each window).
+_CAMPAIGN_OWNED_ENV = {"SWARM_LOGS_ROOT", "SWARM_RESULTS_DIR"}
+
+
+def _shquote(s: str) -> str:
+    """POSIX single-quote a string so it survives the shell intact.
+
+    Robust to spaces (the repo can live under '.../My Drive/...') and to
+    embedded single quotes. Safe inside both the AppleScript double-quoted
+    ``do script`` string and a tmux ``send-keys`` argument.
+    """
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+def inherited_swarm_env() -> dict[str, str]:
+    """Current ``SWARM_*`` env (minus campaign-owned vars), to forward.
+
+    osascript/tmux open FRESH shells that do NOT inherit this process's
+    environment, but ``xbow_runner`` relies on inherited env for the model
+    config (``config_store.load_into_env``) and the selected Codex account
+    (``SWARM_CODEX_HOME``) — see src/cli/runner.py:_spawn. So when the TUI
+    (or a shell that has these set) launches a campaign, we replay every
+    ``SWARM_*`` var onto each session's command line. Empty when nothing is
+    set, so a bare standalone run is unchanged.
+    """
+    return {
+        k: v for k, v in os.environ.items()
+        if k.startswith("SWARM_") and k not in _CAMPAIGN_OWNED_ENV
+    }
+
+
 def runner_cmd(slice_path: Path, campaign: Path, marker: str,
                runner_flags: list[str]) -> str:
     """Shell command one session runs for its slice.
 
-    Sets SWARM_LOGS_ROOT + SWARM_RESULTS_DIR so the session's logs and
+    Forwards the parent's ``SWARM_*`` env (model config + Codex account),
+    then sets SWARM_LOGS_ROOT + SWARM_RESULTS_DIR so the session's logs and
     results land under the campaign dir, then touches a done-marker AFTER
     the runner exits (``;`` not ``&&`` so the marker is written even if the
-    run errors). Paths are single-quoted so a space in any path can't break
-    the command — single quotes are safe inside both the AppleScript
-    double-quoted string and a tmux send-keys argument.
+    run errors). Everything is shell-quoted, so spaces in paths/values are
+    safe inside the AppleScript / tmux command string.
     """
     flags = " ".join(runner_flags)
+    forwarded = "".join(
+        f"{k}={_shquote(v)} " for k, v in sorted(inherited_swarm_env().items())
+    )
     return (
-        f"cd '{ROOT}' && "
-        f"SWARM_LOGS_ROOT='{campaign}' "
-        f"SWARM_RESULTS_DIR='{campaign / 'results'}' "
+        f"cd {_shquote(str(ROOT))} && "
+        f"{forwarded}"
+        f"SWARM_LOGS_ROOT={_shquote(str(campaign))} "
+        f"SWARM_RESULTS_DIR={_shquote(str(campaign / 'results'))} "
         f"uv run python -m benchmarks.xbow_runner "
-        f"--list-file '{slice_path}' {flags} ; "
-        f"touch '{campaign / '.done' / marker}'"
+        f"--list-file {_shquote(str(slice_path))} {flags} ; "
+        f"touch {_shquote(str(campaign / '.done' / marker))}"
     )
 
 
@@ -209,6 +246,89 @@ def launch_tmux(cmds: list[str], stagger: float, session: str = "xben") -> None:
     print(f"  kill   : tmux kill-session -t {session}")
 
 
+def launch_campaign(
+    *,
+    jobs: int = 20,
+    list_file: Path = DEFAULT_LIST,
+    name: str | None = None,
+    tmux: bool = False,
+    stagger: float = 0.0,
+    verbose: bool = False,
+    build: bool = False,
+    resume: bool = False,
+    wait: bool = True,
+    interval: float = 5.0,
+    dry_run: bool = False,
+) -> Path:
+    """Split the benchmark list and launch one terminal session per slice.
+
+    The importable core shared by the ``__main__`` CLI and the ``swarm``
+    TUI ("Run all benchmarks concurrently"). Returns the campaign Path.
+    Forwards the caller's ``SWARM_*`` env into every session (see
+    :func:`inherited_swarm_env`) so a TUI-launched campaign honours the
+    selected Codex account and config. ``wait`` turns the CALLING terminal
+    into the live dashboard once the sessions are spawned.
+    """
+    ids = read_ids(list_file)
+
+    if jobs > LOOPBACK_POOL and not tmux:
+        print(
+            f"note: --jobs {jobs} exceeds the {LOOPBACK_POOL}-IP loopback "
+            f"pool; sessions past the {LOOPBACK_POOL}th fall back to shared "
+            f"localhost and may see each other's ports.",
+            file=sys.stderr,
+        )
+
+    slices = split_contiguous(ids, jobs)
+    name = campaign_name(name)
+
+    runner_flags = ["--verbose"] if verbose else ["--silent"]
+    if not build:
+        runner_flags.append("--skip-build")
+    if resume:
+        runner_flags.append("--resume")
+
+    print(f"campaign: logs/{name}")
+    print(f"{len(ids)} benchmarks → {len(slices)} sessions "
+          f"({'tmux' if tmux else 'Terminal windows'}):")
+    for k, s in enumerate(slices):
+        print(f"  slice {k:02d}: {len(s):2d}  {s[0]}..{s[-1]}")
+
+    campaign = LOGS_ROOT / name
+    slice_paths = slice_paths_for(campaign, len(slices))
+    cmds = [
+        runner_cmd(p, campaign, f"slice_{k:02d}", runner_flags)
+        for k, p in enumerate(slice_paths)
+    ]
+
+    if dry_run:
+        print("\ndry-run — commands that WOULD launch (no files written):")
+        for c in cmds:
+            print(f"  {c}")
+        return campaign
+
+    materialize_campaign(campaign, slices, resume=resume)
+
+    if tmux:
+        launch_tmux(cmds, stagger)
+    else:
+        launch_osascript(cmds, stagger)
+        print(f"opened {len(cmds)} Terminal windows.")
+
+    if not wait:
+        print(f"\nnot waiting. Report when ready with:\n"
+              f"  uv run python -m benchmarks.campaign_report '{campaign}'")
+        return campaign
+
+    # This terminal becomes the live dashboard: tick progress until every
+    # session drops its .done marker, then print + save the combined summary.
+    from benchmarks.campaign_report import watch_and_report
+    print("\nwaiting for sessions to finish — live dashboard below "
+          "(Ctrl-C to stop waiting and report partial):\n")
+    watch_and_report(campaign, wait=True, interval=interval)
+    return campaign
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Fan the XBEN benchmark set out across N terminal sessions.")
@@ -241,63 +361,29 @@ def main() -> None:
                     help="print the split and the commands, but launch nothing")
     args = ap.parse_args()
 
-    ids = read_ids(args.list_file)
+    # Standalone CLI loads swarm-config.toml into env (the TUI already did
+    # this before calling launch_campaign directly), so the spawned sessions
+    # inherit the configured model/budgets; launch_campaign forwards SWARM_*
+    # onto each session. Best-effort — a config error must never block a run.
+    try:
+        from src.cli import config_store
+        config_store.load_into_env(override=False)
+    except Exception:  # noqa: BLE001
+        pass
 
-    if args.jobs > LOOPBACK_POOL and not args.tmux:
-        print(
-            f"note: --jobs {args.jobs} exceeds the {LOOPBACK_POOL}-IP loopback "
-            f"pool; sessions past the {LOOPBACK_POOL}th fall back to shared "
-            f"localhost and may see each other's ports.",
-            file=sys.stderr,
-        )
-
-    slices = split_contiguous(ids, args.jobs)
-    name = campaign_name(args.name)
-
-    runner_flags = ["--verbose"] if args.verbose else ["--silent"]
-    if not args.build:
-        runner_flags.append("--skip-build")
-    if args.resume:
-        runner_flags.append("--resume")
-
-    print(f"campaign: logs/{name}")
-    print(f"{len(ids)} benchmarks → {len(slices)} sessions "
-          f"({'tmux' if args.tmux else 'Terminal windows'}):")
-    for k, s in enumerate(slices):
-        print(f"  slice {k:02d}: {len(s):2d}  {s[0]}..{s[-1]}")
-
-    campaign = LOGS_ROOT / name
-    slice_paths = slice_paths_for(campaign, len(slices))
-    cmds = [
-        runner_cmd(p, campaign, f"slice_{k:02d}", runner_flags)
-        for k, p in enumerate(slice_paths)
-    ]
-
-    if args.dry_run:
-        print("\ndry-run — commands that WOULD launch (no files written):")
-        for c in cmds:
-            print(f"  {c}")
-        return
-
-    materialize_campaign(campaign, slices, resume=args.resume)
-
-    if args.tmux:
-        launch_tmux(cmds, args.stagger)
-    else:
-        launch_osascript(cmds, args.stagger)
-        print(f"opened {len(cmds)} Terminal windows.")
-
-    if args.no_wait:
-        print(f"\nnot waiting. Report when ready with:\n"
-              f"  uv run python -m benchmarks.campaign_report '{campaign}'")
-        return
-
-    # This terminal becomes the live dashboard: tick progress until every
-    # session drops its .done marker, then print + save the combined summary.
-    from benchmarks.campaign_report import watch_and_report
-    print("\nwaiting for sessions to finish — live dashboard below "
-          "(Ctrl-C to stop waiting and report partial):\n")
-    watch_and_report(campaign, wait=True, interval=args.interval)
+    launch_campaign(
+        jobs=args.jobs,
+        list_file=args.list_file,
+        name=args.name,
+        tmux=args.tmux,
+        stagger=args.stagger,
+        verbose=args.verbose,
+        build=args.build,
+        resume=args.resume,
+        wait=not args.no_wait,
+        interval=args.interval,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":

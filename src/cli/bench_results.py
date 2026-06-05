@@ -25,10 +25,16 @@ on a Drive-backed path where a bare rename races the async sync.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — non-Unix; degrade to no locking
+    fcntl = None  # type: ignore[assignment]
 
 # Status values + the run-result classifier live in one neutral module so
 # the terminal verdict (observability.live.bench_end) and these triage
@@ -126,6 +132,50 @@ def cycle(results: dict[str, str], bench_id: str) -> str | None:
     return nxt
 
 
+def _lock_path() -> Path:
+    """Sidecar lock file next to ``bench_results.json``."""
+    p = path()
+    return p.with_name(p.name + ".lock")
+
+
+@contextlib.contextmanager
+def _record_lock():
+    """Best-effort exclusive lock around :func:`record`'s read-modify-write.
+
+    A parallel sweep (``benchmarks/launch_split.py``) runs ~20 xbow_runner
+    processes that each call :func:`record` as their benchmark finishes.
+    Without a lock two processes can ``load`` the same map, each add their
+    own key, and ``save`` in turn — the second write clobbers the first's
+    key (a lost update). The atomic save prevents *torn* files, not lost
+    updates, so we serialise the whole load→modify→save here.
+
+    Advisory ``flock`` on a sidecar file. Uncontended — the normal
+    single-process TUI / sequential-sweep case — it's an instant no-op, so
+    behaviour is byte-identical to before. Degrades to no lock if ``fcntl``
+    is unavailable or the lock can't be opened, so a triage write is never
+    blocked by a lock failure.
+    """
+    if fcntl is None:
+        yield
+        return
+    try:
+        lock = _lock_path()
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+
+
 def record(bench_id: str, status: str | None) -> str | None:
     """Persist ``status`` for ``bench_id`` (load → merge → atomic save).
 
@@ -138,14 +188,20 @@ def record(bench_id: str, status: str | None) -> str | None:
     A real verdict (``ok``/``fail``) always wins, so a re-run that now
     solves shows ✓ and a regression shows ✗. Returns the status actually
     stored (which may be the preserved previous one).
+
+    The load→merge→save runs under :func:`_record_lock` so a parallel
+    sweep's ~20 concurrent ``record`` calls can't clobber each other's
+    triage marks. The lock guards only ``record``; the TUI's own
+    ``load``/``cycle``/``save`` loop is unaffected.
     """
-    results = load()
-    prev = results.get(bench_id)
-    if status == API and prev in (OK, FAIL):
-        return prev
-    if status is None:
-        results.pop(bench_id, None)
-    else:
-        results[bench_id] = status
-    save(results)
+    with _record_lock():
+        results = load()
+        prev = results.get(bench_id)
+        if status == API and prev in (OK, FAIL):
+            return prev
+        if status is None:
+            results.pop(bench_id, None)
+        else:
+            results[bench_id] = status
+        save(results)
     return status

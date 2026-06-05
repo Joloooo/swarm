@@ -1016,9 +1016,8 @@ def _setup_usage_guard(args, ids: list[str]):
 
     import os
 
-    from src.cli import codex_accounts, usage_guard
+    from src.cli import usage_guard
 
-    account = codex_accounts.selected()
     threshold = (
         args.usage_threshold
         if args.usage_threshold is not None
@@ -1034,8 +1033,8 @@ def _setup_usage_guard(args, ids: list[str]):
 
     # warn-level so it survives a silent sweep (info is suppressed there).
     LIVE.runner_message(
-        f"usage guard ON — pacing {len(ids)} benchmarks on Codex account "
-        f"'{codex_accounts.display_name(account)}' at ≥{threshold:g}% 5h usage "
+        f"usage guard ON — pacing {len(ids)} benchmarks on the ~/.codex login "
+        f"at ≥{threshold:g}% 5h usage "
         f"(wait = reset + {margin_min:g}m); on a failed check retries "
         f"{usage_guard.FETCH_ATTEMPTS}× then aborts the sweep",
         level="warn",
@@ -1043,7 +1042,7 @@ def _setup_usage_guard(args, ids: list[str]):
 
     def _guard() -> None:
         usage_guard.wait_until_clear(
-            account,
+            "~/.codex",
             threshold_percent=threshold,
             margin_seconds=margin_seconds,
             log=lambda m, level="info": LIVE.runner_message(m, level=level),
@@ -1096,20 +1095,7 @@ async def main_async(args) -> int:
             str((run_dir(make_run_id(benchmark_id=ids[0]))).resolve())
             if ids else None
         )
-        # Surface WHICH Codex account this run will spend on, so the active
-        # selection (SWARM_CODEX_HOME) is verifiable at a glance in the banner
-        # instead of having to grep logs. Best-effort — never blocks the banner.
         model_info = current_default_config()
-        try:
-            from src.cli import codex_accounts
-            sel = codex_accounts.selected()
-            label = codex_accounts.display_name(sel)
-            acc = codex_accounts.account_id(sel)
-            if acc:
-                label = f"{label}  …{acc[-6:]}"
-            model_info = {**model_info, "codex_account": label}
-        except Exception:  # noqa: BLE001
-            pass
         LIVE.startup_banner(
             model_info=model_info,
             log_dir=first_log_dir,

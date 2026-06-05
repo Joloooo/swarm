@@ -157,11 +157,10 @@ def inherited_swarm_env() -> dict[str, str]:
 
     osascript/tmux open FRESH shells that do NOT inherit this process's
     environment, but ``xbow_runner`` relies on inherited env for the model
-    config (``config_store.load_into_env``) and the selected Codex account
-    (``SWARM_CODEX_HOME``) — see src/cli/runner.py:_spawn. So when the TUI
-    (or a shell that has these set) launches a campaign, we replay every
-    ``SWARM_*`` var onto each session's command line. Empty when nothing is
-    set, so a bare standalone run is unchanged.
+    config (``config_store.load_into_env``) — see src/cli/runner.py:_spawn. So
+    when the TUI (or a shell that has these set) launches a campaign, we replay
+    every ``SWARM_*`` var onto each session's command line. Empty when nothing
+    is set, so a bare standalone run is unchanged.
     """
     return {
         k: v for k, v in os.environ.items()

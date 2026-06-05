@@ -32,6 +32,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import os
 import re
 import threading
 from pathlib import Path
@@ -42,7 +43,20 @@ logger = logging.getLogger(__name__)
 
 # logs/ at project root. ``__file__`` is observability/writers.py so we
 # go up three (writers.py → observability/ → src/ → project root).
-LOGS_ROOT = Path(__file__).resolve().parents[2] / "logs"
+#
+# ``SWARM_LOGS_ROOT`` overrides the default so a parallel "campaign" sweep
+# can redirect every per-run log dir under one folder
+# (e.g. ``logs/full_run_<ts>/``) instead of the flat ``logs/`` root — see
+# benchmarks/launch_split.py. Read once at import, exactly like the
+# historical hardcoded path: each benchmark runs in a fresh subprocess
+# that inherits the env, so the override is in place before this module
+# is imported. Unset ⇒ byte-identical to the previous behaviour.
+_DEFAULT_LOGS_ROOT = Path(__file__).resolve().parents[2] / "logs"
+LOGS_ROOT = (
+    Path(os.environ["SWARM_LOGS_ROOT"]).expanduser()
+    if os.environ.get("SWARM_LOGS_ROOT")
+    else _DEFAULT_LOGS_ROOT
+)
 
 
 # Per-artefact locks. Parallel executors emit concurrently; the lock keeps

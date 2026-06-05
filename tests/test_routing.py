@@ -181,8 +181,20 @@ def test_attack_with_empty_dispatch_terminates():
     assert route_after_planner(state) is END
 
 
-def test_recon_returns_recon_node():
-    assert route_after_planner({"next_action": "recon"}) == "recon"
+def test_recon_fans_out_to_parallel_dimensions():
+    """``recon`` fans out into parallel dimension workers (web + ports).
+
+    Each is a ``Send`` to the dimension-agnostic recon node carrying its
+    own ``config_name`` — see ``route_after_planner`` in
+    ``src/edges/routing.py``. (Superseded the old single-``"recon"``
+    return when recon was split into parallel dimensions.)
+    """
+    result = route_after_planner({"next_action": "recon"})
+    assert isinstance(result, list)
+    assert len(result) == 2
+    assert all(isinstance(s, Send) for s in result)
+    assert all(s.node == "recon" for s in result)
+    assert {s.arg["config_name"] for s in result} == {"recon", "recon-ports"}
 
 
 def test_web_search_returns_web_search_node():

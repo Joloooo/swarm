@@ -108,20 +108,30 @@ def slice_paths_for(campaign: Path, n: int) -> list[Path]:
     return [campaign / "slices" / f"slice_{k:02d}.txt" for k in range(n)]
 
 
-def materialize_campaign(campaign: Path, slices: list[list[str]]) -> None:
+def materialize_campaign(campaign: Path, slices: list[list[str]],
+                         *, resume: bool = False) -> None:
     """Create logs/<name>/{slices,results,.done} and write the slice files.
 
     Only called on a real launch — never in ``--dry-run`` — so a preview
     leaves no empty campaign dir behind in ``logs/``.
+
+    Stale slices and done-markers from a same-named prior campaign are
+    always cleared. Old ``results/<id>.json`` files are cleared too on a
+    FRESH run (``resume=False``) so a re-run under a reused name starts
+    clean and its summary isn't polluted by the previous run's verdicts;
+    on ``resume=True`` they are kept, because that is exactly the state
+    ``--resume`` reads to skip already-finished benchmarks.
     """
     (campaign / "slices").mkdir(parents=True, exist_ok=True)
     (campaign / "results").mkdir(parents=True, exist_ok=True)
     (campaign / ".done").mkdir(parents=True, exist_ok=True)
-    # Clear any stale slices/markers from a same-named prior campaign.
     for old in (campaign / "slices").glob("slice_*.txt"):
         old.unlink()
     for old in (campaign / ".done").glob("slice_*"):
         old.unlink()
+    if not resume:
+        for old in (campaign / "results").glob("*.json"):
+            old.unlink()
     for p, slice_ids in zip(slice_paths_for(campaign, len(slices)), slices):
         p.write_text("\n".join(slice_ids) + "\n")
 
@@ -269,7 +279,7 @@ def main() -> None:
             print(f"  {c}")
         return
 
-    materialize_campaign(campaign, slices)
+    materialize_campaign(campaign, slices, resume=args.resume)
 
     if args.tmux:
         launch_tmux(cmds, args.stagger)

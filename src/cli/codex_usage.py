@@ -170,7 +170,10 @@ def fetch(codex_home: Path | None = None, *, timeout: float = 15.0) -> Usage:
 
 def _format_plain(u: Usage) -> str:
     plan = (u.plan_type or "?").lower()
-    p = f"{u.primary.used_percent:g}%" if u.primary else "?"
+    p = (
+        f"{u.primary.used_percent:g}% (resets {u.primary.reset_human})"
+        if u.primary else "?"
+    )
     s = (
         f"{u.secondary.used_percent:g}% (resets {u.secondary.reset_human})"
         if u.secondary else "?"

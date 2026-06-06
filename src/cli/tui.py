@@ -4,8 +4,8 @@ Invoked by :func:`src.cli.__init__.main` when the user runs ``swarm``
 with no positional argument and no benchmark shortcut. The flow:
 
   1. Print the rich banner (project name + config-file path).
-  2. ``config_store.load_into_env()`` — TOML → ``os.environ``, with
-     override warnings shown under the banner.
+  2. ``config_store.ensure_complete()`` — materialize swarm-config.toml in
+     full (src.graph reads the values straight from that file).
   3. Loop forever:
         - present the top-level :func:`questionary.select`
         - dispatch to runner.* or _config_menu()
@@ -75,9 +75,10 @@ def main_loop(args: argparse.Namespace) -> None:
     """
     banner.show(config_store.path())
 
-    # Apply persistent config to env, surfacing any shell-shadow overrides.
-    for msg in config_store.load_into_env(override=True):
-        _console.print(f"[yellow]·[/yellow] {msg}")
+    # Materialize swarm-config.toml in full (fills a missing/partial file,
+    # keeping any existing values) so it always shows every knob. The values
+    # themselves are read straight from the file by src.graph at run time.
+    config_store.ensure_complete()
 
     while True:
         action = _top_level()
@@ -494,10 +495,9 @@ def _config_menu() -> None:
             return
         if action == "save":
             config_store.save(cfg)
-            # Re-inject so the next benchmark run in this session sees
-            # the new values. (Subprocesses inherit env via os.environ.)
-            for msg in config_store.load_into_env(override=True):
-                _console.print(f"[yellow]·[/yellow] {msg}")
+            # The next benchmark run reads swarm-config.toml directly via
+            # src.graph (each run is a fresh subprocess), so writing the file
+            # is all that's needed — no env re-injection.
             _console.print(f"[green]Saved → {config_store.path()}[/green]")
             return
         if action == "discard":

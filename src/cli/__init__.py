@@ -162,7 +162,9 @@ def main() -> None:
 
         if not args.no_docker:
             docker_boot.ensure_ready()
-        config_store.load_into_env(override=True)
+        # Make sure swarm-config.toml is complete; the spawned xbow_runner
+        # reads it directly via src.graph.
+        config_store.ensure_complete()
 
         if args.bench:
             rc = runner.run_one(args.bench, pause_on_exit=False)

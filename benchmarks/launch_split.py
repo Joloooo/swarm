@@ -253,6 +253,7 @@ def launch_campaign(
     tmux: bool = False,
     stagger: float = 0.0,
     verbose: bool = False,
+    silent: bool = False,
     build: bool = False,
     resume: bool = False,
     wait: bool = True,
@@ -267,6 +268,10 @@ def launch_campaign(
     :func:`inherited_swarm_env`) so a TUI-launched campaign honours the
     selected Codex account and config. ``wait`` turns the CALLING terminal
     into the live dashboard once the sessions are spawned.
+
+    Verbosity is inherited from the forwarded ``SWARM_VERBOSITY`` config by
+    default (so a TUI campaign streams the same compact output as a normal
+    single run); pass ``verbose=True`` or ``silent=True`` to override it.
     """
     ids = read_ids(list_file)
 
@@ -281,7 +286,16 @@ def launch_campaign(
     slices = split_contiguous(ids, jobs)
     name = campaign_name(name)
 
-    runner_flags = ["--verbose"] if verbose else ["--silent"]
+    # Verbosity: by default pass NO flag, so each window's runner derives
+    # its mode from the forwarded ``SWARM_VERBOSITY`` env (the swarm-config
+    # verbosity setting, default "compact"). ``--verbose``/``--silent`` are
+    # explicit overrides for that config — mutually exclusive, verbose wins.
+    if verbose:
+        runner_flags = ["--verbose"]
+    elif silent:
+        runner_flags = ["--silent"]
+    else:
+        runner_flags = []
     if not build:
         runner_flags.append("--skip-build")
     if resume:
@@ -345,7 +359,11 @@ def main() -> None:
                     help="seconds between session launches, to space out "
                          "concurrent 'docker compose up' calls (default 0)")
     ap.add_argument("--verbose", action="store_true",
-                    help="pass --verbose to each runner (default is --silent)")
+                    help="override config: pass --verbose to each runner "
+                         "(default derives the mode from SWARM_VERBOSITY)")
+    ap.add_argument("--silent", action="store_true",
+                    help="override config: pass --silent to each runner "
+                         "(default derives the mode from SWARM_VERBOSITY)")
     ap.add_argument("--build", action="store_true",
                     help="let each runner build images (default --skip-build)")
     ap.add_argument("--resume", action="store_true",
@@ -377,6 +395,7 @@ def main() -> None:
         tmux=args.tmux,
         stagger=args.stagger,
         verbose=args.verbose,
+        silent=args.silent,
         build=args.build,
         resume=args.resume,
         wait=not args.no_wait,

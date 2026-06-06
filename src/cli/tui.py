@@ -404,6 +404,8 @@ def _pick_bench() -> tuple[list[str], int] | None:
               runs as ``concurrency`` contiguous slices, each drawn in its own
               colour with its own 1..N run-order numbering.
       ``a`` — select all / unselect all (toggle).
+      ``f`` — select every ✗-failed benchmark / unselect (toggle) — handy for
+              re-running just the failures.
       ``c`` — set the concurrency inline: type digits, ``enter`` to confirm,
               ``esc`` to cancel. Capped at the number selected — you can't
               run more windows than benchmarks. Changing it re-splits the
@@ -536,7 +538,7 @@ def _pick_bench() -> tuple[list[str], int] | None:
             out.append(("fg:ansired", f"   ✗ by tag: {summary}\n"))
         out.append((
             "fg:ansibrightblack",
-            "↑/↓/←/→ move · r select · a all/none · t mark ✓/✗/~ · "
+            "↑/↓/←/→ move · r select · a all/none · f failed · t mark ✓/✗/~ · "
             "c concurrency · enter run · q/Ctrl-C back\n",
         ))
         # Selection line: list tag-labels for small sets, else a count.
@@ -645,6 +647,17 @@ def _pick_bench() -> tuple[list[str], int] | None:
             queue.clear()
         else:
             queue[:] = list(ids)
+        _clamp_concurrency()
+
+    @kb.add("f", eager=True, filter=nav)
+    def _(event) -> None:  # noqa: ANN001
+        # Select every ✗-failed benchmark (in id order). Toggle: pressing f
+        # again — when the selection is exactly the failed set — clears it.
+        # No-op when nothing is marked failed.
+        failed = [b for b in ids if results.get(b) == bench_results.FAIL]
+        if not failed:
+            return
+        queue[:] = [] if queue == failed else failed
         _clamp_concurrency()
 
     @kb.add("c", eager=True, filter=nav)

@@ -177,28 +177,28 @@ def _record_lock():
 
 
 def record(bench_id: str, status: str | None) -> str | None:
-    """Persist ``status`` for ``bench_id`` (load → merge → atomic save).
+    """Persist ``status`` for ``bench_id`` (load → set → atomic save).
 
     Called by the xbow_runner as each benchmark finishes so the picker's
     ✓/✗/~ grid reflects the latest run without a manual ``t`` press.
 
-    Merge rule — a codex/API/infra crash (``api``) tells us nothing about
-    the benchmark, so it must never overwrite a real ``ok``/``fail``
-    verdict; it only fills an unmarked slot (or replaces a prior ``api``).
-    A real verdict (``ok``/``fail``) always wins, so a re-run that now
-    solves shows ✓ and a regression shows ✗. Returns the status actually
-    stored (which may be the preserved previous one).
+    The mark always reflects the **latest run's outcome** — a fresh verdict
+    (``ok`` / ``fail`` / ``api``) overwrites whatever was there before. So a
+    re-run that now solves shows ✓, a regression shows ✗, and a run that
+    crashed on a codex/infra error shows ~ even if it had previously passed
+    or failed. That last case is the point: a rate-limit crash invalidates
+    the run, and you need to see ~ to know it must be re-run rather than
+    have the stale ✓/✗ hide it. ``status=None`` clears the mark.
 
-    The load→merge→save runs under :func:`_record_lock` so a parallel
-    sweep's ~20 concurrent ``record`` calls can't clobber each other's
-    triage marks. The lock guards only ``record``; the TUI's own
-    ``load``/``cycle``/``save`` loop is unaffected.
+    The load→set→save runs under :func:`_record_lock` so a parallel sweep's
+    ~20 concurrent ``record`` calls can't clobber each other's marks (the
+    lock prevents lost updates to *other* benchmarks' keys; each id itself
+    is only ever written by the one window that ran it). The lock guards
+    only ``record``; the TUI's own ``load``/``cycle``/``save`` loop is
+    unaffected.
     """
     with _record_lock():
         results = load()
-        prev = results.get(bench_id)
-        if status == API and prev in (OK, FAIL):
-            return prev
         if status is None:
             results.pop(bench_id, None)
         else:

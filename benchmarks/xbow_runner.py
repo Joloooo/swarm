@@ -1147,9 +1147,10 @@ async def main_async(args) -> int:
         summary[_SUMMARY_KEY[status]] += 1
 
         # Mirror the verdict into the picker's ✓/✗/~ triage marks so the TUI
-        # grid reflects this run without a manual ``t`` press. The merge rule
-        # in bench_results.record protects a real ok/fail from being clobbered
-        # by a later codex/infra crash. Best-effort — must never break sweep.
+        # grid reflects this run without a manual ``t`` press. The mark always
+        # reflects the latest run, so a codex/infra crash shows ~ even on a
+        # benchmark that previously passed/failed — that's how you spot runs
+        # that need re-running. Best-effort — must never break the sweep.
         try:
             bench_results.record(bid, status)
         except Exception:  # noqa: BLE001 — triage write must not stop the sweep

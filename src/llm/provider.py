@@ -38,44 +38,30 @@ class LLMConfig:
 
     The ``reasoning_*`` fields are Codex-specific (consumed by
     ``src.llm.codex.ChatCodex``) and silently ignored by other providers.
-    Defaults are sourced from ``config.budgets.reasoning_*`` (see
-    ``src/graph.py``) so a run can dial reasoning depth via env var
-    without code edits — e.g. ``SWARM_REASONING_EFFORT=high`` for a
-    cheaper run during development.
+    Defaults are sourced from ``config.budgets.reasoning_*``, which
+    ``src/graph.py`` reads from ``swarm-config.toml`` — so a run dials
+    reasoning depth by editing ``[model] reasoning_effort`` in that file
+    (or via ``swarm`` -> Edit config), no code edit needed.
     """
 
-    # Provider default sourced from ``config.budgets.provider`` (which
-    # reads ``SWARM_PROVIDER``). Lets a run switch backends with no
-    # code edit, e.g. ``SWARM_PROVIDER=local uv run swarm ...``.
+    # Provider default sourced from ``config.budgets.provider`` (an advanced
+    # code-only knob; ``SWARM_PROVIDER`` still overrides it for a one-off,
+    # e.g. ``SWARM_PROVIDER=local uv run swarm ...``).
     provider: Provider = field(
-        default_factory=lambda: Provider(
-            getattr(config.budgets, "provider", "codex")
-        )
+        default_factory=lambda: Provider(config.budgets.provider)
     )
-    # Model slug. For Codex / OpenAI / Anthropic this reads
-    # ``SWARM_MODEL``; for ``provider=local`` it reads
-    # ``SWARM_LOCAL_MODEL`` instead. The two are kept separate so a
-    # single ``.env`` can set valid slugs for both backends without
-    # collision (``SWARM_MODEL`` has a hard ``choices=`` whitelist of
-    # Codex-only slugs in ``src/graph.py``).
-    #
-    # Why gpt-5.4-mini is the *default* for Codex: gpt-5.5's policy
-    # classifier refuses roughly 60% of pentest-shaped worker prompts
-    # (CodexCyberPolicyError), collapsing benchmark runs into 15-minute
-    # timeouts. The mini model's filter is markedly more permissive
-    # for the in-scope offensive-security work this swarm exists to do.
-    # Override per-instance via ``LLMConfig(model=...)`` (or the env
-    # var) when a fresh trial of a larger model is warranted — useful
-    # for thesis ablation studies that compare model capability vs.
-    # refusal rate side-by-side.
-    #
-    # Other valid Codex slugs: "gpt-5.5", "gpt-5.4", "gpt-5.3-codex",
-    # "gpt-5.2", "codex-auto-review".
+    # Model slug. For Codex / OpenAI / Anthropic this is the configured
+    # ``[model] slug`` from swarm-config.toml (default gpt-5.5); for
+    # ``provider=local`` it uses ``config.budgets.local_model`` instead, so
+    # the local backend can advertise its own alias without colliding with
+    # the Codex slug whitelist. Override per-instance via
+    # ``LLMConfig(model=...)`` for a one-off — e.g. thesis ablation runs that
+    # compare model capability vs. refusal rate side-by-side.
     model: str = field(
         default_factory=lambda: (
-            getattr(config.budgets, "local_model", "hermes-8b")
-            if getattr(config.budgets, "provider", "codex") == "local"
-            else getattr(config.budgets, "model", "gpt-5.4-mini")
+            config.budgets.local_model
+            if config.budgets.provider == "local"
+            else config.budgets.model
         )
     )
     temperature: float = 0.0
@@ -91,15 +77,14 @@ class LLMConfig:
     #     "low"      — fast, cheap, light reasoning
     #     "medium"   — balanced (gpt-5.5 default upstream)
     #     "high"     — deeper reasoning, more tokens, slower
-    #     "xhigh"    — "extra-high" / maximum reasoning depth (the
-    #                  highest level the API exposes; what this codebase
-    #                  defaults to so benchmark debugging gets the
-    #                  fullest chain-of-thought visible in nodes.jsonl)
+    #     "xhigh"    — "extra-high" / maximum reasoning depth (the highest
+    #                  level the API exposes)
     #
     # Source of truth: ReasoningEffort enum in
-    # codex-rs/protocol/src/openai_models.rs.
+    # codex-rs/protocol/src/openai_models.rs. The active default is whatever
+    # ``[model] reasoning_effort`` says in swarm-config.toml.
     reasoning_effort: str | None = field(
-        default_factory=lambda: getattr(config.budgets, "reasoning_effort", "xhigh")
+        default_factory=lambda: config.budgets.reasoning_effort
     )
     # Summary: whether human-readable chain-of-thought is streamed back.
     #
@@ -112,7 +97,7 @@ class LLMConfig:
     # Source of truth: ReasoningSummary enum in
     # codex-rs/protocol/src/config_types.rs.
     reasoning_summary: str | None = field(
-        default_factory=lambda: getattr(config.budgets, "reasoning_summary", "detailed")
+        default_factory=lambda: config.budgets.reasoning_summary
     )
     # Provider-specific kwargs (e.g. base_url for OpenRouter)
     extra: dict[str, Any] | None = None

@@ -1004,7 +1004,7 @@ def _setup_usage_guard(args, ids: list[str]):
     Active only when ``--usage-guard`` is set AND the sweep has more than one
     benchmark — a single highlighted run never waits (the TUI scope decision).
     Threshold / margin resolve from the CLI flags, then the ``SWARM_USAGE_*``
-    env vars, then the :mod:`src.cli.usage_guard` defaults (70% / 5 min).
+    env vars, then the :mod:`src.cli.usage_guard` defaults (90% / 5 min).
 
     The returned zero-arg callable runs one pre-benchmark check: it blocks
     until the selected account's 5-hour usage is under threshold, or raises
@@ -1229,7 +1229,7 @@ def main() -> None:
     ap.add_argument(
         "--usage-threshold", type=float, default=None,
         help="usage guard: 5-hour used-percent that triggers a wait "
-             "(default 70, or SWARM_USAGE_THRESHOLD).",
+             "(default 90, or SWARM_USAGE_THRESHOLD).",
     )
     ap.add_argument(
         "--usage-margin-min", type=float, default=None,

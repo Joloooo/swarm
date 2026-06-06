@@ -2,7 +2,7 @@
 
 Before each benchmark in a multi-benchmark sweep, :mod:`benchmarks.xbow_runner`
 asks this module whether the *selected* Codex account still has 5-hour
-headroom. If usage has reached the threshold (default 70%), the guard sleeps
+headroom. If usage has reached the threshold (default 90%), the guard sleeps
 until the 5-hour window resets (plus a safety margin) and re-checks — so the
 sweep never starts a benchmark that would immediately hit a hard rate-limit
 (429 / ``insufficient_quota``).
@@ -42,7 +42,7 @@ from typing import Any, Callable
 # ── Tunables ────────────────────────────────────────────────────────────────
 # The user-facing defaults. ``xbow_runner`` may override threshold / margin
 # from its CLI flags or the SWARM_USAGE_* env vars.
-DEFAULT_THRESHOLD_PCT = 70.0
+DEFAULT_THRESHOLD_PCT = 90.0
 DEFAULT_MARGIN_SECONDS = 5 * 60          # safety margin added after the reset
 
 # Each usage check gets ``FETCH_ATTEMPTS`` total tries before the guard gives

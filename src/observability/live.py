@@ -854,7 +854,7 @@ class _Live:
         # codex/API error (crash) is never hidden among ordinary failures. A
         # late capture (ok with a timeout error attached) reads as FLAG FOUND,
         # not ERROR. Imported locally to keep live.py leaf-level (see below).
-        from src.benchmark_verdict import API, OK, classify
+        from src.benchmark_verdict import API, OK, classify, format_duration
         status = classify(ok, error)
         if status == OK:
             head = _paint(f"◆ {bench_id}", _BOLD, _GREEN)
@@ -865,7 +865,8 @@ class _Live:
         else:  # FAIL — ran its budget or gave up; show the reason if any.
             head = _paint(f"◇ {bench_id}", _YELLOW)
             verdict = _paint("✗ no flag" + (f" — {error}" if error else ""), _YELLOW)
-        tail = f"({duration_s:.1f}s, {findings_n} finding{'s' if findings_n != 1 else ''})"
+        tail = (f"({format_duration(duration_s)}, "
+                f"{findings_n} finding{'s' if findings_n != 1 else ''})")
         _emit(f"{_now()}  {head}  {verdict}  {tail}")
 
         # Verification block — benchmark mode only. Skipped silently

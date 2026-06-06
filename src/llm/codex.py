@@ -1246,6 +1246,14 @@ class ChatCodex(BaseChatModel):
                     except (AttributeError, TypeError):
                         pass
                 if not e.retryable or attempt == MAX_API_ATTEMPTS - 1:
+                    if isinstance(e, (CodexRateLimitError, CodexQuotaExceededError)):
+                        # A rate-limit (429) or quota-exhausted error is now
+                        # propagating to the caller. Flag it process-globally so
+                        # the run aborts and is marked ~ crashed rather than
+                        # burning its budget into a fake "fail" (see
+                        # src/llm/rate_limit_signal.py).
+                        from src.llm.rate_limit_signal import signal_rate_limited
+                        signal_rate_limited(f"{type(e).__name__}: {e}")
                     raise
                 delay = _retry_delay(e, attempt)
                 logger.warning(
@@ -1334,6 +1342,14 @@ class ChatCodex(BaseChatModel):
                     except (AttributeError, TypeError):
                         pass
                 if not e.retryable or attempt == MAX_API_ATTEMPTS - 1:
+                    if isinstance(e, (CodexRateLimitError, CodexQuotaExceededError)):
+                        # A rate-limit (429) or quota-exhausted error is now
+                        # propagating to the caller. Flag it process-globally so
+                        # the run aborts and is marked ~ crashed rather than
+                        # burning its budget into a fake "fail" (see
+                        # src/llm/rate_limit_signal.py).
+                        from src.llm.rate_limit_signal import signal_rate_limited
+                        signal_rate_limited(f"{type(e).__name__}: {e}")
                     raise
                 delay = _retry_delay(e, attempt)
                 logger.warning(

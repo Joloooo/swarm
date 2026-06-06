@@ -44,6 +44,11 @@ from src.nodes.base.flag_watcher import (
     is_captured,
     reset_captured,
 )
+from src.llm.rate_limit_signal import (
+    get_rate_limit_error,
+    is_rate_limited,
+    reset_rate_limited,
+)
 from src.observability import (
     LIVE,
     HttpxQuietFilter,
@@ -670,6 +675,10 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
     # terminate immediately with no findings. See
     # ``src/nodes/base/flag_watcher.py`` for the design.
     reset_captured()
+    # Same rationale for the rate-limit signal: clear any rate-limit/quota
+    # flag left set by a previous bench in this process, so this bench is only
+    # marked crashed if ITS OWN run hits the limit. See src/llm/rate_limit_signal.py.
+    reset_rate_limited()
 
     result: dict = {
         "benchmark_id": benchmark_id,
@@ -888,6 +897,17 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
             set_terminal_log_file(None)
         except Exception:  # noqa: BLE001 — observability must not break the sweep
             pass
+
+    # Rate-limit safety net: if any LLM call this bench hit a Codex rate-limit
+    # / quota error (process-global signal set in src/llm/codex.py) and we did
+    # NOT capture a flag, record it as a crash even if some node swallowed the
+    # exception so result["error"] never picked up a Codex string. classify()
+    # keys "crash" off an error starting with "Codex", so prefix accordingly.
+    # A genuine capture always wins — never overwrite a success.
+    if not result["flag_found"] and is_rate_limited():
+        err = result.get("error") or ""
+        if not err.startswith("Codex"):
+            result["error"] = f"CodexRateLimitError: {get_rate_limit_error()}"
 
     return result
 

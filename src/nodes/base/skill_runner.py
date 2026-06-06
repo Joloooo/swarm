@@ -1143,6 +1143,24 @@ async def _run_skill_agent_impl(
                 error="model refused" if refused else None,
             )
     except Exception as e:
+        # Rate-limit (429) / quota-exhausted errors are NOT salvageable —
+        # this run never got a fair attempt, so it's a crash. Re-raise so the
+        # error propagates out of the worker and aborts the run; xbow_runner
+        # then marks the benchmark ~ crashed and the usage guard pauses the
+        # sweep until the 5-hour window resets. Everything else (refusals,
+        # step-budget stops, ordinary tool crashes) keeps the salvage path
+        # below. Lazy import respects the planner/executor import-order dance.
+        try:
+            from src.llm.codex import (
+                CodexQuotaExceededError as _CodexQuota,
+                CodexRateLimitError as _CodexRateLimit,
+            )
+            _rate_limit_types: tuple = (_CodexQuota, _CodexRateLimit)
+        except ImportError:
+            _rate_limit_types = ()
+        if _rate_limit_types and isinstance(e, _rate_limit_types):
+            raise
+
         # Cyber-policy / invalid-prompt failures from the Codex API
         # are *refusals*, not crashes. Surface them on the
         # ``error="model refused"`` channel so the planner's

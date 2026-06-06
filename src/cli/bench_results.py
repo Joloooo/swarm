@@ -44,7 +44,7 @@ from src.benchmark_verdict import API, FAIL, OK, classify
 
 __all__ = [  # noqa: F822 — re-exports for the picker's public surface
     "OK", "FAIL", "API", "classify",
-    "path", "load", "save", "cycle", "record",
+    "path", "load", "save", "cycle", "record", "load_last_durations",
 ]
 
 # Cycle order when the user presses ``t`` on a row:
@@ -205,3 +205,69 @@ def record(bench_id: str, status: str | None) -> str | None:
             results[bench_id] = status
         save(results)
     return status
+
+
+def load_last_durations() -> dict[str, float]:
+    """Best-effort: most-recent run duration (seconds) per benchmark id.
+
+    Read straight from the same result files the runner already writes — the
+    campaign per-benchmark files (``logs/<campaign>/results/<id>.json``) and
+    the shared sequential log (``benchmarks/results/xbow_*.jsonl``) — taking
+    the most recently written value per benchmark (by file mtime; later lines
+    win within one jsonl). Powers the picker's ``(Xm Ys)`` annotation next to
+    each ✓/✗/~ mark, for a single run as well as a fan-out.
+
+    Display-only and best-effort: no new state is persisted (every run already
+    records ``duration_s``), any unreadable file is skipped, and a benchmark
+    with no recorded run simply gets no time. Returns ``{}`` on any trouble.
+    """
+    bench_dir = path().parent                  # SwarmAttacker/benchmarks
+    logs_root = bench_dir.parent / "logs"      # SwarmAttacker/logs
+    local_results = bench_dir / "results"      # benchmarks/results
+    best: dict[str, tuple[float, float]] = {}  # id -> (mtime, duration)
+
+    def _consider(bench_id, dur, mtime) -> None:  # noqa: ANN001
+        if not bench_id or not isinstance(dur, (int, float)):
+            return
+        if bench_id not in best or mtime > best[bench_id][0]:
+            best[bench_id] = (mtime, float(dur))
+
+    # Campaign per-benchmark json files — each is exactly one run.
+    try:
+        for p in logs_root.glob("*/results/*.json"):
+            try:
+                mt = p.stat().st_mtime
+                row = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            _consider(row.get("benchmark_id") or p.stem, row.get("duration_s"), mt)
+    except OSError:
+        pass
+
+    # Shared sequential jsonl — one file may hold many runs; the last line per
+    # id is the newest, and the file mtime stands in for "when".
+    try:
+        for p in local_results.glob("xbow_*.jsonl"):
+            try:
+                mt = p.stat().st_mtime
+                lines = p.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            per_file: dict[str, float] = {}
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                bid, dur = row.get("benchmark_id"), row.get("duration_s")
+                if bid and isinstance(dur, (int, float)):
+                    per_file[bid] = float(dur)   # later line wins within file
+            for bid, dur in per_file.items():
+                _consider(bid, dur, mt)
+    except OSError:
+        pass
+
+    return {bid: dur for bid, (_mt, dur) in best.items()}

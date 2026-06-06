@@ -39,6 +39,7 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from questionary import Choice
 from rich.console import Console
 
+from src.benchmark_verdict import format_duration
 from src.cli import (
     banner,
     bench_discovery,
@@ -107,48 +108,8 @@ def main_loop(args: argparse.Namespace) -> None:
                 _run_picker_campaign(run_list, concurrency)
             else:
                 runner.run_queue(run_list)
-        elif action == "campaign":
-            _run_campaign(args)
         elif action == "config":
             _config_menu()
-
-
-def _run_campaign(args: argparse.Namespace) -> None:
-    """Fan the full XBEN set out across N parallel Terminal windows.
-
-    Asks how many concurrent windows, bootstraps Docker, then hands off to
-    :func:`benchmarks.launch_split.launch_campaign`, which opens one
-    Terminal window per slice and turns THIS terminal into a live dashboard
-    until every window finishes. Each window inherits the run config because
-    launch_campaign forwards the session's ``SWARM_*`` env (the picker run
-    path relies on the same inheritance).
-
-    Imported lazily so the TUI's normal startup stays light and the
-    benchmarks package isn't pulled in unless a campaign is actually run.
-    """
-    answer = questionary.text(
-        "How many benchmarks to run at once (concurrent Terminal windows)?",
-        default="20",
-        validate=_int_validator,
-        instruction="(all benchmarks are split across this many windows; Ctrl-C cancels)",
-    ).ask()
-    if answer is None:
-        return
-    jobs = int(answer)
-    if not _ensure_docker(args):
-        return
-    _console.print(
-        f"[cyan]Launching {jobs} concurrent Terminal window(s) over all "
-        f"benchmarks — this terminal becomes the live dashboard.[/cyan]"
-    )
-    from benchmarks.launch_split import launch_campaign
-    try:
-        launch_campaign(jobs=jobs, wait=True)
-    except KeyboardInterrupt:
-        _console.print(
-            "\n[dim]Stopped watching — the Terminal windows keep running. "
-            "Re-attach the dashboard with `campaign_report`.[/dim]"
-        )
 
 
 def _run_picker_campaign(run_list: list[str], concurrency: int) -> None:
@@ -200,8 +161,7 @@ def _ensure_docker(args: argparse.Namespace) -> bool:
 def _top_level() -> str | None:
     choices: list[Choice] = [
         Choice("Codex usage (5-hour / weekly) — fetch live", value="__codex_usage__"),
-        Choice("xbow benchmark  (pick one or queue several to run in order)", value="xbow"),
-        Choice("Run ALL benchmarks concurrently  (fan out across N Terminal windows)", value="campaign"),
+        Choice("xbow benchmark  (run one, a selection, or all — sequential or concurrent)", value="xbow"),
         Choice("Edit config",                                                 value="config"),
         Choice("Quit",                                                        value="quit"),
     ]
@@ -282,7 +242,10 @@ def _show_codex_usage() -> None:
 # instead of a 104-row single column.
 _MAX_COLS = 4
 _GAP = 2             # blank columns between grid cells
-_SUFFIX_RESERVE = 6  # width kept for the " [NNN]" per-slice run-order suffix
+# Width kept after each label for its trailing annotation — whichever is
+# shown: the " [NNN]" per-slice run-order number (selected) or the last-run
+# solve time " (Xm Ys)" (unselected). 10 covers " (20m 00s)".
+_SUFFIX_RESERVE = 10
 
 # How many selected benchmarks the header lists by name before collapsing to
 # a "selected: N of M" count line (listing 100 ids would wrap off-screen).
@@ -350,6 +313,7 @@ def _cell_segments(
     tags_str: str,
     result: str | None,
     slice_info: tuple[int, int] | None,
+    duration_s: float | None,
     is_cursor: bool,
     content_w: int,
 ) -> list[tuple[str, str]]:
@@ -361,8 +325,10 @@ def _cell_segments(
     the whole label is drawn in that slice's colour with a ``[position]``
     suffix, so each concurrent slice reads as its own coloured 1..N sequence.
     An unselected benchmark keeps a default-coloured base with its tags in
-    :data:`_TAG_STYLE`. The whole cell is reverse-video when it is the
-    pointed-at benchmark, so the cursor reads as a highlighted bar.
+    :data:`_TAG_STYLE`, followed by its last run's solve time ``(Xm Ys)`` in
+    dim when ``duration_s`` is known (the slice ``[position]`` takes that slot
+    while selected). The whole cell is reverse-video when it is the pointed-at
+    benchmark, so the cursor reads as a highlighted bar.
     """
     if result == bench_results.OK:
         segs = [("fg:ansigreen bold", "✓"), ("", " ")]
@@ -381,6 +347,9 @@ def _cell_segments(
         segs.append(("", base))
         if tags_str:
             segs.append((_TAG_STYLE, tags_str))
+        # Last-run solve time, dim, so the grid shows how long each took.
+        if duration_s is not None:
+            segs.append(("fg:ansibrightblack", f" ({format_duration(duration_s)})"))
     used = sum(len(text) for _, text in segs)
     if used < content_w:
         segs.append(("", " " * (content_w - used)))
@@ -440,6 +409,9 @@ def _pick_bench() -> tuple[list[str], int] | None:
         return None
 
     results = bench_results.load()
+    # Last-run solve time per benchmark, read once from the result logs (old
+    # runs included). Shown dim next to each ✓/✗/~ mark.
+    durations = bench_results.load_last_durations()
     queue: list[str] = []        # ordered run/selection set, built with r / a.
     state = {
         "cursor": 0,             # flat index into ``ids`` of the pointed-at cell.
@@ -590,7 +562,8 @@ def _pick_bench() -> tuple[list[str], int] | None:
                 out.extend(_cell_segments(
                     base, _capped_tags(base, ",".join(tags)),
                     results.get(bench_id),
-                    smap.get(bench_id), i == state["cursor"], content_w,
+                    smap.get(bench_id), durations.get(bench_id),
+                    i == state["cursor"], content_w,
                 ))
                 if c != cols - 1:
                     out.append(("", " " * _GAP))

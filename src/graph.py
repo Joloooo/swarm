@@ -87,8 +87,14 @@ except ImportError:
 #
 # DO NOT MOVE THIS BLOCK BELOW THE NODE/STATE/EDGE IMPORTS.
 #
-# Everything is overridable via env vars, so debug runs need no code edit:
-#     SWARM_PLANNER_MAX_ITERS=200 SWARM_VERBOSITY=verbose uv run ...
+# The MENU knobs (budgets, model slug + reasoning, verbosity) are DEFINED in
+# ``swarm-config.toml`` — edit that file by hand or via ``swarm`` → Edit config.
+# They are resolved once here, at import, by ``src/config_schema.py`` (which
+# owns the factory defaults). The ADVANCED/dev knobs further down (provider,
+# the refusal-recovery fallback tier, the local-server settings) are code-only
+# and still honour their ``SWARM_*`` env vars for one-off debug runs — so a
+# ``SWARM_*`` name in a comment below applies ONLY to those advanced knobs; a
+# menu knob's old env name is historical, edit the toml instead.
 #
 # Shape mirrors the TS `NODE_CONFIG = { discover: { llms: {}, tools: {} } }`
 # pattern — one nested literal, attribute-style access:
@@ -135,12 +141,19 @@ def _stderr_is_tty() -> bool:
         return False
 
 
+# Menu config knobs, resolved from swarm-config.toml (overlaid on the factory
+# defaults in src/config_schema.py). Read once here, at import — edit the toml
+# (or the `swarm` TUI), not this file, to change what runs.
+from src.config_schema import resolve as _resolve_menu_config  # noqa: E402
+
+_cfg = _resolve_menu_config()
+
 # The single runtime-config object. One literal, one place. Same shape
 # (and ergonomics) as a TS `export const NODE_CONFIG = { ... }`.
 config = SimpleNamespace(
     budgets=SimpleNamespace(
         # ── Graph supervisor / planner ──
-        planner_max_iters            = _env_int("SWARM_PLANNER_MAX_ITERS",        50),
+        planner_max_iters            = _cfg["budgets"]["planner_max_iters"],
         # ── Escalation / dual-planner race (src/orchestration/escalation.py) ──
         # When the first planner lane is still running after
         # ``escalation_fork_after_seconds`` of wall clock without a
@@ -153,15 +166,15 @@ config = SimpleNamespace(
         # helps. (A planner-iteration trigger was dropped — planner_iters
         # also counts recon + web_search turns, so it does not track attack
         # rounds.) Disable the whole mechanism with SWARM_ESCALATION=0.
-        escalation_enabled            = _env_bool("SWARM_ESCALATION",            True),
-        escalation_fork_after_seconds = _env_int("SWARM_ESCALATION_FORK_AFTER_SECONDS", 600),
+        escalation_enabled            = _cfg["budgets"]["escalation_enabled"],
+        escalation_fork_after_seconds = _cfg["budgets"]["escalation_fork_after_seconds"],
         # ── Worker agents (per invocation) ──
-        worker_max_iterations        = _env_int("SWARM_WORKER_MAX_ITERATIONS",    60),
+        worker_max_iterations        = _cfg["budgets"]["worker_max_iterations"],
         # ── Planner-invented "custom" attacks ──
-        custom_attack_max_tool_calls = _env_int("SWARM_CUSTOM_MAX_TOOL_CALLS",    40),
-        custom_attack_max_iterations = _env_int("SWARM_CUSTOM_MAX_ITERATIONS",    25),
+        custom_attack_max_tool_calls = _cfg["budgets"]["custom_attack_max_tool_calls"],
+        custom_attack_max_iterations = _cfg["budgets"]["custom_attack_max_iterations"],
         # ── LLM (per-call output cap) ──
-        llm_max_tokens               = _env_int("SWARM_LLM_MAX_TOKENS",         4096),
+        llm_max_tokens               = _cfg["budgets"]["llm_max_tokens"],
         # ── Web search node (LLM context budget per source) ──
         # 8000 chars ≈ first ~1300 words of each crawled page. Tuned so
         # PortSwigger / OWASP / exploit-db articles include the actual
@@ -170,7 +183,7 @@ config = SimpleNamespace(
         # comfortably fits any modern model's context. Lower this with
         # SWARM_WEB_MAX_CHARS if synthesis quality degrades on very
         # small-context fallback models.
-        web_search_max_crawled_chars = _env_int("SWARM_WEB_MAX_CHARS",          8000),
+        web_search_max_crawled_chars = _cfg["budgets"]["web_search_max_crawled_chars"],
         # ── Provider selection ──
         # Which LLM backend ``get_llm()`` returns by default. ``codex``
         # uses your ChatGPT subscription via the bundled ``ChatCodex``;
@@ -182,15 +195,10 @@ config = SimpleNamespace(
                                                          "openrouter", "codex",
                                                          "local")),
         # ── Codex model + reasoning controls (GPT-5.x family) ──
-        # Model slug. Override with SWARM_MODEL=<slug>. Only consulted when
-        # ``provider`` is one of the hosted backends — for ``provider=local``
-        # see ``local_model`` instead.
-        model                        = _env_str("SWARM_MODEL", "gpt-5.5",
-                                                choices=("gpt-5.5", "gpt-5.4",
-                                                         "gpt-5.4-mini",
-                                                         "gpt-5.3-codex",
-                                                         "gpt-5.2",
-                                                         "codex-auto-review")),
+        # Model slug — set it in swarm-config.toml ([model] slug) or via the
+        # `swarm` TUI. Only consulted when ``provider`` is a hosted backend;
+        # for ``provider=local`` see ``local_model`` instead.
+        model                        = _cfg["model"]["slug"],
         # ── Refusal-recovery fallback tier ──
         # When a worker LLM call refuses (CodexCyberPolicyError) and the
         # preventive vocab-filter + plain retry both fail, retry on
@@ -228,25 +236,20 @@ config = SimpleNamespace(
         # on routine decisions (curl this URL, dirbust that path), which
         # burns the 15-min per-target budget in ~15 turns. Dropping to
         # "low" trades depth-of-reasoning for more turns within budget;
-        # bump back to "medium"/"high"/"xhigh" via SWARM_REASONING_EFFORT
-        # when a benchmark needs deeper reasoning per step.
-        reasoning_effort             = _env_str("SWARM_REASONING_EFFORT", "low",
-                                                choices=("none", "minimal", "low",
-                                                         "medium", "high", "xhigh")),
+        # bump back to "medium"/"high"/"xhigh" in swarm-config.toml
+        # ([model] reasoning_effort) when a run needs deeper reasoning.
+        reasoning_effort             = _cfg["model"]["reasoning_effort"],
         # Summary: whether human-readable chain-of-thought is returned.
         # "detailed" gives the most debugging power; "none" disables
         # summaries entirely (saves tokens but loses visibility).
-        reasoning_summary            = _env_str("SWARM_REASONING_SUMMARY", "detailed",
-                                                choices=("auto", "concise",
-                                                         "detailed", "none")),
+        reasoning_summary            = _cfg["model"]["reasoning_summary"],
     ),
     verbosity=SimpleNamespace(
         # silent  = only bench boundaries + final verdict on stderr
         # compact = (default) one colored line per planner decision,
         #           shell command, outcome, finding, warning
         # verbose = today's full multi-line dump
-        mode      = _env_str("SWARM_VERBOSITY", "compact",
-                             choices=("silent", "compact", "verbose")),
+        mode      = _cfg["verbosity"]["mode"],
         color     = _env_bool("SWARM_COLOR",     _stderr_is_tty()),
         show_http = _env_bool("SWARM_LIVE_HTTP", False),
     ),

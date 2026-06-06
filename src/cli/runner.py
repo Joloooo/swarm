@@ -176,8 +176,9 @@ def _spawn(args: list[str], *, pause_on_exit: bool) -> int:
     """Run ``uv run python -m benchmarks.xbow_runner <args>``.
 
     ``env=os.environ`` is the default — passing it explicitly here as
-    a reminder that ``SWARM_*`` overrides injected by
-    :func:`config_store.load_into_env` propagate via inherited env.
+    a reminder that the child inherits the parent's environment. Config
+    itself is NOT carried via env: the child reads swarm-config.toml
+    directly through :mod:`src.graph`.
     stdio is NOT captured: the runner streams to the user's terminal
     directly, and Ctrl-C is delivered to the child as SIGINT (which
     ``asyncio.run`` inside xbow_runner handles cleanly).

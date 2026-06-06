@@ -1,267 +1,137 @@
-"""Persistent config for the ``swarm`` CLI.
+"""Read/write side of ``swarm-config.toml`` — the TUI's persistence layer.
 
-This module owns:
+``swarm-config.toml`` is the single source of truth for the user-facing menu
+knobs (budgets, model slug + reasoning, verbosity). The factory defaults, the
+valid choices, and the file→values resolution all live in
+:mod:`src.config_schema`; ``src/graph.py`` reads them from there at startup.
 
-  - the location of ``swarm-config.toml`` (repo-root, gitignored),
-  - the mapping between TOML keys and ``SWARM_*`` environment
-    variables consumed by :mod:`src.graph`,
-  - reading (with stdlib ``tomllib``) and writing (with ``tomlkit``
-    so comments and hand-edits survive round-trips),
-  - and injecting saved values into ``os.environ`` BEFORE any
-    subprocess that imports :mod:`src.graph` is spawned.
+This module is just the write/display side used by the ``swarm`` TUI:
 
-The TOML schema is intentionally shaped like the menu, not like the
-legacy ``config.budgets.*`` grouping in ``src/graph.py`` — ``model.*``
-is hoisted out of ``budgets`` into its own table because model knobs
-are not budgets:
+  - :func:`get_current_view` — the fully-populated current config for the menu,
+  - :func:`save` — write the WHOLE file (every knob, with comments) atomically,
+  - :func:`ensure_complete` — materialize a missing/partial file so it always
+    contains every knob (called once at startup),
 
-.. code-block:: toml
+plus thin re-exports (``path``, ``load``, and the ``*_CHOICES`` tuples) so the
+existing call sites keep working unchanged.
 
-    [budgets]
-    planner_max_iters            = 50
-    worker_max_iterations        = 60
-    custom_attack_max_tool_calls = 40
-    custom_attack_max_iterations = 25
-    llm_max_tokens               = 4096
-    web_search_max_crawled_chars = 8000
+There is no env-var bridge any more: ``graph.py`` reads ``swarm-config.toml``
+directly, so editing the file — by hand or via the TUI — is all that's needed;
+the change is picked up on the next ``swarm`` run.
 
-    [model]
-    slug              = "gpt-5.5"
-    reasoning_effort  = "low"
-    reasoning_summary = "detailed"
-
-    [verbosity]
-    mode = "compact"
-
-``color`` and ``show_http`` are deliberately omitted — ``color`` is
-auto-detected from TTY at runtime (a persisted value would override
-piped output) and ``show_http`` is a rarely-toggled debug flag that
-stays as a shell-env override.
-
-Precedence rule: persistent config WINS over stale shell env vars.
-The TUI is now the user's primary control surface, so a fresh edit
-from the menu must beat a three-week-old ``export SWARM_X=…`` line
-that the user forgot about. ``load_into_env`` returns a list of
-override messages so the banner can surface what it did.
+``color`` and ``show_http`` are intentionally NOT in the file: ``color`` is
+auto-detected from the TTY at runtime and ``show_http`` is a rarely-toggled
+debug flag — both stay as code-only / shell-env settings in ``src/graph.py``.
 """
 
 from __future__ import annotations
 
 import os
 import sys
-import tomllib
-from pathlib import Path
 from typing import Any
 
 import tomlkit
 
+from src.config_schema import (
+    CHOICES,
+    DEFAULTS,
+    load,  # noqa: F401 — re-exported for callers that read the raw file
+    resolve,
+)
+from src.config_schema import toml_path as path  # noqa: F401 — re-export as config_store.path
 
-# ---------------------------------------------------------------------------
-# Schema mirrors — these MUST track ``src/graph.py:134-188``.
-#
-# If anyone adds a new SWARM_* env var to graph.py, they update this dict
-# AND the matching ``_CHOICES`` tuple below. The default values here are
-# the fallbacks used when neither TOML nor shell env provides a value.
-# ---------------------------------------------------------------------------
-
-# Maps (toml_table, toml_key) → (SWARM_ENV_NAME, default_value, kind).
-# kind ∈ {"int", "str", "bool"}. ``kind`` is informational — values
-# round-trip via ``str(value)`` in ``load_into_env`` and graph.py reads
-# them with ``_env_bool`` / ``_env_int`` (a TOML ``true`` becomes the env
-# string ``"True"``, which ``_env_bool`` parses back to ``True``).
-KEY_TO_ENV: dict[tuple[str, str], tuple[str, Any, str]] = {
-    ("budgets", "planner_max_iters"):            ("SWARM_PLANNER_MAX_ITERS",        50,     "int"),
-    ("budgets", "worker_max_iterations"):        ("SWARM_WORKER_MAX_ITERATIONS",    60,     "int"),
-    ("budgets", "custom_attack_max_tool_calls"): ("SWARM_CUSTOM_MAX_TOOL_CALLS",    40,     "int"),
-    ("budgets", "custom_attack_max_iterations"): ("SWARM_CUSTOM_MAX_ITERATIONS",    25,     "int"),
-    ("budgets", "llm_max_tokens"):               ("SWARM_LLM_MAX_TOKENS",         4096,     "int"),
-    ("budgets", "web_search_max_crawled_chars"): ("SWARM_WEB_MAX_CHARS",          8000,     "int"),
-    # Dual-planner escalation race (src/orchestration/escalation.py).
-    ("budgets", "escalation_enabled"):              ("SWARM_ESCALATION",            True,  "bool"),
-    ("budgets", "escalation_fork_after_seconds"):   ("SWARM_ESCALATION_FORK_AFTER_SECONDS", 600, "int"),
-    ("model",   "slug"):                         ("SWARM_MODEL",             "gpt-5.5",     "str"),
-    ("model",   "reasoning_effort"):             ("SWARM_REASONING_EFFORT",     "low",      "str"),
-    ("model",   "reasoning_summary"):            ("SWARM_REASONING_SUMMARY", "detailed",    "str"),
-    ("verbosity", "mode"):                       ("SWARM_VERBOSITY",         "compact",     "str"),
-}
-
-# These mirror the ``choices=...`` tuples in src/graph.py exactly so
-# the menu can never produce an invalid value.
-MODEL_CHOICES: tuple[str, ...] = (
-    "gpt-5.5", "gpt-5.4", "gpt-5.4-mini",
-    "gpt-5.3-codex", "gpt-5.2", "codex-auto-review",
-)
-REASONING_EFFORT_CHOICES: tuple[str, ...] = (
-    "none", "minimal", "low", "medium", "high", "xhigh",
-)
-REASONING_SUMMARY_CHOICES: tuple[str, ...] = (
-    "auto", "concise", "detailed", "none",
-)
-VERBOSITY_CHOICES: tuple[str, ...] = (
-    "silent", "compact", "verbose",
-)
+# Enum choices for the TUI menu. Single definition lives in src.config_schema;
+# re-exported here so ``config_store.MODEL_CHOICES`` etc. keep working.
+MODEL_CHOICES: tuple[str, ...] = CHOICES[("model", "slug")]
+REASONING_EFFORT_CHOICES: tuple[str, ...] = CHOICES[("model", "reasoning_effort")]
+REASONING_SUMMARY_CHOICES: tuple[str, ...] = CHOICES[("model", "reasoning_summary")]
+VERBOSITY_CHOICES: tuple[str, ...] = CHOICES[("verbosity", "mode")]
 
 _HEADER_COMMENTS = (
-    "Edited by the `swarm` CLI. Hand-edits are preserved across saves.\n"
-    "Empty / missing keys fall back to defaults baked into src/graph.py.\n"
-    "Delete this file to reset everything; the TUI will recreate it."
+    "swarm-config.toml — the complete, authoritative config for the `swarm` CLI.\n"
+    "Every menu knob is listed here with its current value. Edit by hand OR via\n"
+    "the TUI (`swarm` -> Edit config); changes take effect on the next `swarm` run.\n"
+    "Delete this file to reset to factory defaults; it is recreated, complete, on\n"
+    "the next run. (Factory defaults + valid values live in src/config_schema.py.)"
 )
 
-
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-
-def path() -> Path:
-    """Return ``SwarmAttacker/swarm-config.toml``.
-
-    Resolved from this file's location so the path is stable
-    regardless of the user's working directory.
-    """
-    # src/cli/config_store.py → parents[2] is the SwarmAttacker root.
-    return Path(__file__).resolve().parents[2] / "swarm-config.toml"
-
-
-# ---------------------------------------------------------------------------
-# Read
-# ---------------------------------------------------------------------------
-
-def load() -> dict[str, dict[str, Any]]:
-    """Read ``swarm-config.toml`` into a nested dict.
-
-    Returns an empty dict if the file is missing (first-run case) or
-    fails to parse (we don't want a corrupt config to brick the
-    CLI — we surface the error and fall back to defaults).
-    """
-    p = path()
-    if not p.exists():
-        return {}
-    try:
-        with p.open("rb") as f:
-            return tomllib.load(f)
-    except (tomllib.TOMLDecodeError, OSError) as exc:
-        print(f"warning: failed to parse {p.name}: {exc}", file=sys.stderr)
-        return {}
+# A one-line banner written above each table when the file is first created.
+_SECTION_COMMENTS = {
+    "budgets":   "Planner / worker / LLM budgets and the escalation race.",
+    "model":     "Model slug + Codex reasoning controls.",
+    "verbosity": "Console verbosity: silent | compact | verbose.",
+}
 
 
 def get_current_view() -> dict[str, dict[str, Any]]:
-    """Return a fully-populated dict — file values overlaid on defaults.
+    """The fully-populated current config (file values overlaid on defaults).
 
-    Used by the TUI to display the current value of every knob next to
-    its label (e.g. ``Model (gpt-5.5)``). Even when the file is
-    missing or only contains a subset, this returns the full menu
-    surface.
+    Delegates to :func:`src.config_schema.resolve`, so the TUI always sees the
+    full menu surface — every knob present — even when the file is missing or
+    only carries a subset.
     """
-    on_disk = load()
-    view: dict[str, dict[str, Any]] = {}
-    for (table, key), (_env, default, _kind) in KEY_TO_ENV.items():
-        view.setdefault(table, {})
-        view[table][key] = on_disk.get(table, {}).get(key, default)
-    return view
+    return resolve()
 
-
-# ---------------------------------------------------------------------------
-# Write (atomic, fsync-safe for Google Drive)
-# ---------------------------------------------------------------------------
 
 def save(cfg: dict[str, dict[str, Any]]) -> None:
-    """Persist ``cfg`` to ``swarm-config.toml`` atomically.
+    """Write ``cfg`` to ``swarm-config.toml`` atomically — EVERY knob, always.
 
-    Strategy:
-      1. Read the existing file with ``tomlkit`` (preserves comments
-         and ordering) — or create a fresh document with our standard
-         header if missing.
-      2. Walk every key in ``KEY_TO_ENV``: if the new value differs
-         from the default, write it; otherwise REMOVE it from the
-         document so the file stays minimal (defaults stay implicit).
-      3. Write to ``<path>.tmp``, ``flush + fsync`` (the project lives
-         under ``~/My Drive/`` which is eventually consistent without
-         an explicit fsync), then ``os.replace`` onto the target.
+    No key is ever stripped: the file is the complete picture, so opening it
+    shows every value and a TUI edit is immediately visible on disk. Uses
+    ``tomlkit`` so hand-added comments survive a round-trip, then writes to
+    ``<path>.tmp`` and ``flush`` + ``fsync`` + atomic ``os.replace`` (the repo
+    can live under ``~/My Drive/``, which needs the fsync or the rename can
+    race Drive's async sync).
     """
     p = path()
-
     if p.exists():
         with p.open("r", encoding="utf-8") as f:
             doc = tomlkit.parse(f.read())
     else:
         doc = tomlkit.document()
-        # Seed a comment header on first creation. Each comment() call
-        # adds one line; the trailing empty line gives breathing room
-        # before the first [table].
         for line in _HEADER_COMMENTS.splitlines():
             doc.add(tomlkit.comment(line))
         doc.add(tomlkit.nl())
 
-    for (table_name, key), (_env, default, _kind) in KEY_TO_ENV.items():
-        new_val = cfg.get(table_name, {}).get(key, default)
-
-        if new_val == default:
-            # User reset back to default — strip the key so the file
-            # only carries genuine overrides. If the table becomes
-            # empty as a result, drop it too.
-            if table_name in doc and key in doc[table_name]:
-                del doc[table_name][key]
-                if len(doc[table_name]) == 0:
-                    del doc[table_name]
-            continue
-
+    for table_name, keys in DEFAULTS.items():
         if table_name not in doc:
-            doc[table_name] = tomlkit.table()
-        doc[table_name][key] = new_val
+            tbl = tomlkit.table()
+            comment = _SECTION_COMMENTS.get(table_name)
+            if comment:
+                tbl.add(tomlkit.comment(comment))
+            doc[table_name] = tbl
+        for key, default in keys.items():
+            doc[table_name][key] = cfg.get(table_name, {}).get(key, default)
 
     tmp = p.with_suffix(p.suffix + ".tmp")
-    text = tomlkit.dumps(doc)
     with tmp.open("w", encoding="utf-8") as f:
-        f.write(text)
+        f.write(tomlkit.dumps(doc))
         f.flush()
-        # fsync is critical on Google-Drive-backed paths; without it the
-        # rename can race with Drive's async sync and resurrect old
-        # content. Costs ~5ms, worth every microsecond.
         os.fsync(f.fileno())
     os.replace(tmp, p)
 
 
-# ---------------------------------------------------------------------------
-# Env injection — the bridge to src.graph
-# ---------------------------------------------------------------------------
+def ensure_complete() -> None:
+    """Make ``swarm-config.toml`` contain EVERY menu knob.
 
-def load_into_env(*, override: bool = True) -> list[str]:
-    """Apply every saved TOML value to ``os.environ``.
+    - Missing / first run  -> write the full file at factory defaults.
+    - Partial (e.g. a legacy file with only ``reasoning_effort``) -> fill the
+      absent keys while KEEPING the values already in the file.
+    - Already complete      -> nothing to do (just a parse, no write).
 
-    Returns a list of human-readable messages describing each env var
-    that was overridden by the TUI. The banner prints these so the
-    user can see when a stale shell export was shadowed.
-
-    When ``override=False`` (currently unused; kept for symmetry),
-    shell env wins and only un-set vars get the TOML value — the
-    legacy semantics. Default is ``override=True`` per the precedence
-    rule documented at the top of this module.
+    Called once at CLI/TUI startup so a hand-edited or upgraded file is always
+    materialized in full. Best-effort: never raises — a write failure must not
+    block startup (the run still uses :func:`resolve` values in memory).
     """
     on_disk = load()
-    messages: list[str] = []
-
-    for (table, key), (env_name, _default, _kind) in KEY_TO_ENV.items():
-        if table not in on_disk or key not in on_disk[table]:
-            # Nothing saved → leave the env var alone (shell exports
-            # and src/graph.py defaults still apply downstream).
-            continue
-        new_val = str(on_disk[table][key])
-        old_val = os.environ.get(env_name)
-
-        if old_val == new_val:
-            os.environ[env_name] = new_val  # idempotent
-            continue
-
-        if old_val is None or override:
-            os.environ[env_name] = new_val
-            if old_val is not None:
-                messages.append(
-                    f"config override: {env_name} (was={old_val} → new={new_val})"
-                )
-        else:
-            messages.append(
-                f"shell env kept: {env_name}={old_val} "
-                f"(TOML wanted {new_val}; pass override=True to flip)"
-            )
-
-    return messages
+    complete = all(
+        isinstance(on_disk.get(table), dict) and key in on_disk[table]
+        for table, keys in DEFAULTS.items()
+        for key in keys
+    )
+    if complete:
+        return
+    try:
+        save(get_current_view())
+    except Exception as exc:  # noqa: BLE001 — never brick startup over the config file
+        print(f"warning: could not materialize {path().name}: {exc}", file=sys.stderr)

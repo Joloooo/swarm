@@ -156,11 +156,11 @@ def inherited_swarm_env() -> dict[str, str]:
     """Current ``SWARM_*`` env (minus campaign-owned vars), to forward.
 
     osascript/tmux open FRESH shells that do NOT inherit this process's
-    environment, but ``xbow_runner`` relies on inherited env for the model
-    config (``config_store.load_into_env``) — see src/cli/runner.py:_spawn. So
-    when the TUI (or a shell that has these set) launches a campaign, we replay
-    every ``SWARM_*`` var onto each session's command line. Empty when nothing
-    is set, so a bare standalone run is unchanged.
+    environment. Menu config (model/budgets/verbosity) is NOT carried this
+    way — each session reads swarm-config.toml directly via src.graph. This
+    only forwards any genuine shell ``SWARM_*`` overrides the user exported
+    (e.g. advanced knobs like ``SWARM_PROVIDER``), so they reach each session.
+    Empty when nothing is set, so a bare standalone run is unchanged.
     """
     return {
         k: v for k, v in os.environ.items()
@@ -378,13 +378,12 @@ def main() -> None:
                     help="print the split and the commands, but launch nothing")
     args = ap.parse_args()
 
-    # Standalone CLI loads swarm-config.toml into env (the TUI already did
-    # this before calling launch_campaign directly), so the spawned sessions
-    # inherit the configured model/budgets; launch_campaign forwards SWARM_*
-    # onto each session. Best-effort — a config error must never block a run.
+    # Make sure swarm-config.toml is complete before fanning out — each
+    # spawned session reads the configured model/budgets/verbosity straight
+    # from it via src.graph. Best-effort — a config error must never block a run.
     try:
         from src.cli import config_store
-        config_store.load_into_env(override=False)
+        config_store.ensure_complete()
     except Exception:  # noqa: BLE001
         pass
 

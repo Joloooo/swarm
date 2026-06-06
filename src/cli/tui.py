@@ -43,6 +43,7 @@ from src.cli import (
     banner,
     bench_discovery,
     bench_results,
+    bench_tags,
     config_store,
     docker_boot,
     runner,
@@ -281,14 +282,53 @@ def _show_codex_usage() -> None:
 # instead of a 104-row single column.
 _MAX_COLS = 4
 _GAP = 2             # blank columns between grid cells
-_SUFFIX_RESERVE = 5  # width kept for the green " [N]" run-order suffix
+_SUFFIX_RESERVE = 6  # width kept for the " [NNN]" per-slice run-order suffix
 
-# When at most this many benchmarks are selected, the picker lists them by
-# id and numbers each cell with its run order ([1], [2], …). Above it, the
-# selection is shown as a count + range and selected cells are just drawn in
-# green: numbering 100+ cells is noise, and a concurrent fan-out has no single
-# run order anyway.
+# How many selected benchmarks the header lists by name before collapsing to
+# a "selected: N of M" count line (listing 100 ids would wrap off-screen).
 _QUEUE_PREVIEW = 8
+
+# Colour of the vulnerability tags in each row's label (the part after the
+# id). Always shown for an *unselected* benchmark so you can scan vuln classes
+# at rest; a selected benchmark takes its slice colour instead (see below).
+_TAG_STYLE = "fg:ansibrightblue"
+
+# Per-slice colours for the run sequence(s). The selected set runs as
+# ``concurrency`` contiguous slices (each its own Terminal window, each running
+# its benchmarks in sequence), so each slice is drawn in its own colour with
+# its own 1..N numbering: concurrency 1 → one green sequence; 2 → green +
+# yellow; more → cycle this list. Red is excluded (it's the ✗ fail mark), and
+# adjacent slices always differ since slices take consecutive colours.
+_SLICE_COLORS = (
+    "ansigreen", "ansiyellow", "ansicyan", "ansimagenta", "ansiblue",
+    "ansibrightgreen", "ansibrightyellow", "ansibrightcyan",
+    "ansibrightmagenta", "ansibrightblue",
+)
+
+
+def _slice_color(slice_idx: int) -> str:
+    """The colour name for slice ``slice_idx`` (cycles :data:`_SLICE_COLORS`)."""
+    return _SLICE_COLORS[slice_idx % len(_SLICE_COLORS)]
+
+
+# Max width of a grid label. Tag lists run up to ~68 chars for the few
+# 3-4-tag benchmarks; without a cap, one such row would force the whole grid
+# down to a single 104-row column. So the id (``XBEN-NNN-``) is always kept
+# whole and only the *tag list* of the longest few is clipped with a trailing
+# … — ~90% of benchmarks still show every tag, and the grid stays 2-3 columns.
+_LABEL_CAP = 44
+
+
+def _capped_tags(base: str, tags_str: str) -> str:
+    """Clip ``tags_str`` so ``base + tags_str`` fits within :data:`_LABEL_CAP`.
+
+    Only the tag list is shortened (trailing …); the ``XBEN-NNN-`` id is never
+    touched. Returns ``tags_str`` unchanged when it already fits or is empty.
+    """
+    if not tags_str or len(base) + len(tags_str) <= _LABEL_CAP:
+        return tags_str
+    keep = max(1, _LABEL_CAP - len(base) - 1)   # 1 col for the …
+    return tags_str[:keep] + "…"
 
 
 def _grid_dims(n: int, width: int, content_w: int) -> tuple[int, int]:
@@ -306,20 +346,23 @@ def _grid_dims(n: int, width: int, content_w: int) -> tuple[int, int]:
 
 
 def _cell_segments(
-    bench_id: str,
+    base: str,
+    tags_str: str,
     result: str | None,
-    queue_pos: int | None,
+    slice_info: tuple[int, int] | None,
     is_cursor: bool,
     content_w: int,
-    show_pos: bool,
 ) -> list[tuple[str, str]]:
     """Formatted-text segments for one grid cell, padded to ``content_w``.
 
-    The ✓/✗/~ result mark is coloured. A benchmark that is *selected* (in
-    the run set) is drawn with a green id; when ``show_pos`` is set (a small,
-    hand-built selection) it also gets a green ``[N]`` run-order suffix. The
-    whole cell is drawn in reverse video when it is the pointed-at benchmark,
-    so the cursor reads as a highlighted bar.
+    The ✓/✗/~ result mark is coloured. The label is the id base (``XBEN-004-``)
+    plus its vulnerability ``tags_str`` (``xss``). A benchmark that is selected
+    for a run carries ``slice_info`` = ``(slice_index, position_in_slice)``:
+    the whole label is drawn in that slice's colour with a ``[position]``
+    suffix, so each concurrent slice reads as its own coloured 1..N sequence.
+    An unselected benchmark keeps a default-coloured base with its tags in
+    :data:`_TAG_STYLE`. The whole cell is reverse-video when it is the
+    pointed-at benchmark, so the cursor reads as a highlighted bar.
     """
     if result == bench_results.OK:
         segs = [("fg:ansigreen bold", "✓"), ("", " ")]
@@ -329,10 +372,15 @@ def _cell_segments(
         segs = [("fg:ansiyellow bold", "~"), ("", " ")]
     else:
         segs = [("", "  ")]
-    queued = queue_pos is not None
-    segs.append(("fg:ansibrightgreen bold" if queued else "", bench_id))
-    if queued and show_pos:
-        segs.append(("fg:ansibrightgreen bold", f" [{queue_pos}]"))
+    if slice_info is not None:
+        # Selected → whole label + position in the slice's colour.
+        style = f"fg:{_slice_color(slice_info[0])} bold"
+        segs.append((style, base + tags_str))
+        segs.append((style, f" [{slice_info[1]}]"))
+    else:
+        segs.append(("", base))
+        if tags_str:
+            segs.append((_TAG_STYLE, tags_str))
     used = sum(len(text) for _, text in segs)
     if used < content_w:
         segs.append(("", " " * (content_w - used)))
@@ -345,18 +393,21 @@ def _pick_bench() -> tuple[list[str], int] | None:
     """Let the user pick benchmarks to run, and at what concurrency.
 
     Every XBEN-*-24 benchmark on disk is shown in a column grid (filled
-    column-major, navigated with the arrow keys), each annotated with its
-    manual ✓/✗/~ triage mark from ``benchmarks/bench_results.json``. Keys:
+    column-major, navigated with the arrow keys), labelled by its
+    vulnerability tags (``XBEN-004-xss``) and annotated with its ✓/✗/~ triage
+    mark from ``benchmarks/bench_results.json``. Keys:
 
       ``t`` — cycle the result mark ✓ → ✗ → ~ → none (persisted
               immediately). ✓ solved, ✗ genuinely failed, ~ (yellow)
               codex/API or infra crash with no fair attempt.
-      ``r`` — select / unselect the highlighted benchmark. Selected ones go
-              green, with a ``[1]``/``[2]`` run-order suffix for small sets.
+      ``r`` — select / unselect the highlighted benchmark. The selected set
+              runs as ``concurrency`` contiguous slices, each drawn in its own
+              colour with its own 1..N run-order numbering.
       ``a`` — select all / unselect all (toggle).
       ``c`` — set the concurrency inline: type digits, ``enter`` to confirm,
               ``esc`` to cancel. Capped at the number selected — you can't
-              run more windows than benchmarks.
+              run more windows than benchmarks. Changing it re-splits the
+              selection into that many coloured sequences.
 
     Returns ``(ids, concurrency)``:
 
@@ -395,7 +446,11 @@ def _pick_bench() -> tuple[list[str], int] | None:
         "c_buffer": "",          # digits typed so far in c-mode.
     }
     n = len(ids)
-    content_w = 2 + max(len(b) for b in ids) + _SUFFIX_RESERVE
+    # Cells are sized to the tag-expanded label (``XBEN-004-xss``), capped at
+    # _LABEL_CAP so a few very long tag lists don't collapse the grid to one
+    # column. Rows with long tags still widen the columns, so the grid uses
+    # fewer of them — the deliberate trade for showing tags.
+    content_w = 2 + min(bench_tags.widest_short_id(ids), _LABEL_CAP) + _SUFFIX_RESERVE
 
     def _width() -> int:
         try:
@@ -413,6 +468,26 @@ def _pick_bench() -> tuple[list[str], int] | None:
     def _clamp_concurrency() -> None:
         """Keep concurrency in 1..selected so it can never exceed the set."""
         state["concurrency"] = max(1, min(state["concurrency"], _sel_count()))
+
+    def _slice_map() -> dict[str, tuple[int, int]]:
+        """``{bench_id: (slice_index, position_in_slice)}`` for the selection.
+
+        Splits the queue into ``concurrency`` contiguous slices using the SAME
+        function the campaign launcher uses (``launch_split.split_contiguous``),
+        so the coloured sequences shown here are exactly the windows that will
+        run. Position is 1-based within each slice. Empty when nothing is
+        selected. Cheap (≤104 items), recomputed each render so it tracks
+        ``r``/``a``/``c`` live.
+        """
+        if not queue:
+            return {}
+        from benchmarks.launch_split import split_contiguous
+        conc = max(1, min(state["concurrency"], len(queue)))
+        out: dict[str, tuple[int, int]] = {}
+        for slice_idx, sl in enumerate(split_contiguous(queue, conc)):
+            for pos, bid in enumerate(sl, 1):
+                out[bid] = (slice_idx, pos)
+        return out
 
     def _move(dr: int, dc: int) -> None:
         rows, cols = _dims()
@@ -438,9 +513,9 @@ def _pick_bench() -> tuple[list[str], int] | None:
         n_fail = marks.count(bench_results.FAIL)
         n_api = marks.count(bench_results.API)
         n_none = n - n_ok - n_fail - n_api
-        # Small selections show per-cell run-order numbers; big ones don't
-        # (104 ordinals are noise, and a fan-out has no single run order).
-        show_pos = len(queue) <= _QUEUE_PREVIEW
+        # The selection split into coloured slices, computed once per render.
+        smap = _slice_map()
+        list_sel = len(queue) <= _QUEUE_PREVIEW   # list ids vs. count in header
         out: list[tuple[str, str]] = [
             ("bold", "Which benchmark(s) do you want to run?"),
             ("fg:ansibrightblack", f"   ({n} benchmarks)\n"),
@@ -450,21 +525,38 @@ def _pick_bench() -> tuple[list[str], int] | None:
             ("fg:ansibrightblack", "  ·  "),
             ("fg:ansiyellow bold", f"~ {n_api} crashed"),
             ("fg:ansibrightblack", f"  ·  {n_none} unmarked\n"),
-            ("fg:ansibrightblack",
-             "↑/↓/←/→ move · r select · a all/none · t mark ✓/✗/~ · "
-             "c concurrency · enter run · q/Ctrl-C back\n"),
         ]
-        # Selection line: list ids for small sets, else a count + range.
+        # Failure breakdown by vulnerability tag, in a less-bright red, so a
+        # column of ✗ reads as "which classes are we losing on" at a glance.
+        failed_ids = [b for b in ids if results.get(b) == bench_results.FAIL]
+        if failed_ids:
+            summary = " · ".join(
+                f"{cnt} {tag}" for tag, cnt in bench_tags.category_counts(failed_ids)
+            )
+            out.append(("fg:ansired", f"   ✗ by tag: {summary}\n"))
+        out.append((
+            "fg:ansibrightblack",
+            "↑/↓/←/→ move · r select · a all/none · t mark ✓/✗/~ · "
+            "c concurrency · enter run · q/Ctrl-C back\n",
+        ))
+        # Selection line: list tag-labels for small sets, else a count.
         if queue:
-            if show_pos:
+            if list_sel:
                 out.append(("fg:ansibrightgreen bold", f"selected ({len(queue)}): "))
-                out.append(("fg:ansibrightgreen", " → ".join(queue) + "\n"))
+                out.append((
+                    "fg:ansibrightgreen",
+                    " → ".join(bench_tags.short_id(b) for b in queue) + "\n",
+                ))
             else:
                 out.append(("fg:ansibrightgreen bold", f"selected: {len(queue)} of {n}"))
-                out.append(("fg:ansibrightgreen", f"  ({queue[0]} … {queue[-1]})\n"))
+                out.append((
+                    "fg:ansibrightgreen",
+                    f"  → split into {max(1, min(state['concurrency'], len(queue)))} "
+                    f"coloured slice(s)\n",
+                ))
         else:
             out.append(("fg:ansibrightblack",
-                        f"nothing selected — enter runs {cur_id}\n"))
+                        f"nothing selected — enter runs {bench_tags.short_id(cur_id)}\n"))
         # Concurrency line, or the inline editor while ``c`` is being typed.
         if state["c_mode"]:
             cap = _sel_count()
@@ -492,10 +584,11 @@ def _pick_bench() -> tuple[list[str], int] | None:
                 if i >= n:
                     continue
                 bench_id = ids[i]
-                pos = queue.index(bench_id) + 1 if bench_id in queue else None
+                base, tags = bench_tags.label_parts(bench_id)
                 out.extend(_cell_segments(
-                    bench_id, results.get(bench_id), pos,
-                    i == state["cursor"], content_w, show_pos,
+                    base, _capped_tags(base, ",".join(tags)),
+                    results.get(bench_id),
+                    smap.get(bench_id), i == state["cursor"], content_w,
                 ))
                 if c != cols - 1:
                     out.append(("", " " * _GAP))

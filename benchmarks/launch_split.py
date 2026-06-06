@@ -305,6 +305,13 @@ def launch_campaign(
         runner_flags.append("--skip-build")
     if resume:
         runner_flags.append("--resume")
+    # Pace every window against the selected Codex account's 5-hour limit,
+    # same as the sequential picker path (src/cli/runner.py). Each window
+    # guards its own slice: before starting a benchmark it waits if 5-hour
+    # usage is ≥ the threshold (default 90%), so a fan-out doesn't keep
+    # firing benchmarks straight into the rate limit. (A slice of exactly
+    # one benchmark self-disables the guard — nothing to pace between.)
+    runner_flags.append("--usage-guard")
 
     print(f"campaign: logs/{name}")
     print(f"{len(ids)} benchmarks → {len(slices)} sessions "

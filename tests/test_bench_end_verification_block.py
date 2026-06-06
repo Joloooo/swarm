@@ -86,7 +86,8 @@ def test_success_prints_match_marker_and_both_flags(captured_emits):
     out = _joined(captured_emits)
     assert "✓ FLAG FOUND" in out
     assert "XBEN-006-24" in out
-    assert "318.5s" in out and "6 finding" in out
+    # Duration renders as Xm Ys now (318.5s → 5m 18s), not raw seconds.
+    assert "5m 18s" in out and "6 finding" in out
     # Verification block must appear.
     assert "expected:" in out
     assert "captured:" in out

@@ -34,6 +34,21 @@ API = "api"    # codex/API or infra crash — the run never got a fair attempt
 _CRASH_MARKERS: tuple[str, ...] = ("Codex", "RefusalError", "phase '")
 
 
+def format_duration(seconds: float | int | None) -> str:
+    """Human ``Xm YYs`` / ``Ys`` from a second count (``"?"`` if unknown).
+
+    Used by the terminal verdict line (:meth:`src.observability.live.Live.bench_end`)
+    and the campaign summary so a solve time reads as ``3m 12s`` rather than
+    ``192.0s``. Lives here, in the shared verdict module, so both render times
+    identically and stdlib-only.
+    """
+    if not isinstance(seconds, (int, float)):
+        return "?"
+    s = max(0, int(round(seconds)))
+    m, sec = divmod(s, 60)
+    return f"{m}m {sec:02d}s" if m else f"{sec}s"
+
+
 def classify(flag_found: bool, error: str | None) -> str:
     """Map a :mod:`benchmarks.xbow_runner` result to an outcome.
 

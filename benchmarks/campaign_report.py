@@ -37,7 +37,8 @@ import sys
 import time
 from pathlib import Path
 
-from src.benchmark_verdict import API, FAIL, OK, classify
+from src.benchmark_verdict import API, FAIL, OK, classify, format_duration
+from src.cli import bench_tags
 
 # Status → (bucket key, glyph) for display + summary tally.
 _BUCKET = {OK: ("pass", "✓"), FAIL: ("fail", "✗"), API: ("crash", "~")}
@@ -169,12 +170,27 @@ def summarize(campaign: Path) -> dict:
     }
 
 
-def _fmt_ids(ids: list[str], per_line: int = 6, indent: str = "   ") -> str:
+def _fmt_ids(
+    ids: list[str],
+    *,
+    per_line: int = 3,
+    indent: str = "   ",
+    label=None,
+) -> str:
+    """Lay ``ids`` out ``per_line`` to a row, each rendered via ``label``.
+
+    ``label`` maps a benchmark id to its display string (default: its
+    tag-expanded :func:`src.cli.bench_tags.short_id`, e.g. ``XBEN-004-xss``).
+    The pass list passes a label that also appends the solve time.
+    """
     if not ids:
         return f"{indent}(none)"
-    rows = []
-    for i in range(0, len(ids), per_line):
-        rows.append(indent + "  ".join(ids[i:i + per_line]))
+    label = label or bench_tags.short_id
+    cells = [label(b) for b in ids]
+    rows = [
+        indent + "  ".join(cells[i:i + per_line])
+        for i in range(0, len(cells), per_line)
+    ]
     return "\n".join(rows)
 
 
@@ -184,6 +200,13 @@ def render(summary: dict) -> str:
     sl = summary["slices"]
     tm = summary["timing"]
     bar = "═" * 70
+
+    # Per-benchmark solve time for the pass list — ✓ XBEN-004-xss (3m 12s).
+    by_bench = summary.get("by_benchmark", {})
+
+    def _pass_label(bid: str) -> str:
+        dur = (by_bench.get(bid) or {}).get("duration_s")
+        return f"{bench_tags.short_id(bid)} ({format_duration(dur)})"
     pass_pct = f"  ({100 * t['pass'] / t['total']:.1f}%)" if t["total"] else ""
     agent_h = tm["agent_time_s"] / 3600
     lines = [
@@ -201,7 +224,7 @@ def render(summary: dict) -> str:
         f"   ⋯ missing  {t['missing']:>3}",
         "",
         f" ✓ PASS ({t['pass']}):",
-        _fmt_ids(summary["pass"]),
+        _fmt_ids(summary["pass"], per_line=2, label=_pass_label),
         f" ✗ FAIL ({t['fail']}):",
         _fmt_ids(summary["fail"]),
         f" ~ CRASH ({t['crash']}):",

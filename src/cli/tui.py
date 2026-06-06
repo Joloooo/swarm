@@ -32,6 +32,7 @@ from typing import Any
 
 import questionary
 from prompt_toolkit.application import Application, get_app
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
@@ -93,12 +94,18 @@ def main_loop(args: argparse.Namespace) -> None:
             continue
 
         if action == "xbow":
-            run_list = _pick_bench()
+            picked = _pick_bench()
+            if not picked:
+                continue
+            run_list, concurrency = picked
             if not run_list:
                 continue
             if not _ensure_docker(args):
                 continue
-            runner.run_queue(run_list)
+            if concurrency > 1:
+                _run_picker_campaign(run_list, concurrency)
+            else:
+                runner.run_queue(run_list)
         elif action == "campaign":
             _run_campaign(args)
         elif action == "config":
@@ -136,6 +143,30 @@ def _run_campaign(args: argparse.Namespace) -> None:
     from benchmarks.launch_split import launch_campaign
     try:
         launch_campaign(jobs=jobs, wait=True)
+    except KeyboardInterrupt:
+        _console.print(
+            "\n[dim]Stopped watching — the Terminal windows keep running. "
+            "Re-attach the dashboard with `campaign_report`.[/dim]"
+        )
+
+
+def _run_picker_campaign(run_list: list[str], concurrency: int) -> None:
+    """Fan a picker selection out across ``concurrency`` Terminal windows.
+
+    The >1-concurrency path of the xbow picker: the same machinery as the
+    top-level "Run ALL benchmarks concurrently", but over exactly the
+    benchmarks selected in the picker instead of the whole set. This
+    terminal becomes the live dashboard until every window finishes. Docker
+    is assumed ready — ``main_loop`` bootstraps it before dispatching.
+    """
+    _console.print(
+        f"[cyan]Fanning {len(run_list)} benchmark(s) out across {concurrency} "
+        f"concurrent Terminal window(s) — this terminal becomes the live "
+        f"dashboard.[/cyan]"
+    )
+    from benchmarks.launch_split import launch_campaign
+    try:
+        launch_campaign(ids=run_list, jobs=concurrency, wait=True)
     except KeyboardInterrupt:
         _console.print(
             "\n[dim]Stopped watching — the Terminal windows keep running. "
@@ -252,6 +283,13 @@ _MAX_COLS = 4
 _GAP = 2             # blank columns between grid cells
 _SUFFIX_RESERVE = 5  # width kept for the green " [N]" run-order suffix
 
+# When at most this many benchmarks are selected, the picker lists them by
+# id and numbers each cell with its run order ([1], [2], …). Above it, the
+# selection is shown as a count + range and selected cells are just drawn in
+# green: numbering 100+ cells is noise, and a concurrent fan-out has no single
+# run order anyway.
+_QUEUE_PREVIEW = 8
+
 
 def _grid_dims(n: int, width: int, content_w: int) -> tuple[int, int]:
     """Return ``(rows, cols)`` for an ``n``-cell column-major grid.
@@ -271,14 +309,17 @@ def _cell_segments(
     bench_id: str,
     result: str | None,
     queue_pos: int | None,
-    selected: bool,
+    is_cursor: bool,
     content_w: int,
+    show_pos: bool,
 ) -> list[tuple[str, str]]:
     """Formatted-text segments for one grid cell, padded to ``content_w``.
 
-    The ✓/✗/~ result mark is coloured, the ``[N]`` run-order suffix is
-    green, and the whole cell is drawn in reverse video when it is the
-    pointed-at benchmark (so the cursor reads as a highlighted bar).
+    The ✓/✗/~ result mark is coloured. A benchmark that is *selected* (in
+    the run set) is drawn with a green id; when ``show_pos`` is set (a small,
+    hand-built selection) it also gets a green ``[N]`` run-order suffix. The
+    whole cell is drawn in reverse video when it is the pointed-at benchmark,
+    so the cursor reads as a highlighted bar.
     """
     if result == bench_results.OK:
         segs = [("fg:ansigreen bold", "✓"), ("", " ")]
@@ -288,37 +329,48 @@ def _cell_segments(
         segs = [("fg:ansiyellow bold", "~"), ("", " ")]
     else:
         segs = [("", "  ")]
-    segs.append(("", bench_id))
-    if queue_pos is not None:
+    queued = queue_pos is not None
+    segs.append(("fg:ansibrightgreen bold" if queued else "", bench_id))
+    if queued and show_pos:
         segs.append(("fg:ansibrightgreen bold", f" [{queue_pos}]"))
     used = sum(len(text) for _, text in segs)
     if used < content_w:
         segs.append(("", " " * (content_w - used)))
-    if selected:
+    if is_cursor:
         segs = [((style + " reverse").strip(), text) for style, text in segs]
     return segs
 
 
-def _pick_bench() -> list[str] | None:
-    """Let the user pick one benchmark — or queue several to run in order.
+def _pick_bench() -> tuple[list[str], int] | None:
+    """Let the user pick benchmarks to run, and at what concurrency.
 
     Every XBEN-*-24 benchmark on disk is shown in a column grid (filled
     column-major, navigated with the arrow keys), each annotated with its
-    manual ✓/✗/~ triage mark from ``benchmarks/bench_results.json``. Two
-    keys act on the highlighted cell:
+    manual ✓/✗/~ triage mark from ``benchmarks/bench_results.json``. Keys:
 
       ``t`` — cycle the result mark ✓ → ✗ → ~ → none (persisted
               immediately). ✓ solved, ✗ genuinely failed, ~ (yellow)
               codex/API or infra crash with no fair attempt.
-      ``r`` — add / remove the benchmark from an ordered run queue, shown
-              as a green ``[1]`` / ``[2]`` suffix in run order.
+      ``r`` — select / unselect the highlighted benchmark. Selected ones go
+              green, with a ``[1]``/``[2]`` run-order suffix for small sets.
+      ``a`` — select all / unselect all (toggle).
+      ``c`` — set the concurrency inline: type digits, ``enter`` to confirm,
+              ``esc`` to cancel. Capped at the number selected — you can't
+              run more windows than benchmarks.
 
-    Returns the ordered list of benchmark ids to run:
+    Returns ``(ids, concurrency)``:
 
-      * a non-empty queue → that queue, in the order it was built;
-      * an empty queue    → just the highlighted cell at ``enter``;
-      * ``None``          → the user backed out (q / Ctrl-C) or the
-                            submodule is missing.
+      * ``ids``         — the selected set in selection order, or just the
+                          highlighted cell when nothing is selected;
+      * ``concurrency`` — 1 runs them one after another in this terminal;
+                          >1 fans them out across that many Terminal windows
+                          (the campaign path). Always clamped to ``len(ids)``.
+
+    ``None`` is returned if the user backs out (q / Ctrl-C) or the submodule
+    is missing.
+
+    Concurrency lives only in memory — it always starts at 1 and is never
+    written to swarm-config.toml.
 
     Unlike the rest of the TUI this is a hand-rolled prompt_toolkit
     ``Application`` rather than a ``questionary.select`` — questionary
@@ -335,8 +387,13 @@ def _pick_bench() -> list[str] | None:
         return None
 
     results = bench_results.load()
-    queue: list[str] = []        # ordered run queue, built live with ``r``.
-    state = {"cursor": 0}        # flat index into ``ids`` of the pointed-at cell.
+    queue: list[str] = []        # ordered run/selection set, built with r / a.
+    state = {
+        "cursor": 0,             # flat index into ``ids`` of the pointed-at cell.
+        "concurrency": 1,        # in-memory only, never saved. 1 = sequential.
+        "c_mode": False,         # True while typing a concurrency value inline.
+        "c_buffer": "",          # digits typed so far in c-mode.
+    }
     n = len(ids)
     content_w = 2 + max(len(b) for b in ids) + _SUFFIX_RESERVE
 
@@ -348,6 +405,14 @@ def _pick_bench() -> list[str] | None:
 
     def _dims() -> tuple[int, int]:
         return _grid_dims(n, _width(), content_w)
+
+    def _sel_count() -> int:
+        """How many benchmarks ``enter`` would run — the concurrency cap."""
+        return len(queue) if queue else 1
+
+    def _clamp_concurrency() -> None:
+        """Keep concurrency in 1..selected so it can never exceed the set."""
+        state["concurrency"] = max(1, min(state["concurrency"], _sel_count()))
 
     def _move(dr: int, dc: int) -> None:
         rows, cols = _dims()
@@ -373,6 +438,9 @@ def _pick_bench() -> list[str] | None:
         n_fail = marks.count(bench_results.FAIL)
         n_api = marks.count(bench_results.API)
         n_none = n - n_ok - n_fail - n_api
+        # Small selections show per-cell run-order numbers; big ones don't
+        # (104 ordinals are noise, and a fan-out has no single run order).
+        show_pos = len(queue) <= _QUEUE_PREVIEW
         out: list[tuple[str, str]] = [
             ("bold", "Which benchmark(s) do you want to run?"),
             ("fg:ansibrightblack", f"   ({n} benchmarks)\n"),
@@ -383,15 +451,40 @@ def _pick_bench() -> list[str] | None:
             ("fg:ansiyellow bold", f"~ {n_api} crashed"),
             ("fg:ansibrightblack", f"  ·  {n_none} unmarked\n"),
             ("fg:ansibrightblack",
-             "↑/↓/←/→ move · r queue/unqueue · t mark ✓/✗/~ · "
-             "enter run · q/Ctrl-C back\n"),
+             "↑/↓/←/→ move · r select · a all/none · t mark ✓/✗/~ · "
+             "c concurrency · enter run · q/Ctrl-C back\n"),
         ]
+        # Selection line: list ids for small sets, else a count + range.
         if queue:
-            out.append(("fg:ansibrightgreen bold", f"queue ({len(queue)}): "))
-            out.append(("fg:ansibrightgreen", " → ".join(queue) + "\n"))
+            if show_pos:
+                out.append(("fg:ansibrightgreen bold", f"selected ({len(queue)}): "))
+                out.append(("fg:ansibrightgreen", " → ".join(queue) + "\n"))
+            else:
+                out.append(("fg:ansibrightgreen bold", f"selected: {len(queue)} of {n}"))
+                out.append(("fg:ansibrightgreen", f"  ({queue[0]} … {queue[-1]})\n"))
         else:
             out.append(("fg:ansibrightblack",
-                        f"nothing queued — enter runs {cur_id}\n"))
+                        f"nothing selected — enter runs {cur_id}\n"))
+        # Concurrency line, or the inline editor while ``c`` is being typed.
+        if state["c_mode"]:
+            cap = _sel_count()
+            out.append(("fg:ansibrightcyan bold", "set concurrency "))
+            out.append(("fg:ansibrightblack", f"[1–{cap}]: "))
+            out.append(("fg:ansibrightcyan bold", state["c_buffer"]))
+            out.append(("fg:ansibrightcyan", "▌"))
+            hint = "   (enter ok · esc cancel"
+            if cap == 1 and not queue:
+                hint += " — select benchmarks first: a = all"
+            out.append(("fg:ansibrightblack", hint + ")\n"))
+        else:
+            conc = state["concurrency"]
+            if conc <= 1:
+                out.append(("fg:ansibrightblack",
+                            "concurrency: 1  (sequential, in this terminal)\n"))
+            else:
+                out.append(("fg:ansibrightcyan bold", f"concurrency: {conc}"))
+                out.append(("fg:ansibrightblack",
+                            f"  (fan out across {conc} Terminal windows)\n"))
         out.append(("", "\n"))
         for r in range(rows):
             for c in range(cols):
@@ -402,7 +495,7 @@ def _pick_bench() -> list[str] | None:
                 pos = queue.index(bench_id) + 1 if bench_id in queue else None
                 out.extend(_cell_segments(
                     bench_id, results.get(bench_id), pos,
-                    i == state["cursor"], content_w,
+                    i == state["cursor"], content_w, show_pos,
                 ))
                 if c != cols - 1:
                     out.append(("", " " * _GAP))
@@ -410,49 +503,99 @@ def _pick_bench() -> list[str] | None:
         return out
 
     kb = KeyBindings()
+    # Two modes share the keymap: normal navigation, and the inline
+    # concurrency editor opened by ``c``. ``filter`` routes each key to the
+    # right handler so digits/enter mean "type a number" only while editing.
+    nav = Condition(lambda: not state["c_mode"])
+    cmode = Condition(lambda: state["c_mode"])
 
-    @kb.add("up", eager=True)
-    @kb.add("k", eager=True)
+    @kb.add("up", eager=True, filter=nav)
+    @kb.add("k", eager=True, filter=nav)
     def _(event) -> None:  # noqa: ANN001 (prompt_toolkit event)
         _move(-1, 0)
 
-    @kb.add("down", eager=True)
-    @kb.add("j", eager=True)
+    @kb.add("down", eager=True, filter=nav)
+    @kb.add("j", eager=True, filter=nav)
     def _(event) -> None:  # noqa: ANN001
         _move(1, 0)
 
-    @kb.add("left", eager=True)
-    @kb.add("h", eager=True)
+    @kb.add("left", eager=True, filter=nav)
+    @kb.add("h", eager=True, filter=nav)
     def _(event) -> None:  # noqa: ANN001
         _move(0, -1)
 
-    @kb.add("right", eager=True)
-    @kb.add("l", eager=True)
+    @kb.add("right", eager=True, filter=nav)
+    @kb.add("l", eager=True, filter=nav)
     def _(event) -> None:  # noqa: ANN001
         _move(0, 1)
 
-    @kb.add("t", eager=True)
+    @kb.add("t", eager=True, filter=nav)
     def _(event) -> None:  # noqa: ANN001
         bench_id = ids[state["cursor"]]
         bench_results.cycle(results, bench_id)
         bench_results.save(results)
 
-    @kb.add("r", eager=True)
+    @kb.add("r", eager=True, filter=nav)
     def _(event) -> None:  # noqa: ANN001
         bench_id = ids[state["cursor"]]
         if bench_id in queue:
             queue.remove(bench_id)
         else:
             queue.append(bench_id)
+        _clamp_concurrency()
 
-    @kb.add("enter")
+    @kb.add("a", eager=True, filter=nav)
     def _(event) -> None:  # noqa: ANN001
-        event.app.exit(result=list(queue) if queue else [ids[state["cursor"]]])
+        # Toggle: all selected → clear; otherwise select everything (in id
+        # order, so a small selection keeps its hand-built order).
+        if len(queue) == n:
+            queue.clear()
+        else:
+            queue[:] = list(ids)
+        _clamp_concurrency()
 
-    @kb.add("q")
-    @kb.add("c-c")
+    @kb.add("c", eager=True, filter=nav)
+    def _(event) -> None:  # noqa: ANN001
+        state["c_mode"] = True
+        state["c_buffer"] = ""
+
+    @kb.add("enter", filter=nav)
+    def _(event) -> None:  # noqa: ANN001
+        run_list = list(queue) if queue else [ids[state["cursor"]]]
+        conc = max(1, min(state["concurrency"], len(run_list)))
+        event.app.exit(result=(run_list, conc))
+
+    @kb.add("q", filter=nav)
+    @kb.add("c-c", filter=nav)
     def _(event) -> None:  # noqa: ANN001
         event.app.exit(result=None)
+
+    # --- inline concurrency editor (active only while ``c_mode`` is set) ----
+    def _add_digit(d: str) -> None:
+        @kb.add(d, filter=cmode)
+        def _(event) -> None:  # noqa: ANN001
+            if len(state["c_buffer"]) < 3:   # cap at 3 digits (max 999)
+                state["c_buffer"] += d
+
+    for _d in "0123456789":
+        _add_digit(_d)
+
+    @kb.add("backspace", filter=cmode)
+    def _(event) -> None:  # noqa: ANN001
+        state["c_buffer"] = state["c_buffer"][:-1]
+
+    @kb.add("enter", filter=cmode)
+    def _(event) -> None:  # noqa: ANN001
+        if state["c_buffer"]:
+            state["concurrency"] = max(1, min(int(state["c_buffer"]), _sel_count()))
+        state["c_mode"] = False
+        state["c_buffer"] = ""
+
+    @kb.add("escape", filter=cmode)
+    @kb.add("c-c", filter=cmode)
+    def _(event) -> None:  # noqa: ANN001
+        state["c_mode"] = False
+        state["c_buffer"] = ""
 
     app = Application(
         layout=Layout(HSplit([

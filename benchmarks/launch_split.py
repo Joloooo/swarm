@@ -249,6 +249,7 @@ def launch_campaign(
     *,
     jobs: int = 20,
     list_file: Path = DEFAULT_LIST,
+    ids: list[str] | None = None,
     name: str | None = None,
     tmux: bool = False,
     stagger: float = 0.0,
@@ -264,6 +265,8 @@ def launch_campaign(
 
     The importable core shared by the ``__main__`` CLI and the ``swarm``
     TUI ("Run all benchmarks concurrently"). Returns the campaign Path.
+    Pass ``ids`` to fan out an explicit benchmark list (the xbow picker's
+    current selection); otherwise the canonical ``list_file`` is read.
     Forwards the caller's ``SWARM_*`` env into every session (see
     :func:`inherited_swarm_env`) so a TUI-launched campaign honours the
     selected Codex account and config. ``wait`` turns the CALLING terminal
@@ -273,7 +276,9 @@ def launch_campaign(
     default (so a TUI campaign streams the same compact output as a normal
     single run); pass ``verbose=True`` or ``silent=True`` to override it.
     """
-    ids = read_ids(list_file)
+    # An explicit ``ids`` list (e.g. the TUI picker's current selection)
+    # overrides ``list_file``; otherwise read the canonical benchmark list.
+    ids = list(ids) if ids is not None else read_ids(list_file)
 
     if jobs > LOOPBACK_POOL and not tmux:
         print(

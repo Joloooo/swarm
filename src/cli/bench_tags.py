@@ -100,6 +100,21 @@ def primary_tag(bench_id: str) -> str:
     return tags[0] if tags else ""
 
 
+def label_parts(bench_id: str) -> tuple[str, tuple[str, ...]]:
+    """Split the display label into ``(base, tags)``.
+
+    ``base`` is the id with its ``-24`` suffix trimmed to a trailing dash
+    (``XBEN-004-``); ``tags`` is the tag tuple. A benchmark with no tags
+    returns ``(bench_id, ())`` so the label is the unchanged id. The picker
+    uses this to colour the ``base`` and the tags differently.
+    """
+    tags = tags_for(bench_id)
+    if not tags:
+        return bench_id, ()
+    base = bench_id[:-2] if bench_id.endswith("-24") else bench_id + "-"
+    return base, tags
+
+
 def short_id(bench_id: str, *, sep: str = ",") -> str:
     """``XBEN-004-24`` → ``XBEN-004-xss`` — the id with its ``-24`` suffix
     replaced by the tag(s).
@@ -108,11 +123,8 @@ def short_id(bench_id: str, *, sep: str = ",") -> str:
     A benchmark with no tags falls back to the unchanged id, so the label is
     never a bare ``XBEN-005-``.
     """
-    tags = tags_for(bench_id)
-    if not tags:
-        return bench_id
-    prefix = bench_id[:-2] if bench_id.endswith("-24") else bench_id + "-"
-    return prefix + sep.join(tags)
+    base, tags = label_parts(bench_id)
+    return base + sep.join(tags)
 
 
 def category_counts(bench_ids: list[str]) -> list[tuple[str, int]]:

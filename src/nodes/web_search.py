@@ -14,6 +14,7 @@ the supervisor planner can read them like any other worker output.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -27,6 +28,8 @@ from src.refusals.detect import looks_like_refusal
 from src.refusals.vocabulary import filter_text
 from src.state import SwarmGraphState
 from src.tools.crawler import crawl_many
+from src.tools.web_recon.extract import extract_markdown
+from src.tools.web_recon.sources import infer_class, sources_for
 
 # How much crawled HTML/text to include per source in the LLM context.
 # Tavily snippets are only ~300 chars (intro/definition); adding ~8K chars
@@ -36,6 +39,15 @@ from src.tools.crawler import crawl_many
 # chars = ~80K tokens, comfortably within modern model context windows.
 # Tunable per-run via SWARM_WEB_MAX_CHARS — see src/graph.py budgets.
 _MAX_CRAWLED_CHARS = config.budgets.web_search_max_crawled_chars
+
+# Curated authoritative sources (HackTricks mirror, PayloadsAllTheThings leaf
+# files) are the payload-rich pages — give them a much larger budget than a
+# Tavily hit. They arrive as clean markdown (extractor passthrough), so the
+# whole technique section fits: the HackTricks SSTI page is ~50k chars and its
+# Django/blind payloads sit past the old 8000 cap. Tunable via env.
+_CURATED_MAX_CHARS = int(
+    os.getenv("SWARM_WEB_CURATED_MAX_CHARS", "30000")
+)
 
 
 class WebSearchAnalysis(BaseModel):
@@ -145,8 +157,48 @@ class WebSearchNode(BaseNode):
 
         self.log.info("🔍 Web search node processing query: %s", query)
 
+        # Curated authoritative references come FIRST; Tavily supplements them.
+        # The class is taken from explicit state if the planner set it, else
+        # inferred from the query text (e.g. "django ssti" -> ssti).
+        vuln_class = (
+            state.get("vuln_class")
+            or state.get("attack_type")
+            or infer_class(query)
+        )
+        curated_urls = sources_for(vuln_class) if vuln_class else []
+        self.log.info(
+            "Web search vuln_class=%s curated=%d", vuln_class, len(curated_urls),
+        )
+
         try:
-            # Step 1: Tavily search.
+            # Each source: {url, title, snippet, content(markdown), curated}.
+            # Curated sources are pushed first so they keep the lowest indices
+            # and the synthesizer reads them before the noisier Tavily hits.
+            sources: list[dict[str, Any]] = []
+
+            # Step 1: curated authoritative sources — deep budget, and they
+            # arrive as markdown already so extraction is a passthrough.
+            if curated_urls:
+                cur_batch = await crawl_many(curated_urls)
+                cur_by_url = {
+                    cr.url: cr.content
+                    for cr in cur_batch.results if cr.success and cr.content
+                }
+                for url in curated_urls:
+                    raw = cur_by_url.get(url)
+                    if not raw:
+                        continue
+                    md = extract_markdown(raw)[:_CURATED_MAX_CHARS]
+                    sources.append({
+                        "url": url, "title": f"[authoritative] {url}",
+                        "snippet": "", "content": md, "curated": True,
+                    })
+                self.log.info(
+                    "Crawled %d/%d curated sources",
+                    sum(1 for s in sources if s["curated"]), len(curated_urls),
+                )
+
+            # Step 2: Tavily search + crawl (broad discovery / novel cases).
             tavily_tool = TavilySearch(
                 max_results=10,
                 search_depth="basic",
@@ -160,37 +212,47 @@ class WebSearchNode(BaseNode):
                 else []
             )
             self.log.info("Tavily returned %d results", len(raw_results))
-
-            # Step 2: Crawl each result URL in parallel (HTTP, then Playwright).
-            urls = [r.get("url") for r in raw_results if r.get("url")]
-            crawl_batch = await crawl_many(urls) if urls else None
-            crawled_by_url: dict[str, str] = {}
-            if crawl_batch is not None:
-                for cr in crawl_batch.results:
+            t_urls = [r.get("url") for r in raw_results if r.get("url")]
+            t_crawled: dict[str, str] = {}
+            if t_urls:
+                tb = await crawl_many(t_urls)
+                for cr in tb.results:
                     if cr.success and cr.content:
-                        crawled_by_url[cr.url] = cr.content
+                        t_crawled[cr.url] = cr.content
                 self.log.info(
-                    "Crawled %d/%d URLs (http=%d, playwright=%d)",
-                    crawl_batch.stats.total_success,
-                    len(urls),
-                    crawl_batch.stats.http_success,
-                    crawl_batch.stats.playwright_success,
+                    "Crawled %d/%d Tavily URLs (http=%d, playwright=%d)",
+                    tb.stats.total_success, len(t_urls),
+                    tb.stats.http_success, tb.stats.playwright_success,
                 )
+            for r in raw_results:
+                url = r.get("url")
+                if not url:
+                    continue
+                raw = t_crawled.get(url)
+                # HTML -> clean markdown so the char budget holds content,
+                # not tag noise (≈60% of a reference page is markup).
+                md = extract_markdown(raw)[:_MAX_CRAWLED_CHARS] if raw else ""
+                sources.append({
+                    "url": url, "title": r.get("title", "No title"),
+                    "snippet": (r.get("content") or "")[:300],
+                    "content": md, "curated": False,
+                })
 
-            # Step 3: Build enriched context for the LLM.
-            context = f"User Query: {query}\n\nSearch Results:\n"
-            for idx, result in enumerate(raw_results):
-                url = result.get("url", "No URL")
-                context += f"\n[{idx}] Title: {result.get('title', 'No title')}\n"
-                context += f"URL: {url}\n"
-                snippet = (result.get("content") or "No content")[:300]
-                context += f"Snippet: {snippet}\n"
-                page_text = crawled_by_url.get(url)
-                if page_text:
-                    context += (
-                        f"Page Content (truncated): "
-                        f"{page_text[:_MAX_CRAWLED_CHARS]}\n"
-                    )
+            if not sources:
+                return {"messages": [AIMessage(content=(
+                    "[Web Search] No sources could be retrieved for this query."
+                ))]}
+
+            # Step 3: Build enriched context for the LLM (curated first).
+            context = f"User Query: {query}\n\nSources:\n"
+            for idx, s in enumerate(sources):
+                context += f"\n[{idx}] Title: {s['title']}\nURL: {s['url']}\n"
+                if s["snippet"]:
+                    context += f"Snippet: {s['snippet']}\n"
+                if s["content"]:
+                    tag = ("Authoritative reference" if s["curated"]
+                           else "Page content")
+                    context += f"{tag} (markdown):\n{s['content']}\n"
             context += (
                 "\n\nYou are summarizing public technical documentation for a "
                 "security engineer's reference. The pages above are published "
@@ -238,59 +300,35 @@ class WebSearchNode(BaseNode):
                     "snippet stitch-up so the planner still gets the ungated "
                     "source snippets."
                 )
-                # Use every Tavily result as a cited source, and stitch
-                # snippets into a single answer block. Less polished than
-                # the LLM-synthesized version but factually grounded in
-                # what the search returned.
-                sources_list = [
-                    {
-                        "url": r.get("url"),
-                        "title": r.get("title"),
-                        "content": (r.get("content") or "")[:300],
-                        "score": r.get("score"),
-                    }
-                    for r in raw_results
-                    if r.get("url")
-                ]
+                # Stitch the raw source bodies (curated first, which carry the
+                # verbatim payloads) so the planner still gets ungated content
+                # even when the synthesizer is unavailable or refuses.
                 snippets = "\n\n".join(
-                    f"[{i}] {s['title']}\n{s['content']}"
-                    for i, s in enumerate(sources_list)
+                    f"[{i}] {s['title']} — {s['url']}\n"
+                    f"{(s['content'] or s['snippet'])[:1500]}"
+                    for i, s in enumerate(sources)
                 )
                 body = (
-                    "[Web Search] (synthesis unavailable from LLM, raw "
-                    f"Tavily snippets follow)\n\nQuery: {query}\n\n"
-                    f"{snippets}\n\nSources:\n" + "\n".join(
-                        f"- {s['title']} — {s['url']}" for s in sources_list
-                    )
+                    "[Web Search] (LLM synthesis unavailable/refused; raw "
+                    f"sources follow)\n\nQuery: {query}\n\n{snippets}"
                 )
                 return {"messages": [AIMessage(content=body)]}
 
             self.log.info("LLM used %d sources", len(analysis.sources_used or []))
 
-            # Step 5: Keep only the cited sources.
-            sources_list: list[dict[str, Any]] = []
-            for idx in analysis.sources_used or []:
-                if 0 <= idx < len(raw_results):
-                    result = raw_results[idx]
-                    sources_list.append(
-                        {
-                            "url": result.get("url"),
-                            "title": result.get("title"),
-                            "content": (result.get("content") or "")[:300],
-                            "score": result.get("score"),
-                        }
-                    )
+            # Keep only the cited sources; if the model cited none, fall back
+            # to the curated sources (or the first few) so the planner still
+            # gets attributable references.
+            cited = [
+                sources[idx] for idx in (analysis.sources_used or [])
+                if 0 <= idx < len(sources)
+            ]
+            if not cited:
+                cited = [s for s in sources if s["curated"]] or sources[:3]
 
-            has_answer = bool(analysis.answer and sources_list)
-            self.log.info("Web search complete, has_answer=%s", has_answer)
-
-            if has_answer:
-                body = f"[Web Search] {analysis.answer}\n\nSources:\n" + "\n".join(
-                    f"- {s['title']} — {s['url']}" for s in sources_list
-                )
-            else:
-                body = "[Web Search] No relevant information found from web search."
-
+            body = f"[Web Search] {analysis.answer}\n\nSources:\n" + "\n".join(
+                f"- {s['title']} — {s['url']}" for s in cited
+            )
             return {"messages": [AIMessage(content=body)]}
 
         except Exception as e:

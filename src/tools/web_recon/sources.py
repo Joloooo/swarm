@@ -18,6 +18,8 @@ For classes not in the map, Tavily remains the path.
 
 from __future__ import annotations
 
+import re
+
 _HT = "https://raw.githubusercontent.com/HackTricks-wiki/hacktricks/master/src/pentesting-web"
 _PA = "https://raw.githubusercontent.com/swisskyrepo/PayloadsAllTheThings/master"
 
@@ -129,3 +131,24 @@ def sources_for(vuln_class: str) -> list[str]:
     """Canonical reference URLs for a vuln class, or [] if unknown."""
     key = normalize_class(vuln_class)
     return list(CURATED_SOURCES.get(key, [])) if key else []
+
+
+def infer_class(text: str) -> str | None:
+    """Best-effort: detect the vuln class named in free text (a search query).
+
+    Matches canonical keys and aliases as whole words (after collapsing
+    punctuation to spaces), longest-first so ``sql injection`` wins over a
+    stray ``sql`` and ``ssti`` is found inside ``django ssti payload``.
+    """
+    if not text:
+        return None
+    haystack = " " + re.sub(r"[^a-z0-9]+", " ", text.lower()).strip() + " "
+    candidates = sorted(
+        list(CURATED_SOURCES.keys()) + list(_ALIASES.keys()),
+        key=len, reverse=True,
+    )
+    for cand in candidates:
+        needle = " " + re.sub(r"[^a-z0-9]+", " ", cand.lower()).strip() + " "
+        if needle in haystack:
+            return normalize_class(cand)
+    return None

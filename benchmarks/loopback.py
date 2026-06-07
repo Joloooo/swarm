@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 # Pool definition — MUST match benchmarks/setup_loopback_pool.sh.
@@ -65,6 +66,36 @@ def pool_status() -> tuple[int, int]:
     isolation is available. Read-only (no sudo).
     """
     return len(_configured_aliases()), len(POOL)
+
+
+def ensure_pool() -> tuple[int, int]:
+    """Make the lo0 alias pool exist so every benchmark run is IP-isolated.
+
+    Called automatically at the start of every run (single and sequential via
+    the runner; once, in the launcher, for a concurrent fan-out) so isolation
+    is never a manual step. Idempotent and cheap: a no-op when the pool is
+    already present (no sudo). Otherwise it runs :data:`SETUP_SCRIPT` via
+    ``sudo``, which asks for your password once per boot (macOS drops the
+    aliases on reboot). Best-effort: if sudo is declined or unavailable the run
+    still proceeds, falling back to the shared-localhost mapping (with the
+    existing :func:`acquire` warning). Returns :func:`pool_status` afterwards.
+    """
+    present, total = pool_status()
+    if present >= total:
+        return present, total
+    if sys.platform != "darwin" or not SETUP_SCRIPT.exists():
+        # Linux routes 127.0.0.0/8 to lo without aliases; nothing to set up.
+        return present, total
+    print(
+        f"[loopback] setting up target isolation pool ({present}/{total} present) "
+        "— sudo may ask for your password (once per boot)…",
+        file=sys.stderr,
+    )
+    try:
+        subprocess.run(["sudo", "bash", str(SETUP_SCRIPT)], check=False)
+    except (OSError, KeyboardInterrupt):
+        pass
+    return pool_status()
 
 
 def _alive(pid: int) -> bool:

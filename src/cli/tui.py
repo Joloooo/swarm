@@ -95,10 +95,6 @@ def main_loop(args: argparse.Namespace) -> None:
             _show_codex_usage()
             continue
 
-        if action == "__loopback__":
-            _setup_loopback_pool()
-            continue
-
         if action == "xbow":
             picked = _pick_bench()
             if not picked:
@@ -125,8 +121,6 @@ def _run_picker_campaign(run_list: list[str], concurrency: int) -> None:
     terminal becomes the live dashboard until every window finishes. Docker
     is assumed ready — ``main_loop`` bootstraps it before dispatching.
     """
-    if not _confirm_isolation_ready(concurrency):
-        return
     _console.print(
         f"[cyan]Fanning {len(run_list)} benchmark(s) out across {concurrency} "
         f"concurrent Terminal window(s) — this terminal becomes the live "
@@ -168,7 +162,6 @@ def _top_level() -> str | None:
     choices: list[Choice] = [
         Choice("Codex usage (5-hour / weekly) — fetch live", value="__codex_usage__"),
         Choice("xbow benchmark  (run one, a selection, or all — sequential or concurrent)", value="xbow"),
-        Choice("Set up loopback isolation pool (sudo) — needed for concurrent runs", value="__loopback__"),
         Choice("Edit config",                                                 value="config"),
         Choice("Quit",                                                        value="quit"),
     ]
@@ -235,108 +228,6 @@ def _show_codex_usage() -> None:
         input()
     except (EOFError, KeyboardInterrupt):
         pass
-
-
-def _setup_loopback_pool() -> None:
-    """Create/refresh the lo0 alias pool so concurrent benchmarks get isolated IPs.
-
-    macOS drops loopback aliases on reboot, so this must be run once per boot
-    before a concurrent sweep. Without it the runner falls back to the shared
-    ``localhost`` mapping and the agents cross-probe each other's targets — and
-    any host service on localhost (your editor, a local LLM server, …) —
-    silently contaminating the run. Shells out to ``setup_loopback_pool.sh``
-    via ``sudo`` (prompts for your password on this terminal); the status check
-    itself is read-only.
-    """
-    import subprocess
-
-    from benchmarks import loopback
-
-    present, total = loopback.pool_status()
-    _console.print(
-        f"\n[bold]Loopback isolation pool[/bold]: {present}/{total} aliases on "
-        f"lo0 (127.0.0.2 … 127.0.0.{1 + total})."
-    )
-    if present >= total:
-        _console.print(
-            "[green]✓ Fully set up — each concurrent benchmark gets its own IP "
-            "and scans only its target.[/green]"
-        )
-    else:
-        if present:
-            _console.print(f"[yellow]⚠ Only partial ({present}/{total}).[/yellow]")
-        else:
-            _console.print(
-                "[yellow]⚠ Not set up — concurrent benchmarks would all land on "
-                "localhost and cross-probe each other (and host apps).[/yellow]"
-            )
-        if questionary.confirm(
-            f"Set up the pool now? Runs `sudo bash {loopback.SETUP_SCRIPT.name}` "
-            "(asks for your password).",
-            default=True,
-        ).ask():
-            _console.print(f"[dim]$ sudo bash {loopback.SETUP_SCRIPT}[/dim]")
-            try:
-                subprocess.call(["sudo", "bash", str(loopback.SETUP_SCRIPT)])
-            except KeyboardInterrupt:
-                _console.print("\n[dim]Cancelled.[/dim]")
-            present, total = loopback.pool_status()
-            if present >= total:
-                _console.print(f"[green]✓ Done — {present}/{total} aliases up.[/green]")
-            else:
-                _console.print(
-                    f"[red]Pool is {present}/{total} after setup — check the "
-                    "output above (sudo declined / script error?).[/red]"
-                )
-
-    _console.print("[dim][enter] to return to the menu…[/dim]", end=" ")
-    try:
-        input()
-    except (EOFError, KeyboardInterrupt):
-        pass
-
-
-def _confirm_isolation_ready(concurrency: int) -> bool:
-    """Guard a concurrent sweep so it never *silently* runs without IP isolation.
-
-    Each concurrent slice leases its own loopback IP; with fewer than
-    ``concurrency`` aliases present the runs collide on localhost and the
-    agents cross-probe each other's targets. Returns True to proceed.
-    """
-    from benchmarks import loopback
-
-    present, total = loopback.pool_status()
-    if present >= concurrency:
-        return True
-
-    _console.print(
-        f"\n[yellow]⚠ Loopback isolation is {present}/{total}, but you're "
-        f"launching {concurrency} concurrent benchmarks. Without one IP per "
-        f"slice they collide on localhost and cross-probe each other — "
-        f"contaminating the run.[/yellow]"
-    )
-    choice = questionary.select(
-        "How do you want to proceed?",
-        choices=[
-            Choice("Set up the pool now (sudo), then launch", value="setup"),
-            Choice("Launch anyway — un-isolated (results may be contaminated)", value="anyway"),
-            Choice("Cancel — back to menu", value="cancel"),
-        ],
-        use_shortcuts=False,
-        instruction="(↑/↓, enter)",
-    ).ask()
-    if choice == "setup":
-        _setup_loopback_pool()
-        present, _ = loopback.pool_status()
-        if present >= concurrency:
-            return True
-        return bool(
-            questionary.confirm(
-                f"Pool is {present}/{total} (< {concurrency}). Launch anyway?",
-                default=False,
-            ).ask()
-        )
-    return choice == "anyway"
 
 
 # ---------------------------------------------------------------------------

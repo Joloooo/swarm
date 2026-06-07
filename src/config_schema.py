@@ -46,8 +46,6 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "custom_attack_max_iterations": 25,
         "llm_max_tokens": 4096,
         "web_search_max_crawled_chars": 8000,
-        "escalation_enabled": True,
-        "escalation_fork_after_seconds": 600,
     },
     "model": {
         "slug": "gpt-5.5",

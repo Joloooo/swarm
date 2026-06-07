@@ -271,16 +271,6 @@ class SwarmGraphState(TypedDict, total=False):
     # See `_maybe_force_recovery` in src/nodes/planner.py for the rule.
     forced_recoveries: int
 
-    # -- Escalation / dual-planner (src/orchestration/escalation.py) --
-    # When the orchestrator forks a SECOND, independent planner lane
-    # because the first is stuck, lane B carries a divergence persona and
-    # a one-time brief of lane A's leads at fork time. Both are plain
-    # strings rendered into the planner's prompt as a SYSTEM NOTE (see
-    # ``_escalation_note`` in src/nodes/planner.py). They are EMPTY for
-    # the normal solo lane (lane A / non-benchmark runs), so they change
-    # nothing on the common path — the persona only ever steers lane B.
-    planner_persona: str
-    escalation_brief: str
     # Set True ONLY by the planner's iteration-cap path
     # (`PlannerNode.execute` when `planner_iters > MAX_PLANNER_ITERS`).
     # In benchmark mode `route_after_planner` refuses to end the run on a

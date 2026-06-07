@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -457,10 +458,13 @@ _PRIOR_PROBE_SUMMARY_CHARS = 280
 # them all.
 _PRIOR_HISTORY_MAX_TURNS = 12
 
-# Maximum chars of the latest web_search synthesis to inject. Tavily +
-# crawled-content can be ~10KB; cap so the seed HumanMessage stays
-# under ~6KB total regardless of search verbosity.
-_WEB_SEARCH_INJECT_CHARS = 5000
+# Maximum chars of the latest web_search synthesis to inject. The research
+# node now returns payload-rich, deduped technique guidance drawn from curated
+# authoritative sources (HackTricks / PayloadsAllTheThings) — the verbatim
+# payloads are the whole point, so the old 5000 cap truncated exactly what the
+# worker needs. Raised to keep them; the synthesis is one concentrated block,
+# not a tool-call trace. Tunable via env.
+_WEB_SEARCH_INJECT_CHARS = int(os.getenv("SWARM_WEB_SEARCH_INJECT_CHARS", "16000"))
 
 
 def _summarize_tool_call_pair(tool_call: dict, tool_msg: ToolMessage | None) -> str:

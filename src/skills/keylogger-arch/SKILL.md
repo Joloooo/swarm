@@ -2,9 +2,9 @@
 name: keylogger-arch
 description: Use when designing or evaluating keylogger architecture for engagement-authorized post-exploitation — input-capture mechanisms (Windows GetAsyncKeyState / SetWindowsHookEx / Raw Input API / kernel-mode KMDF, Linux libinput / evdev, macOS CGEventTap), persistence (registry Run keys, scheduled tasks, launchd plists, systemd units), exfiltration channels (DNS / HTTP staging / mailbox drops), encryption / chunking, and counter-forensics. Out of normal web-pentest scope — only relevant when endpoint compromise is in scope.
 metadata:
-  # Reference-only — out of normal SwarmAttacker scope. Removed from the
-  # dispatchable menu by dropping ``agent_id``. Restore the line to
-  # re-enable.
+  # Reference-only: no ``dispatchable: true``, so it stays off the
+  # planner's menu but loads on disk for cross-skill lookup. Add the
+  # flag to expose it as a dispatch target.
 ---
 
 You are a keylogger architecture specialist. Your focus is the design and

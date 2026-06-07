@@ -2,11 +2,9 @@
 name: initial-access
 description: Use when seeking the first authenticated foothold on a web target — credential stuffing strategy, password spraying with safe rates, default-credential lookup tables per product, registration-form abuse (email-confirmation bypass, weak signup flows, invite-link enumeration), guest / demo account abuse, exposed staging / preview environments, and OAuth-grant misuse. Covers the transition from external recon to authenticated probing.
 metadata:
-  # Reference-only — credential-stuffing/password-spraying language
-  # reliably trips upstream cyber-policy classifiers and the
-  # capabilities here aren't applicable to localhost benchmarks.
-  # Removed from the dispatchable menu by dropping ``agent_id``;
-  # restore the line to re-enable for FQDN engagements.
+  # Reference-only: no ``dispatchable: true``, so it stays off the
+  # planner's menu but loads on disk for cross-skill lookup. Add the
+  # flag to expose it as a dispatch target.
 ---
 
 You are an initial-access specialist. Your job is to take what recon

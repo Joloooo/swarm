@@ -128,11 +128,13 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
                 "is empty; terminating."
             )
             return _TERMINATE
+        research_query = (state.get("research_query") or "").strip()
         logger.info(
-            "route_after_planner: fanning out %d parallel executor(s).",
+            "route_after_planner: fanning out %d parallel executor(s)%s.",
             len(pending),
+            " + 1 web_search" if research_query else "",
         )
-        return [
+        sends = [
             Send(
                 "executor",
                 {
@@ -154,6 +156,14 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
             )
             for item in pending
         ]
+        # Concurrent research branch: when the planner attached a research
+        # query to this attack, fan out a web_search alongside the executors.
+        # It joins the same summarizer fan-in (web_search → summarizer), so
+        # all branches rejoin the planner together — executors never block
+        # waiting on the search, and the search is ready by the next turn.
+        if research_query:
+            sends.append(Send("web_search", {**state, "search_query": research_query}))
+        return sends
 
     if action == "submit_flag":
         attempts = list(state.get("submission_attempts") or [])

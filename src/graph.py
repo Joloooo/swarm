@@ -368,8 +368,6 @@ def build_graph():
     # ``src/state.py``) and produces 4 reports in parallel via
     # ``asyncio.gather``. See ``src/nodes/summarizer.py``.
     #
-    # ``web_search`` skips the summarizer because its output is already
-    # a single concentrated synthesis, not a tool-call trace.
     graph.add_edge("recon", "summarizer")
     graph.add_edge("executor", "summarizer")
 
@@ -404,7 +402,15 @@ def build_graph():
             END: END,
         },
     )
-    graph.add_edge("web_search", "planner")
+    # ``web_search`` routes to the summarizer (not straight to the planner)
+    # so that when it is fanned out ALONGSIDE executors (planner attached a
+    # research_query to an attack), it joins the same fan-in barrier and all
+    # branches rejoin the planner together — the executors never trigger the
+    # planner while the search is still running, and vice versa. Standalone
+    # web_search is unaffected: the summarizer no-ops on empty
+    # ``pending_summary_inputs`` and yields straight to the planner, and the
+    # web_search AIMessage is already in ``state["messages"]`` either way.
+    graph.add_edge("web_search", "summarizer")
 
     graph.add_edge("report", END)
 

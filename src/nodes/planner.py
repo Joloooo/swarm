@@ -333,12 +333,20 @@ After each worker, look at what came back:
                 A SUSPECTED finding is incomplete work and should not
                 end the run on its own.
 
-                  Your DEFAULT next action in this case is "web_search"
-                  — not re-dispatch, not report. The worker has run out
-                  of obvious things to try; external knowledge about how
-                  this specific filter or defense is typically bypassed
-                  is the missing ingredient. Build the search query from
-                  the finding: "<vulnerability category> bypass
+                  Your DEFAULT response in this case is to RESEARCH —
+                  the worker has run out of obvious things to try, and
+                  external knowledge about how this specific filter or
+                  defense is bypassed is the missing ingredient.
+
+                  PREFER researching IN PARALLEL: pick action="attack",
+                  keep dispatching the worker(s) you still want probing,
+                  AND add a "research_query" field to the SAME decision.
+                  The web_search then runs as one more branch ALONGSIDE
+                  the executors — they do not wait for it — and its
+                  results are in your context by your next turn. Use a
+                  standalone action="web_search" only when you have
+                  nothing useful to run in parallel. Build the query
+                  from the finding: "<vulnerability category> bypass
                   <observed filter behavior>". Examples:
                     - SQLi finding, every OR-bearing payload returns 500
                       → "SQL injection bypass case-sensitive OR keyword
@@ -352,14 +360,19 @@ After each worker, look at what came back:
                       → "authorization bypass JSON parameter pollution
                       duplicate keys"
 
-                  After the web_search returns, your NEXT turn should
-                  re-dispatch the relevant skill via "configs" OR write
-                  a focused "tasks" entry, baking the bypass guidance
-                  from the search result directly into the task
-                  description so the worker tries the specific
-                  techniques surfaced. The "request-builder" skill is a
-                  good pick when you want a single fresh input proposed
-                  from the observed input/output pattern.
+                  Once the research is back, attack from MULTIPLE
+                  ANGLES: dispatch one worker per MAJOR technique it
+                  surfaced (e.g. blind/time-based vs. error-based vs.
+                  filter-bypass), baking that technique's specific
+                  payloads into each worker's "tasks" entry. Group
+                  angles in the same category into one worker; spawn
+                  separate workers for genuinely distinct approaches so
+                  they explore concurrently instead of one worker
+                  grinding a single family. The "request-builder" skill
+                  is a good pick for a single fresh input proposed from
+                  the observed input/output pattern. Do not re-research
+                  a class you already searched this run — its results
+                  are already in your context above.
 
                   Only route to "report" once ONE of these is true:
                     (a) you have the expected flag or concrete impact,
@@ -459,6 +472,11 @@ Rules:
 - "mode" is "analyze" (default) or "full". "full" lets configs that
   define an exploit phase run it after analyze.
 - "search_query" is required iff action=="web_search".
+- "research_query" is an OPTIONAL field on an action=="attack" decision.
+  When present, a web_search for it runs CONCURRENTLY with the executor
+  fan-out (it does not consume a separate turn and the executors do not
+  wait). Use it when a confirmed-but-unconverted finding needs external
+  bypass knowledge while you keep probing.
 - Carry "target_url" / "target_scope" forward on every subsequent turn.
 - "reasoning" is REQUIRED on every turn. One to two sentences
   explaining the evidence that led you to this decision and what
@@ -1947,6 +1965,15 @@ class PlannerNode(BaseNode):
                 mode = decision.get("mode") or state.get("mode") or "analyze"
                 update["mode"] = mode
                 update["pending_dispatch"] = pending
+                # Optional concurrent research: when the planner attaches a
+                # "research_query" to an attack, the routing edge fans out a
+                # web_search branch ALONGSIDE the executors (it joins the same
+                # summarizer fan-in), so research runs in parallel instead of
+                # stealing a serial turn. Always written (empty when absent)
+                # so a prior turn's value never leaks into this one.
+                update["research_query"] = (
+                    decision.get("research_query") or ""
+                ).strip()
         elif action == "web_search":
             query = (decision.get("search_query") or "").strip()
             if query:

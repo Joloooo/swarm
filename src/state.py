@@ -265,6 +265,13 @@ class SwarmGraphState(TypedDict, total=False):
     # Query string the planner asked the web_search node to run. Set
     # only when next_action == "web_search"; read by web_search_node.
     search_query: str
+    # Optional research query the planner attaches to an ``attack`` turn so
+    # the web_search node runs CONCURRENTLY with the executor fan-out (one
+    # extra parallel branch), instead of stealing a whole serial turn while
+    # the executors idle. Read by ``route_after_planner``'s attack branch;
+    # overwritten (or cleared to "") on every attack turn so it never goes
+    # stale. Empty/absent => no parallel research this turn.
+    research_query: str
     # Counter for the planner's `_maybe_force_recovery` safety net —
     # how many times it has overridden a `report` decision with a
     # forced `web_search` this run. Capped at 1 to prevent loops.

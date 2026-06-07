@@ -876,12 +876,19 @@ def _impact_demonstrated(finding) -> bool:
     return any(kw in text for kw in _IMPACT_KEYWORDS)
 
 
-def _is_high_or_medium(finding) -> bool:
+def _severity_str(finding) -> str:
+    """Lowercase severity value (``"high"``, ``"medium"`` …) for a Finding
+    dataclass or a dict, or ``""`` when absent. Centralises the
+    ``Severity`` str-enum ``.value`` extraction the finding helpers share.
+    """
     sev = getattr(finding, "severity", None)
     if sev is None and isinstance(finding, dict):
         sev = finding.get("severity")
-    sev_str = str(getattr(sev, "value", sev) or "").lower()
-    return sev_str in {"high", "medium"}
+    return str(getattr(sev, "value", sev) or "").lower()
+
+
+def _is_high_or_medium(finding) -> bool:
+    return _severity_str(finding) in {"high", "medium"}
 
 
 def _finding_attr(finding, name: str, default: str = "") -> str:
@@ -1145,6 +1152,142 @@ def _colocated_service_directive(state: SwarmGraphState) -> str | None:
         "store is a VIEW onto it, not the store — if repeated probes "
         "against that proxy stall, target the service's own base URL "
         "instead."
+    )
+    return "\n".join(lines)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Unexploited-lead research directive
+#
+# Campaign analysis (06-06 / 06-07 SSTI + CVE sweeps) surfaced a recurring
+# failure shape: an attack worker CONFIRMS a real vulnerability — LFI in
+# ``post.php?id`` (XBEN-061), Django SSTI in a reflected field (XBEN-056),
+# a Canto RFI CVE (XBEN-034), an exposed S3 backup (XBEN-084), a Werkzeug
+# debugger leak (XBEN-089) — and the swarm then spends the rest of the budget
+# on manual exploitation attempts it lacks the technique for, reaching
+# ``web_search`` (if at all) only minutes before the 1200 s timeout. In
+# XBEN-023 the deciding introspection technique landed 3 seconds before the
+# clock ran out; XBEN-061 and XBEN-089 never searched at all. Two empirical
+# facts shaped the gate below:
+#   * The discriminator is the finding's **category**, NOT its severity:
+#     the recon-ports host-noise findings ("Co-located service on port …")
+#     and the genuine LFI / IDOR / SSTI leads were ALL tagged MEDIUM in the
+#     06-06 sweep, so a severity gate cannot tell them apart — only the
+#     ``exposed-service`` category marks the noise.
+#   * Naming the vuln class in the search query is what makes the web_search
+#     node's curated crawler (``infer_class`` → ``sources_for``) fetch the
+#     payload-rich HackTricks / PayloadsAllTheThings pages, so the nudge
+#     instructs the planner to do exactly that.
+# ────────────────────────────────────────────────────────────────────────────
+
+# Categories that are NOT a researchable vulnerability class. We exclude
+# rather than allow-list so a novel class a worker invents (``graphql-
+# injection`` …) still qualifies. ``exposed-service`` is recon-ports
+# co-located host noise / second-port services (handled by
+# ``_colocated_service_directive``); ``""`` / ``unknown`` carry no class
+# for the crawler to research.
+_NON_RESEARCHABLE_CATEGORIES = {"", "exposed-service", "unknown"}
+
+
+def _researchable_lead(finding) -> bool:
+    """True if ``finding`` is a confirmed real-vulnerability lead whose
+    exploitation an external technique lookup could plausibly unblock.
+
+    Three gates, in the order they reject cheapest-first:
+
+    * **category** is a genuine vuln class, not recon-ports host noise
+      (the discriminator — see module note above).
+    * **severity** is CRITICAL / HIGH / MEDIUM — LOW/INFO leads were
+      trivia in the sweeps, never a flag path.
+    * **source** is an attack worker, not ``owasp-recon*`` — a recon
+      finding is a surface to engage first, not a stuck exploit yet.
+    """
+    cat = (_finding_attr(finding, "category") or "").lower()
+    if cat in _NON_RESEARCHABLE_CATEGORIES:
+        return False
+    if _severity_str(finding) not in {"critical", "high", "medium"}:
+        return False
+    if (_finding_attr(finding, "agent_id") or "").lower().startswith("owasp-recon"):
+        return False
+    return True
+
+
+def _unexploited_lead_directive(state: SwarmGraphState) -> str | None:
+    """Nudge the planner to research a confirmed-but-unexploited finding.
+
+    Whenever a :func:`_researchable_lead` exists and no ``web_search`` this
+    run has yet covered its class, surface a SYSTEM NOTE telling the planner
+    to spend ONE ``web_search`` on that class's exploitation technique /
+    payloads before further manual attempts. It is a **soft** nudge (the
+    planner still decides, and the note tells it to skip when the path is
+    already obvious) and **self-suppresses** once the class is researched,
+    so it cannot loop. Mirrors the self-suppressing structure of
+    :func:`_colocated_service_directive`.
+
+    Returns ``None`` when a flag is already captured (the run is ending) or
+    there is no un-researched researchable lead.
+    """
+    if (state.get("captured_flag") or "").strip():
+        return None
+    findings = list(state.get("findings") or [])
+    if not findings:
+        return None
+    leads = [f for f in findings if _researchable_lead(f)]
+    if not leads:
+        return None
+
+    # Classes a prior web_search this run already covered. The web_search
+    # node posts its answer back as a ``[Web Search] …`` AIMessage; if the
+    # category token appears in one, its research has landed and we stop
+    # nudging for it (pressure to research, not an endless nag).
+    searched_blobs: list[str] = []
+    for msg in state.get("messages") or []:
+        content = getattr(msg, "content", None)
+        if isinstance(content, str) and "[Web Search]" in content:
+            searched_blobs.append(content.lower())
+
+    def _researched(cat: str) -> bool:
+        return any(cat in blob for blob in searched_blobs)
+
+    # Keep one lead per un-researched class — the highest-severity, and on
+    # ties the most recently filed (findings is append-ordered).
+    _SEV_RANK = {"critical": 0, "high": 1, "medium": 2}
+    pending: dict[str, tuple[int, Any]] = {}
+    for f in leads:
+        cat = (_finding_attr(f, "category") or "").lower()
+        if _researched(cat):
+            continue
+        rank = _SEV_RANK.get(_severity_str(f), 3)
+        prev = pending.get(cat)
+        if prev is None or rank <= prev[0]:
+            pending[cat] = (rank, f)
+    if not pending:
+        return None
+
+    lines = [
+        "[SYSTEM NOTE] One or more vulnerabilities have been CONFIRMED but "
+        "not yet turned into the flag, and no web_search this run has "
+        "researched their class. Confirming a vulnerability is not the same "
+        "as knowing the exact payload that exploits it — that technique "
+        "often lives in external references (HackTricks, "
+        "PayloadsAllTheThings, CVE PoCs), not in your own memory:"
+    ]
+    for cat, (_, f) in list(pending.items())[:4]:
+        title = (_finding_attr(f, "title") or cat)[:90].strip()
+        url = (_finding_attr(f, "url") or "").strip()
+        loc = f" — {url}" if url else ""
+        lines.append(f"  • {cat}: {title}{loc}")
+    lines.append(
+        "  • Rule: if you do NOT already know the exact payload, prefer ONE "
+        "action=\"web_search\" whose \"search_query\" NAMES the vulnerability "
+        "class plus the engine/parameter (e.g. \"Django template injection "
+        "SSTI bypass read settings payload\", \"PHP LFI log poisoning RCE "
+        "technique\") BEFORE spending more turns on manual trial-and-error — "
+        "naming the class makes the curated reference crawler fetch the "
+        "payload-rich pages. Then apply the concrete payloads on your next "
+        "attack turn. If the exploitation path is already obvious, or you "
+        "have tried the documented technique and it failed, skip the search "
+        "and proceed."
     )
     return "\n".join(lines)
 
@@ -1681,6 +1824,24 @@ class PlannerNode(BaseNode):
                 service_note.replace("\n", " | ")[:300],
             )
             prior_messages.append(HumanMessage(content=service_note))
+
+        # Unexploited-lead research directive. When an attack worker has
+        # CONFIRMED a real vulnerability (category is a vuln class, not
+        # recon-ports host noise) that no web_search this run has yet
+        # researched, nudge the planner to spend one web_search on that
+        # class's exploitation technique before more manual attempts. The
+        # 06-06/06-07 sweeps showed real leads (LFI, SSTI, CVE RFI, Werkzeug
+        # debugger) confirmed early but researched late or never; this
+        # surfaces the lead the moment it lands and self-suppresses once the
+        # class is researched. Category — not severity — is the gate, because
+        # host-noise and real leads were both tagged MEDIUM.
+        lead_note = _unexploited_lead_directive(state)
+        if lead_note:
+            self.log.info(
+                "unexploited-lead research directive: %s",
+                lead_note.replace("\n", " | ")[:300],
+            )
+            prior_messages.append(HumanMessage(content=lead_note))
 
         # Surface the prior turn's relevant_summary so the planner can
         # see its own previous notes and rewrite them on this turn. The

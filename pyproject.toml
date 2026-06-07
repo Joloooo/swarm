@@ -27,6 +27,8 @@ dependencies = [
     "questionary>=2.0",
     "rich>=13.0",
     "tomlkit>=0.13",
+    "markdownify>=1.2.2",
+    "beautifulsoup4>=4.15.0",
 ]
 
 [project.optional-dependencies]

@@ -49,6 +49,12 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "slug": "gpt-5.5",
         "reasoning_effort": "low",
         "reasoning_summary": "detailed",
+        # Web-search synthesis is a relay/summarize task (reproduce payloads
+        # from crawled markdown) — it doesn't need the flagship. A cheaper,
+        # faster, more refusal-resistant model (gpt-5.4 @ low) cuts the ~55s
+        # synthesis that dominates each web_search call.
+        "web_search_synth_model": "gpt-5.4",
+        "web_search_synth_reasoning_effort": "low",
     },
     "verbosity": {
         "mode": "compact",
@@ -68,6 +74,13 @@ CHOICES: dict[tuple[str, str], tuple[str, ...]] = {
     ),
     ("model", "reasoning_summary"): (
         "auto", "concise", "detailed", "none",
+    ),
+    ("model", "web_search_synth_model"): (
+        "gpt-5.5", "gpt-5.4", "gpt-5.4-mini",
+        "gpt-5.3-codex", "gpt-5.2", "codex-auto-review",
+    ),
+    ("model", "web_search_synth_reasoning_effort"): (
+        "none", "minimal", "low", "medium", "high", "xhigh",
     ),
     ("verbosity", "mode"): (
         "silent", "compact", "verbose",

@@ -45,6 +45,8 @@ from src.config_schema import toml_path as path  # noqa: F401 — re-export as c
 MODEL_CHOICES: tuple[str, ...] = CHOICES[("model", "slug")]
 REASONING_EFFORT_CHOICES: tuple[str, ...] = CHOICES[("model", "reasoning_effort")]
 REASONING_SUMMARY_CHOICES: tuple[str, ...] = CHOICES[("model", "reasoning_summary")]
+WEB_SYNTH_MODEL_CHOICES: tuple[str, ...] = CHOICES[("model", "web_search_synth_model")]
+WEB_SYNTH_EFFORT_CHOICES: tuple[str, ...] = CHOICES[("model", "web_search_synth_reasoning_effort")]
 VERBOSITY_CHOICES: tuple[str, ...] = CHOICES[("verbosity", "mode")]
 
 _HEADER_COMMENTS = (

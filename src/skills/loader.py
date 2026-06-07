@@ -83,9 +83,11 @@ def _build_config(skill_name: str, meta: dict, body: str) -> tuple[AgentConfig, 
     """Construct an AgentConfig from parsed SKILL.md content.
 
     Returns ``(config, description, dispatchable)``. A skill is
-    "dispatchable" when its frontmatter sets ``metadata.agent_id`` —
-    skills without that (e.g. the nmap reference) are loaded but not
-    offered to the planner as attack targets.
+    "dispatchable" when its frontmatter sets ``metadata.dispatchable: true``
+    — reference skills (e.g. the nmap notes, vuln-classes) omit it, so they
+    are loaded on disk but not offered to the planner as targets. Identity
+    (label, dispatch key, report group) all derive from the skill's folder
+    name; budgets come from the global config.
     """
     from src.graph import config
 
@@ -93,13 +95,17 @@ def _build_config(skill_name: str, meta: dict, body: str) -> tuple[AgentConfig, 
     if not isinstance(md, dict):
         md = {}
 
-    tool_names = md.get("tools") or []
+    # Tools default to ``[bash]`` — most skills only need a shell so they omit
+    # the field; specialised skills (sqli, recon, …) list their extra tools.
+    tool_names = md.get("tools") or ["bash"]
     if not isinstance(tool_names, list):
-        tool_names = []
+        tool_names = ["bash"]
     tools = resolve_tools([str(n) for n in tool_names])
 
     description = str(meta.get("description") or "").strip()
-    dispatchable = bool(md.get("agent_id"))
+    # Offered to the planner only when ``dispatchable: true`` is set. The
+    # legacy ``agent_id`` presence is still honoured during the migration.
+    dispatchable = bool(md.get("dispatchable")) or bool(md.get("agent_id"))
 
     # Phase routing — "recon" picks the universal+recon-hint prompt;
     # anything else (default "executor") gets the full executor rule
@@ -113,9 +119,12 @@ def _build_config(skill_name: str, meta: dict, body: str) -> tuple[AgentConfig, 
         phase = "executor"
 
     cfg = AgentConfig(
-        agent_id=str(md.get("agent_id") or f"skill-{skill_name}"),
-        methodology=str(md.get("methodology") or "skill"),
-        config_name=str(md.get("config_name") or skill_name),
+        # Identity is the skill's own folder name — the label, the dispatch
+        # key, and the report grouping all derive from it (no separate
+        # agent_id / config_name / methodology fields in the frontmatter).
+        agent_id=skill_name,
+        methodology="skill",
+        config_name=skill_name,
         system_prompt=body,
         tools=tools,
         max_iterations=config.budgets.worker_max_iterations,

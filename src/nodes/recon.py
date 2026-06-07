@@ -15,6 +15,8 @@ summarizer`` edge); the ``recon`` branch's report becomes the canonical
 planner as ordinary worker reports.
 """
 
+import dataclasses
+
 from langchain_core.messages import AIMessage
 
 from src.nodes.base import BaseNode
@@ -35,6 +37,10 @@ class ReconNode(BaseNode):
                     AIMessage(content=f"ERROR: No recon skill '{config_name}' found.")
                 ],
             }
+
+        # The recon node owns the recon framing: force the recon phase on
+        # whatever skill it runs, so skills no longer carry a ``phase`` field.
+        recon_config = dataclasses.replace(recon_config, phase="recon")
 
         self.log.info("[%s] Starting recon agent", config_name)
         result = await self.run_skill_agent(recon_config, state)

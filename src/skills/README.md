@@ -28,9 +28,9 @@ either derived from the folder name or comes from global config.
 What is **not** in the frontmatter (and why):
 
 - **`agent_id` / `config_name` / `methodology`** — derived from the folder name.
-- **`max_iterations` / `max_tool_calls`** — a single global knob,
-  `budgets.worker_max_iterations` in `swarm-config.toml`, applies to every
-  worker.
+- **`max_iterations`** — a single global knob, `budgets.worker_max_iterations`
+  in `swarm-config.toml`, applies to every worker. (`max_tool_calls` is gone —
+  workers are bounded only by iterations.)
 - **`phase`** — the recon node sets the recon framing on whatever it runs; the
   executor node is the default. Skills don't declare it.
 

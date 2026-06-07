@@ -31,6 +31,13 @@ POOL: tuple[str, ...] = tuple(f"{_BASE}.{i}" for i in range(_START, _START + _CO
 
 _LEASE_DIR = Path(__file__).resolve().parent / ".loopback_leases"
 
+# The companion script that actually creates the lo0 aliases this module
+# leases (``ifconfig lo0 alias 127.0.0.X``). macOS drops them on reboot, so it
+# must be re-run once per boot; the ``swarm`` TUI exposes it as a menu action
+# and checks :func:`pool_status` before a concurrent sweep, so a sweep never
+# silently loses isolation and collides on the shared localhost.
+SETUP_SCRIPT = Path(__file__).resolve().parent / "setup_loopback_pool.sh"
+
 
 def _configured_aliases() -> set[str]:
     """Pool IPs actually present on ``lo0`` — i.e. the setup script was run.
@@ -46,6 +53,18 @@ def _configured_aliases() -> set[str]:
         return set()
     present = set(re.findall(r"inet (127\.0\.0\.\d+)", out))
     return {ip for ip in POOL if ip in present}
+
+
+def pool_status() -> tuple[int, int]:
+    """``(present, total)`` — how many pool IPs are currently aliased on ``lo0``.
+
+    ``present == 0`` means the pool was never set up this boot, so
+    :func:`acquire` returns ``None`` and the runner falls back to the shared
+    ``localhost`` mapping — concurrent benchmarks then collide on one address
+    and their agents cross-probe each other. ``present == total`` means full
+    isolation is available. Read-only (no sudo).
+    """
+    return len(_configured_aliases()), len(POOL)
 
 
 def _alive(pid: int) -> bool:

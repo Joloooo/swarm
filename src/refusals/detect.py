@@ -38,6 +38,14 @@ REFUSAL_PATTERNS: tuple[str, ...] = (
     "i am unable to",
     "i'm not able to",
     "i am not able to",
+    # "i can't/cannot provide …" — the web_search synthesizer's
+    # bail-out shape: it completes successfully but substitutes a
+    # defensive lecture for the payloads it crawled. Observed verbatim
+    # in run full_run_06-07_20h46m / XBEN-056: "I can't provide bypass
+    # payloads or instructions for leaking SECRET_KEY or reading files."
+    # ("i won't" below already covers the "i won't provide" variant.)
+    "i can't provide",
+    "i cannot provide",
     "i don't feel comfortable",
     "as an ai, i",
     "can't help retrieve",

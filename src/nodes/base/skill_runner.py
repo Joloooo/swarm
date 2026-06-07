@@ -90,8 +90,7 @@ class AgentConfig:
     # Tools (LangChain tool instances, resolved from SKILL.md tool names)
     tools: list[BaseTool] = field(default_factory=list)
 
-    # Budget / loop detection
-    max_tool_calls: int = 50
+    # Iteration budget (the only worker cap; one global knob feeds it)
     max_iterations: int = 30
 
     # Prompt assembly opt-out. When True, ``_build_system_message``

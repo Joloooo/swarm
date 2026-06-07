@@ -106,8 +106,8 @@ first, more-specific first.
 
 ## Rules
 
-- **Reference only.** Do not call this skill as an attack agent. It has no
-  `agent_id`, no `tools`, no `max_tool_calls`. Other skills *consult* it.
+- **Reference only.** Do not call this skill as a test agent. It is not
+  `dispatchable` and declares no `tools`. Other skills *consult* it.
 - **One class per finding.** When a symptom plausibly fits two classes (e.g.
   "user input ends up in a system call" → command-injection vs SSTI),
   dispatch the cheaper / more specific skill first. Only escalate if the

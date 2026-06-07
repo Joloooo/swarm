@@ -42,7 +42,6 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "budgets": {
         "planner_max_iters": 50,
         "worker_max_iterations": 40,
-        "custom_attack_max_tool_calls": 40,
         "llm_max_tokens": 4096,
         "web_search_max_crawled_chars": 8000,
     },

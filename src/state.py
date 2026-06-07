@@ -459,7 +459,3 @@ class AgentState(TypedDict, total=False):
     # Stealth awareness (read from parent)
     waf_detected: bool
     stealth_level: int
-
-    # Loop detection
-    tool_call_count: int
-    max_tool_calls: int

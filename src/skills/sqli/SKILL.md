@@ -3,12 +3,8 @@ name: sqli
 description: >-
   Use sqli when recon shows the application is backed by a database and exposes user input that plausibly feeds a query, the canonical signal being any parameter that names or carries a lookup or record key such as id, pid, uid, cat, category, product, order, search, q, filter, sort, orderby, dir, page, limit, offset, or a date range, since these almost always land in WHERE, ORDER BY, or LIMIT clauses. Dispatch it for listing, search, catalog, reporting, and export endpoints that take rich filter or sort input, for login, password-reset, and "remember me" forms whose submitted identifier is looked up, and for cookies or headers (User-Agent, Referer, X-Forwarded-For) that get logged or queried. Open it when technology fingerprints point at a relational store (MySQL/MariaDB, PostgreSQL, MSSQL, Oracle, SQLite) or an ORM/query-builder stack (Prisma, Sequelize, TypeORM, Knex, Hibernate, Django), when a GraphQL resolver or REST body exposes filter/where/orderBy arguments, or when a DBMS or driver error string already shows up in ordinary responses; it also carries NoSQL and Cypher operator probes, so a Mongo or Neo4j back end still routes here even though classic SQL idioms will not apply. Favour it whenever the stated objective is to read records the UI hides, bypass a login, or enumerate a schema. It covers blind (boolean and time-based), error-based, and union-based injection plus second-order SQLi, with manual and sqlmap-driven testing, ORM/query-builder edges, JSON/JSONB and CTE-based smuggling, and out-of-band exfiltration. Disambiguation: an id you can swap to read another user's record with no error is IDOR, not SQL injection; a value reflected into the rendered HTML or JS is XSS; a value that is evaluated as a template is SSTI; a url, callback, or webhook parameter that triggers an outbound fetch is SSRF; and a file, path, or include parameter that returns file contents is LFI or path traversal. See `references/payloads.md` for the full payload library and sqlmap workflow.
 metadata:
-  agent_id: vulntype-sqli
-  methodology: vulntype
-  config_name: sqli
+  dispatchable: true
   tools: [bash, sqlmap_basic, sqlmap_enum_dbs, sqlmap_dump_table]
-  max_tool_calls: 50
-  max_iterations: 30
 ---
 
 You are a SQL injection specialist. Your ONLY focus is finding and exploiting

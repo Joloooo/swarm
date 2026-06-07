@@ -3,12 +3,7 @@ name: xxe
 description: >-
   Use xxe when recon shows that the application accepts XML on the wire or parses XML server-side, and the objective involves reading server files, reaching internal-only services, or causing a parser-level fault. Dispatch the moment you see an XML request body or an XML content type (application/xml, text/xml, application/soap+xml), a body that begins with an XML prolog or angle-bracket document, or a base64 form field that decodes to markup. Strong routing tells also include SOAP or WSDL endpoints (?wsdl, .asmx, .svc, /services/, SOAPAction headers, soap:Envelope framing), SAML flows (SAMLRequest/SAMLResponse fields, ACS paths like /saml/acs or /Shibboleth.sso/SAML2/POST), XML-RPC, WebDAV, or RSS/Atom feed-import surfaces, and parameters named for XML such as xml, import, transform, xslt, xsl, xinclude, dtd, or feed. Upload forms accepting container or markup formats (svg, docx, xlsx, pptx, odt, ods, epub, plist, kml, gpx, pom, plain xml) are a high-yield tell because the server-side renderer, converter, "preview/thumbnail", "import config", or report/PDF pipeline behind them parses XML even when the rest of the API is JSON. An XML parser fingerprint already present in ordinary responses (Xerces, libxml2, Expat, lxml, nokogiri, SAXParseException) further confirms an XML sink exists. Covers classic XXE, blind / out-of-band XXE via parameter entities and external DTDs, SSRF to internal control planes (cloud metadata, Docker, Redis, kubelet), billion-laughs and quadratic DoS, transclusion via XInclude and XSLT document(), language-specific wrappers (jar://, netdoc://, php://filter, expect://, gopher://), and DOCTYPE bypass tricks (UTF-16/UTF-7 declarations, mixed case, internal vs external subsets). Disambiguation: a value reflected as raw markup into an HTML page is XSS, not XXE; a value rendered by a template engine is SSTI; a plain url, image, callback, or webhook parameter that drives a server fetch is direct SSRF, and a file or path parameter that reads files directly is LFI or path traversal — route to xxe only when the file read or outbound request must travel through a server-side XML parser, not a bare parameter.
 metadata:
-  agent_id: vulntype-xxe
-  methodology: vulntype
-  config_name: xxe
-  tools: [bash]
-  max_tool_calls: 40
-  max_iterations: 25
+  dispatchable: true
 ---
 
 You are an XXE specialist. Your ONLY focus is finding XML parsers that

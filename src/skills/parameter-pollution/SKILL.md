@@ -3,12 +3,7 @@ name: parameter-pollution
 description: >-
   Use parameter-pollution when recon shows two or more parsers in the request path that could disagree about which copy of a duplicated input wins — that is, when a perimeter layer fingerprints in front of a separate backend (for example a CDN, WAF, or API-gateway banner such as Server: cloudflare, cf-ray, an x-amzn or apigw request-id header, Via:, or a Kong/NGINX/ALB marker) sitting ahead of an identifiable framework, since the security check and the business logic then run in different places. Also dispatch when recon exposes a security-critical input that some edge layer is likely to validate while a deeper layer consumes it: an allowlist-checked URL or redirect parameter (url, redirect_uri, next, return), an object-id parameter on an endpoint where authorization plausibly happens at a gateway, a role/permission/flag field, a token or state value in an OAuth/CSRF/SAML flow, a form with hidden or protected fields suggesting mass-assignment surface, or a /graphql endpoint with per-operation rate limits or quotas. The objective phrased as bypassing a filter, reaching an input the perimeter blocks, or acting on a value the edge thinks it authorized also routes here. Covers HTTP Parameter Pollution (HPP) and JSON / form parser-precedence differentials — duplicate query / body / header parameters, scalar-vs-array and mixed-notation shape attacks, JSON duplicate keys, framework-specific precedence (PHP last-wins, ASP.NET concatenation, Express last-wins, Django last-wins, Spring first-wins), and duplicate Transfer-Encoding / Content-Length request smuggling. Disambiguation: if a single value reflected into HTML executes, that is XSS; if a single value evaluated as a template renders, that is SSTI; if swapping one id to read another user's record needs no edge-versus-backend disagreement, that is plain IDOR not pollution; if simply adding one extra field sticks with no duplicate or precedence trick, that is mass assignment — parameter-pollution is specifically when making two parsers disagree about a duplicated or reshaped input is the mechanism being tested.
 metadata:
-  agent_id: vulntype-parameter-pollution
-  methodology: vulntype
-  config_name: parameter-pollution
-  tools: [bash]
-  max_tool_calls: 40
-  max_iterations: 25
+  dispatchable: true
 ---
 
 You are an HTTP Parameter Pollution (HPP) specialist. Your ONLY focus is

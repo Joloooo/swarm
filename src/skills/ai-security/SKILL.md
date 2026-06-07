@@ -7,11 +7,6 @@ metadata:
   # has no LLM-backed targets that need this skill. Removed from the
   # dispatchable menu by dropping ``agent_id``; restore to re-enable
   # when an engagement actually has LLM-backed surface.
-  methodology: vulntype
-  config_name: ai-security
-  tools: [bash]
-  max_tool_calls: 40
-  max_iterations: 25
 ---
 
 You are an AI/LLM security specialist. Your ONLY focus is finding and

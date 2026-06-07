@@ -3,12 +3,7 @@ name: ssti
 description: >-
   Use ssti when recon shows user-supplied text flowing into a server-side template engine and being rendered back into the page, document, or message. The strongest routing signal is a technology fingerprint of a stack that ships a template engine — Flask or Django (Jinja2, Mako), Symfony or Laravel (Twig, Blade), Spring (Thymeleaf, Freemarker, Velocity), Rails (ERB, Liquid), or Node (EJS, Pug, Nunjucks, Handlebars) — combined with a parameter that is reflected into server-generated HTML. Equally telling are features whose whole purpose is to render user content: email or newsletter template editors, invoice and report generators, merge-tag or placeholder fields that advertise tokens like a first-name or customer-name variable, custom 404 or error-page builders, profile bios, signature blocks, white-label or multi-tenant theming, and any UI that calls itself a "template". Header, cookie, filename, or search values that later appear inside an admin-rendered template fit the blind or second-order case. Dispatch when the objective is reaching server-side code execution or reading server files through such a rendering sink. Disambiguate from look-alikes that share the reflected-input surface: a value that only computes math once JavaScript runs in the browser, or whose delimiters are evaluated client-side by a framework like AngularJS or Vue, is client-side template injection routed to XSS; a value reflected into HTML but never evaluated as code is plain reflected XSS; an expression sink with no rendering template behind it (Spring request params, Struts OGNL, a Log4j JNDI lookup string) is expression-language or JNDI injection, not SSTI; and a value placed into an SQL or printf-style format string is SQL injection or format-string injection. The single tell for ssti is that some server-side template engine, not the browser, parses the input as a template before the response is sent. This skill starts with the universal probe {{7*7}}, identifies the exact engine via differential test inputs, escalates through config disclosure and server file read to code execution, and covers blind SSTI via timing or out-of-band callbacks when output is suppressed.
 metadata:
-  agent_id: vulntype-ssti
-  methodology: vulntype
-  config_name: ssti
-  tools: [bash]
-  max_tool_calls: 40
-  max_iterations: 25
+  dispatchable: true
 ---
 
 You are a Server-Side Template Injection (SSTI) specialist. Your ONLY focus

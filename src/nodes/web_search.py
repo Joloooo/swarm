@@ -105,42 +105,59 @@ async def _synthesize_with_refusal_retry(
     tier-2 of ``src/refusals/retry.py``. Authorization framing is deliberately
     NOT added — it raises the Codex refusal rate (see system_prompt.py).
     """
-    analysis = await _synthesize(context, LLMConfig())
-
-    answer = getattr(analysis, "answer", None) if analysis else None
-    if not answer or not looks_like_refusal(answer):
-        return analysis
-
-    # Soft refusal on the primary model — retry on the fallback tier.
-    if LLMConfig().provider != Provider.CODEX:
-        return analysis  # model-swap only meaningful for Codex
+    # Hard refusals arrive as a CodexCyberPolicyError EXCEPTION (the API
+    # blocked the call); soft refusals arrive as a successful answer whose
+    # text is a defensive lecture. We handle BOTH here and, when neither the
+    # primary nor the fallback model clears it, return None so the caller
+    # stitches the raw (already-crawled, payload-rich) curated sources rather
+    # than losing them to a "Web search failed" error.
+    from src.llm.codex import CodexCyberPolicyError, CodexInvalidPromptError
+    refusal_excs = (CodexCyberPolicyError, CodexInvalidPromptError)
+    is_codex = LLMConfig().provider == Provider.CODEX
     fb_model = getattr(config.budgets, "fallback_model", "gpt-5.4")
     fb_effort = getattr(config.budgets, "fallback_reasoning_effort", "low")
+
+    # ── Tier 1: primary model ───────────────────────────────────────────
+    try:
+        analysis = await _synthesize(context, LLMConfig())
+        answer = getattr(analysis, "answer", None) if analysis else None
+        if not answer or not looks_like_refusal(answer):
+            return analysis  # success (or empty — caller handles empty)
+        log.warning(
+            "Web search synthesis soft-refused on primary; head: %s",
+            answer[:160],
+        )
+    except refusal_excs as e:
+        log.warning(
+            "Web search synthesis HARD-refused on primary: %s", str(e)[:160]
+        )
+
+    # ── Tier 2: fallback model (Codex only; more permissive classifier) ──
+    if not is_codex:
+        return None
     log.warning(
-        "Web search synthesis soft-refused on primary model; retrying on "
-        "fallback %s @ %s. Refused answer head: %s",
-        fb_model, fb_effort, answer[:160],
+        "Retrying web search synthesis on fallback %s @ %s", fb_model, fb_effort
     )
-    fb_analysis = await _synthesize(
-        context,
-        LLMConfig(
-            provider=Provider.CODEX,
-            model=fb_model,
-            reasoning_effort=fb_effort,
-        ),
+    fb_cfg = LLMConfig(
+        provider=Provider.CODEX, model=fb_model, reasoning_effort=fb_effort
     )
+    try:
+        fb_analysis = await _synthesize(context, fb_cfg)
+    except refusal_excs as e:
+        log.warning(
+            "Web search synthesis fallback also HARD-refused: %s — caller "
+            "will stitch raw curated sources.", str(e)[:160],
+        )
+        return None
     fb_answer = getattr(fb_analysis, "answer", None) if fb_analysis else None
     if fb_answer and not looks_like_refusal(fb_answer):
         log.info("Web search synthesis rescued by fallback model.")
         return fb_analysis
-    # Fallback also refused (or returned nothing usable) — hand back the
-    # primary result so the caller's raw-snippet stitch-up path can still
-    # give the planner the ungated source snippets.
     log.warning(
-        "Web search synthesis fallback did not clear the refusal; "
-        "caller will stitch raw snippets instead."
+        "Fallback did not clear the refusal; caller will stitch raw "
+        "curated sources (which already carry the payloads)."
     )
-    return analysis
+    return None
 
 
 class WebSearchNode(BaseNode):

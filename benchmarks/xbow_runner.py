@@ -1307,6 +1307,12 @@ def main() -> None:
     # blind.
     install_jsonl_log_handler()
 
+    # Every benchmark run is IP-isolated: ensure the loopback alias pool exists
+    # before any target comes up (idempotent; sudo-prompts once per boot, only
+    # when the pool is missing). Without it the run silently falls back to a
+    # shared localhost where the agent cross-probes other targets and host apps.
+    loopback.ensure_pool()
+
     raise SystemExit(asyncio.run(main_async(args)))
 
 

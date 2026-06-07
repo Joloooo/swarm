@@ -332,6 +332,13 @@ def launch_campaign(
             print(f"  {c}")
         return campaign
 
+    # Create the loopback isolation pool ONCE here — in this terminal, before
+    # spawning the windows — so each window's runner finds it ready and they
+    # don't each prompt for sudo. Idempotent: a no-op when the pool is already
+    # up. (Each spawned runner also calls ensure_pool() as a backstop.)
+    from benchmarks import loopback
+    loopback.ensure_pool()
+
     materialize_campaign(campaign, slices, resume=resume)
 
     if tmux:

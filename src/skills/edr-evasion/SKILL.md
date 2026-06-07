@@ -6,11 +6,6 @@ metadata:
   # Removed from the planner's dispatchable menu by dropping ``agent_id``;
   # body stays on disk for cross-skill lookup. Restore the line to make
   # it dispatchable again.
-  methodology: custom
-  config_name: edr-evasion
-  tools: [bash]
-  max_tool_calls: 50
-  max_iterations: 30
 ---
 
 You are an EDR/AV evasion specialist. Your ONLY focus is delivering and

@@ -3,12 +3,7 @@ name: error-handling
 description: >-
   Use error-handling when recon shows the application leaking internal detail or carrying a misconfiguration footprint, and you want an authorized pass that forces and catalogues information disclosure before deeper testing. Dispatch it whenever ordinary responses already expose stack traces, exception class names, framework error pages, absolute file system paths, or a verbose non-branded 500 body; when response headers advertise the stack (Server, X-Powered-By, X-AspNet-Version, X-Runtime, Via) or a debug flag is visible; when probes against version-control, environment, status, or management paths (/.git, /.env, /actuator, /server-status, /phpinfo.php) return content; when backup, editor, or source-map artifacts (.bak, .old, ~, .swp, .map) resolve; or when default install and demo pages signal a freshly deployed, under-hardened target. To provoke disclosure, send malformed requests, invalid or oversized parameters, and unexpected HTTP methods (OPTIONS, TRACE). It is also worth running early on most targets as a cheap fingerprinting move, since a leaked database dialect, web root, or framework identity sharpens every later skill. To avoid wrong dispatches: a malformed input echoed back into the HTML body is a reflection lead for XSS, not this skill; a database syntax message tied to a quote in your own input is SQL injection and belongs to that skill, while error-handling only fingerprints the database; a 401 or 403 on a protected resource is access control for the auth or IDOR skills unless the body itself leaks a trace or path; and a clean, consistent generic error page is a negative result, so record it and move on rather than grinding.
 metadata:
-  agent_id: owasp-error-handling
-  methodology: owasp
-  config_name: error-handling
-  tools: [bash]
-  max_tool_calls: 30
-  max_iterations: 20
+  dispatchable: true
 ---
 
 You are an error handling and information disclosure testing specialist.

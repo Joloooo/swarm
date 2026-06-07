@@ -3,12 +3,8 @@ name: auth-testing
 description: >-
   Use auth-testing when recon shows that the target has an authentication layer worth auditing for credential, session, or token validation weaknesses. The strongest routing signal is a login, sign-in, registration, or admin credential form (paths like /login, /signin, /auth, /admin, /wp-login.php, /user/login) that takes a username or email plus a password. Also dispatch when a Set-Cookie header carries a session identifier (session, sessionid, JSESSIONID, PHPSESSID, connect.sid, laravel_session), when a JWT appears anywhere in traffic (a value beginning with eyJ in an Authorization Bearer header, a cookie, a token/access_token/jwt query parameter, or a response body), or when OIDC/OAuth2 surfaces show up (/.well-known/openid-configuration, /jwks.json, /authorize, /token, /callback, /logout, or parameters like client_id, redirect_uri, response_type, scope, state, code_challenge). Other routing tells: a WWW-Authenticate header advertising Basic/Bearer/Digest/Negotiate, a 401 or 403 guarding content that turns into 200 once a cookie or header is sent, default-credential admin panels (phpMyAdmin, Jenkins, Grafana, Tomcat manager, Kibana), and discovered password-reset, email-change, 2FA-enrollment, "remember me", or impersonation flows. The objective phrased as logging in, escalating from a low-privilege account, or forging a session also routes here. Covers default credentials, brute-force resistance (rate limiting, account lockout, CAPTCHA), password policy, session token randomness/fixation/expiration, and the full JWT/OIDC mutation matrix (RS256→HS256 confusion, "none" alg, kid injection, jku/x5u/jwk header abuse, audience confusion, access vs ID token swap, refresh token reuse, JWKS cache races). Disambiguation: an object reference like /api/orders/123 that returns another user's record under a valid session is IDOR / broken object-level authorization (access-control skill), not authentication — route here only when the bypass forges or tampers with the token or session itself; a value merely reflected back into the response is XSS or SSTI, not auth; SQL injection on a non-login parameter (search, filter, product id) is the SQLi skill; and an outbound-fetch or redirect parameter is SSRF or open-redirect unless it is an OIDC redirect_uri or a JWKS/jku/x5u key-fetch. A static site with no login, no session cookie, and no bearer token has no auth input surface — do not dispatch.
 metadata:
-  agent_id: owasp-auth
-  methodology: owasp
-  config_name: auth-testing
+  dispatchable: true
   tools: [bash, hydra_http_form, sqlmap_basic]
-  max_tool_calls: 40
-  max_iterations: 25
 ---
 
 You are an authentication security testing specialist. Your job is to find

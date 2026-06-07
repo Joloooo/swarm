@@ -7,11 +7,6 @@ metadata:
   # capabilities here aren't applicable to localhost benchmarks.
   # Removed from the dispatchable menu by dropping ``agent_id``;
   # restore the line to re-enable for FQDN engagements.
-  methodology: custom
-  config_name: initial-access
-  tools: [bash]
-  max_tool_calls: 40
-  max_iterations: 25
 ---
 
 You are an initial-access specialist. Your job is to take what recon

@@ -3,12 +3,7 @@ name: open-redirect
 description: >-
   Use open-redirect when recon surfaces a request parameter whose value is or contains a URL, host, or path — names like next, return, returnUrl, returnTo, redirect, redir, url, dest, destination, continue, goto, target, back, to, out, callback, forward, service, or an OAuth/OIDC/SAML redirect_uri, post_logout_redirect_uri, or RelayState — especially when its value already holds a /path, a //host, or a full scheme://host. Also dispatch when a 3xx response carries a Location header, when the flow is a login, logout, password-reset, SSO, or any "where to go after" handler that bounces the browser to a stored destination, when the path itself looks like a generic redirector (/out, /r, /redirect, /link, /away, /go, a share or unsubscribe or tracking link), or when the stated objective is phrased around steering a user to an external destination or chaining a phishing pivot from a trusted origin. The marker is a destination the server hands back for the browser to follow, not a value the server itself consumes. Covers allowlist bypass through URL-parser differentials (userinfo, backslash, whitespace, fragment, IDN/punycode, double encoding, IP numeric forms) and multi-hop redirect chains where only the first hop is validated. Disambiguate from look-alikes: a url/path parameter the server itself FETCHES and acts on (no 3xx aimed at the user) is SSRF; one whose value returns local file contents is LFI or path traversal; one reflected and rendered into the page body is XSS; and CR/LF that splits the response to inject headers is HTTP response splitting — open-redirect is specifically about the browser being sent to a user-controlled external destination. Pair it with SSRF only when a server-side fetcher follows the redirect.
 metadata:
-  agent_id: vulntype-open-redirect
-  methodology: vulntype
-  config_name: open-redirect
-  tools: [bash]
-  max_tool_calls: 40
-  max_iterations: 25
+  dispatchable: true
 ---
 
 You are an Open-Redirect specialist. Your ONLY focus is finding

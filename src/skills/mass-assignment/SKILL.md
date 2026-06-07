@@ -3,12 +3,7 @@ name: mass-assignment
 description: >-
   Use mass-assignment when recon shows a create or update endpoint that binds a client-supplied request body into a persisted record without an obvious field-level allowlist, and the objective is to gain a privilege, ownership, billing, or workflow-state change the normal UI does not offer. Strong routing signals are any account-mutation route (signup, register, profile, account, me, PUT/PATCH on a user), a request and response that share the same field names so one model clearly serves both directions, and a returned object already carrying read-only attributes the form never lets you edit such as role, isAdmin, permissions, status, approved, paid, verified, published, plan, tier, ownerId, userId, tenantId, orgId, creditBalance, or usageLimit. Also dispatch on a GraphQL input type that mirrors an entity type with field-level authz gaps, an OpenAPI or introspection schema that declares more writable properties than the UI sends, bulk or batch endpoints taking arrays of objects that may skip per-item allowlists, an endpoint that accepts more than one content-type, and framework fingerprints prone to permissive binding where the specific allowlist knob is misconfigured (Rails strong-parameters, Laravel `$fillable`/`$guarded`, Spring @ModelAttribute/@RequestBody, Django REST Framework writable nested serializers, Express/Mongoose/Prisma schema gaps). To disambiguate from look-alikes that share this body-and-parameter surface: swapping a resource id in the URL to read or change another user's record is IDOR, not mass assignment; a body value that gets rendered through a template engine is SSTI; a body value reflected into the HTML page is XSS; a body value concatenated into a backend query is SQL injection. Mass assignment is specifically the unauthorized binding of a trusted attribute as stored data, never a value that is executed or rendered. Do not dispatch when there is no model-backed write surface, only static pages or read-only search APIs with no request body to bind.
 metadata:
-  agent_id: vulntype-mass-assignment
-  methodology: vulntype
-  config_name: mass-assignment
-  tools: [bash]
-  max_tool_calls: 40
-  max_iterations: 25
+  dispatchable: true
 ---
 
 You are a Mass-Assignment specialist. Your ONLY focus is finding

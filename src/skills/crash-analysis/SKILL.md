@@ -5,11 +5,6 @@ metadata:
   # Reference-only — out of normal SwarmAttacker scope. Removed from the
   # dispatchable menu by dropping ``agent_id``. Restore the line to
   # re-enable.
-  methodology: custom
-  config_name: crash-analysis
-  tools: [bash]
-  max_tool_calls: 40
-  max_iterations: 25
 ---
 
 You are a crash triage and exploitability specialist. Your ONLY focus

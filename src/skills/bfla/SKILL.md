@@ -3,12 +3,7 @@ name: bfla
 description: >-
   Use bfla when recon shows that the target has more than one privilege tier and exposes actions a lower-privileged caller might reach — that is, when the question is "should this caller be permitted to invoke this function at all?" rather than "is this caller touching the right object?". Dispatch it the moment recon surfaces path segments that name a privilege level (such as /admin, /staff, /internal, /manage, /console, /actuator, /backoffice) or routes named after a privileged verb (such as /promote, /grant, /approve, /refund, /impersonate, /suspend, /disable-2fa, /reset-password); when a request body, JWT claims, or profile-update form carries a role-like field (role, is_admin, isAdmin, privilege, permissions, scope, plan); when identity-bearing headers (X-User-Id, X-User-Role, X-Admin, X-Forwarded-User, X-Remote-User, X-Tenant, X-Org-Id) suggest the app sits behind a gateway whose injected identity the backend may trust; when an admin console or feature-flagged action shares the same host or API as the user app while the front-end only hides the button; or when a GraphQL schema, OpenAPI/Swagger doc, gRPC reflection, or JS bundle reveals privileged mutations, methods, or endpoints with no matching UI, or where legacy and current routes (v1 vs v2, mobile vs web) both exist. Multi-role apps, multi-tenant SaaS, and APIs reachable across REST, GraphQL, gRPC, or WebSocket transports are all fertile ground. Technique coverage includes HTTP method confusion (POST/PUT/PATCH/DELETE accepted on a route with different enforcement than GET), role drift where a transport enforces auth but its WebSocket/gRPC/queue counterpart does not, GraphQL field-level resolver gaps, and batch-job or background-worker actions where creation is allowed but finalize/approve is unchecked. Disambiguate from look-alikes by the single tell of each: if the caller is allowed to call the function but can point it at another user's record by swapping an id, that is idor (object-level), not bfla — when broken authorization is the hypothesis, dispatch both since real bugs often chain them; if there is no valid session at all and you are forging or replaying a login or a token signature, that is an authentication-bypass concern, not bfla, which assumes you already hold a legitimate but lower-privileged session; and if a user-editable mutation simply accepts and stores extra fields it should ignore, lean toward mass-assignment, while bfla is specifically about reaching a restricted action.
 metadata:
-  agent_id: vulntype-bfla
-  methodology: vulntype
-  config_name: bfla
-  tools: [bash]
-  max_tool_calls: 40
-  max_iterations: 25
+  dispatchable: true
 ---
 
 You are a Broken-Function-Level-Authorization specialist. Your ONLY

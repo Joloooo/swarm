@@ -1135,66 +1135,6 @@ def _colocated_service_directive(state: SwarmGraphState) -> str | None:
     return "\n".join(lines)
 
 
-def _escalation_note(state: SwarmGraphState) -> str | None:
-    """Render lane B's divergence persona + one-time lead brief, if set.
-
-    The dual-planner orchestrator (:mod:`src.orchestration.escalation`)
-    forks a second, independent planner lane when the first is stuck. It
-    seeds that lane's state with ``planner_persona`` (how lane B should
-    differ) and ``escalation_brief`` (a one-time snapshot of what lane A
-    had already tried at fork time). This renders both — PLUS the
-    "grow wider under pressure" doctrine — as a single ``[SYSTEM NOTE]``.
-
-    The growth doctrine is deliberately scoped to lane B ONLY. Lane A (the
-    solo lane, ``planner_persona`` empty) keeps its original behaviour
-    unchanged: it does not maintain a forced ranked list, does not widen
-    on every stuck turn, and may pick ``report`` when its current line is
-    exhausted. Lane B is the experimental "spend more on the long tail"
-    lane — it is the only one told to keep adding new angles. That split
-    is the whole point: the fast 80-90% path stays exactly as it was, and
-    the wider search only switches on for the runs that lane A could not
-    close.
-
-    Returns ``None`` for the normal solo lane (both fields empty), so the
-    planner prompt is byte-identical to today on the common path.
-    """
-    persona = (state.get("planner_persona") or "").strip()
-    brief = (state.get("escalation_brief") or "").strip()
-    if not persona and not brief:
-        return None
-    parts: list[str] = []
-    if persona:
-        parts.append("[SYSTEM NOTE] " + persona)
-    if brief:
-        parts.append(
-            "Another independent tester is already pursuing the leads "
-            "below — do NOT repeat them. Deliberately take different "
-            "angles and surfaces:\n" + brief
-        )
-    if persona:
-        # Lane-B-only growth doctrine — get WIDER under pressure, never
-        # narrower. This is the "+2 more every stuck turn" behaviour the
-        # solo lane intentionally does NOT have.
-        parts.append(
-            "Because you are the divergence lane, you escalate by getting "
-            "WIDER, never narrower. Maintain a RANKED LIST of up to ~10 "
-            "suspected vulnerabilities ordered by likelihood and persist "
-            "it in ``relevant_summary``. Each dispatch round, fire the top "
-            "few you have not ruled out — several ``configs`` / "
-            "``custom_configs`` / ``tasks`` in ONE turn. When a round "
-            "comes back with NO progress (no new finding, no new signal), "
-            "do NOT narrow, switch away, or pick ``report``: keep the "
-            "still-promising leads AND add at least TWO NEW hypotheses "
-            "from your ranked list, dispatching a batch at least as wide "
-            "as the last one. A partial signal (a differential response, "
-            "an error leak, a status shift) still counts as promising — "
-            "carry it alongside the new angles, do not drop it. Choose "
-            "``report`` only once the whole ranked list is genuinely "
-            "exhausted, not because one attempt failed."
-        )
-    return "\n\n".join(parts)
-
-
 def _build_forced_search_query(finding, state: SwarmGraphState) -> str:
     """Build a focused web-search query from a blocking finding.
 
@@ -1680,18 +1620,6 @@ class PlannerNode(BaseNode):
                     content="No target provided. Ask the user for one via report."
                 )
             ]
-
-        # Dual-planner divergence. Empty (and thus a no-op) for the solo
-        # lane; only set when the escalation orchestrator forked this run
-        # as the independent "lane B" and wants it to take different
-        # angles than the lane already in flight.
-        escalation = _escalation_note(state)
-        if escalation:
-            self.log.info(
-                "escalation persona active: %s",
-                escalation.replace("\n", " | ")[:200],
-            )
-            prior_messages.append(HumanMessage(content=escalation))
 
         # Supervisor-level loop detection. If the same skill has run
         # repeatedly with no findings, surface a SYSTEM NOTE so the LLM

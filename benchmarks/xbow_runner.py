@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -640,6 +641,124 @@ def _primary_target_url(ip: str, host_map: dict[int, int]) -> str:
     return f"{scheme}://{ip}:{host}"
 
 
+@functools.lru_cache(maxsize=1)
+def _bridge_routable() -> bool:
+    """True when a container's OWN docker-network IP is reachable from the host.
+
+    When true, the agent is pointed at the container's bridge IP, so it scans
+    only that container's network namespace — the host's own ``0.0.0.0``
+    services (AirPlay ``rapportd``, Logitech, a local LLM server, …) never
+    appear on the target, which a shared-localhost mapping cannot prevent.
+
+    - Always true on Linux (the host shares routes to the docker bridge).
+    - On macOS the docker bridge lives inside the Docker Desktop VM and is NOT
+      routable by default; a helper such as ``docker-mac-net-connect`` adds a
+      route to the docker subnets (172.x) over a ``utun`` interface. We detect
+      that route; absent it we fall back to the per-VM loopback-alias mapping.
+    - ``SWARM_BRIDGE_ROUTABLE=1|0`` forces the answer (escape hatch if route
+      auto-detection is wrong on a given host).
+
+    Cached: the answer cannot change within one run process.
+    """
+    forced = os.environ.get("SWARM_BRIDGE_ROUTABLE")
+    if forced is not None:
+        return forced.strip().lower() in ("1", "true", "yes", "on")
+    if sys.platform != "darwin":
+        return True
+    try:
+        rg = subprocess.run(
+            ["route", "-n", "get", "172.17.0.1"],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+        if "utun" in rg:
+            return True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        ns = subprocess.run(
+            ["netstat", "-rn", "-f", "inet"],
+            capture_output=True, text=True, timeout=4,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return bool(re.search(r"^172[\d.]*\S*\s.*utun", ns, re.M))
+
+
+def _tcp_reachable(ip: str, port: int, timeout: float = 2.0) -> bool:
+    """True if a TCP connection to ``ip:port`` succeeds within ``timeout``."""
+    try:
+        with socket.create_connection((ip, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _container_ip(container: str) -> str | None:
+    """The first docker-network IP of ``container`` (its address inside the
+    bridge), or None. ``docker inspect`` is the source of truth."""
+    try:
+        out = _run(
+            ["docker", "inspect", "-f",
+             "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}",
+             container],
+            cwd=XBOW_ROOT, timeout=DISCOVER_TIMEOUT_S, capture=True, check=False,
+        ).stdout
+    except Exception:  # noqa: BLE001 — discovery must never break a run
+        return None
+    for tok in out.split():
+        if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", tok.strip()):
+            return tok.strip()
+    return None
+
+
+def _web_container_port(benchmark_id: str) -> int | None:
+    """The benchmark's primary web port (container-internal), chosen the same
+    way :func:`_primary_target_url` picks one — preferring real web ports over
+    SSH (22), smallest otherwise."""
+    try:
+        svc_ports = _published_target_ports(benchmark_id)
+    except Exception:  # noqa: BLE001
+        return None
+    all_ports = [p for ports in svc_ports.values() for p in ports]
+    web = [p for p in all_ports if p != 22] or all_ports
+    if not web:
+        return None
+    return next((p for p in _WEB_PORT_PREFERENCE if p in web), min(web))
+
+
+def _container_bridge_target(benchmark_id: str) -> str | None:
+    """``http://<container-bridge-ip>:<web-port>`` when the benchmark's web
+    container is reachable on its own docker-network IP, else None (caller then
+    falls back to the loopback alias / localhost). Picks the container that
+    actually answers on the web port, so a backing DB sidecar is skipped."""
+    port = _web_container_port(benchmark_id)
+    if not port:
+        return None
+    bench_dir = XBOW_ROOT / "benchmarks" / benchmark_id
+    try:
+        out = _run(["docker", "compose", "ps", "--format", "json"],
+                   cwd=bench_dir, timeout=DISCOVER_TIMEOUT_S,
+                   capture=True, check=False).stdout
+    except Exception:  # noqa: BLE001
+        return None
+    stripped = out.strip()
+    try:
+        services = (
+            json.loads(stripped) if stripped.startswith("[")
+            else [json.loads(line) for line in stripped.splitlines() if line.strip()]
+        )
+    except json.JSONDecodeError:
+        return None
+    for svc in services:
+        name = svc.get("Name") or svc.get("ID")
+        if not name:
+            continue
+        ip = _container_ip(name)
+        if ip and _tcp_reachable(ip, port):
+            return f"http://{ip}:{port}"
+    return None
+
+
 async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
     flag = expected_flag(benchmark_id)
     started = time.time()
@@ -723,7 +842,17 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         # Hand the agent the EXACT app URL (IP + the real published port),
         # not just the IP — so it starts where a real engagement would
         # (given scope) instead of hunting for the app among decoy ports.
-        result["target_url"] = (
+        #
+        # Prefer the container's OWN bridge IP when it is routable from the host
+        # (docker-mac-net-connect on macOS, or natively on Linux): the agent
+        # then scans only the container's network namespace, so the host's
+        # 0.0.0.0 services (AirPlay, Logitech, …) never leak onto the target.
+        # Otherwise fall back to the per-VM loopback alias (or plain localhost)
+        # exactly as before — the bring-up flow above is unchanged either way.
+        bridge_url = (
+            _container_bridge_target(benchmark_id) if _bridge_routable() else None
+        )
+        result["target_url"] = bridge_url or (
             _primary_target_url(leased_ip, _override_host_map(benchmark_id))
             if leased_ip
             else discover_target_url(benchmark_id)

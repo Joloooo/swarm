@@ -156,9 +156,6 @@ config = SimpleNamespace(
         planner_max_iters            = _cfg["budgets"]["planner_max_iters"],
         # ── Worker agents (per invocation) ──
         worker_max_iterations        = _cfg["budgets"]["worker_max_iterations"],
-        # ── Planner-invented "custom" attacks ──
-        custom_attack_max_tool_calls = _cfg["budgets"]["custom_attack_max_tool_calls"],
-        custom_attack_max_iterations = _cfg["budgets"]["custom_attack_max_iterations"],
         # ── LLM (per-call output cap) ──
         llm_max_tokens               = _cfg["budgets"]["llm_max_tokens"],
         # ── Web search node (LLM context budget per source) ──

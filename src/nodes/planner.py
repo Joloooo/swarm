@@ -89,10 +89,6 @@ MAX_PLANNER_ITERS = config.budgets.planner_max_iters
 
 VALID_ACTIONS = {"attack", "recon", "web_search", "report", "submit_flag"}
 
-# Budget defaults for LLM-invented custom attack configs.
-_CUSTOM_MAX_TOOL_CALLS = config.budgets.custom_attack_max_tool_calls
-_CUSTOM_MAX_ITERATIONS = config.budgets.custom_attack_max_iterations
-
 # ``_maybe_force_recovery`` safety net — see PlannerNode method for full docs.
 # Disable by setting ``SWARM_FORCE_RECOVERY=0`` (e.g. for normal pentest runs
 # where reporting an unexploited HIGH-severity vuln is a valid deliverable).

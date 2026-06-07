@@ -747,8 +747,6 @@ def _config_top(cfg: dict[str, dict[str, Any]]) -> str | None:
     budgets_summary = (
         f"planner={b['planner_max_iters']} "
         f"worker={b['worker_max_iterations']} "
-        f"custom-tools={b['custom_attack_max_tool_calls']} "
-        f"custom-iter={b['custom_attack_max_iterations']} "
         f"llm-tokens={b['llm_max_tokens']} "
         f"web-chars={b['web_search_max_crawled_chars']}"
     )
@@ -775,8 +773,6 @@ def _budgets_submenu(cfg: dict[str, dict[str, Any]]) -> None:
     keys: list[tuple[str, str]] = [
         ("planner_max_iters",            "Planner max iterations"),
         ("worker_max_iterations",        "Worker max iterations"),
-        ("custom_attack_max_tool_calls", "Custom-skill max tool calls"),
-        ("custom_attack_max_iterations", "Custom-skill max iterations"),
         ("llm_max_tokens",               "LLM max output tokens (per call)"),
         ("web_search_max_crawled_chars", "Web-search max chars per source"),
     ]

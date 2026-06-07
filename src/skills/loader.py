@@ -87,6 +87,8 @@ def _build_config(skill_name: str, meta: dict, body: str) -> tuple[AgentConfig, 
     skills without that (e.g. the nmap reference) are loaded but not
     offered to the planner as attack targets.
     """
+    from src.graph import config
+
     md = meta.get("metadata") or {}
     if not isinstance(md, dict):
         md = {}
@@ -116,8 +118,7 @@ def _build_config(skill_name: str, meta: dict, body: str) -> tuple[AgentConfig, 
         config_name=str(md.get("config_name") or skill_name),
         system_prompt=body,
         tools=tools,
-        max_tool_calls=int(md.get("max_tool_calls") or 50),
-        max_iterations=int(md.get("max_iterations") or 30),
+        max_iterations=config.budgets.worker_max_iterations,
         skip_base_prompt=bool(md.get("skip_base_prompt", False)),
         phase=phase,
     )
@@ -199,8 +200,7 @@ def register_custom_skill(name: str, system_prompt: str) -> AgentConfig:
         config_name=name,
         system_prompt=system_prompt,
         tools=[bash],
-        max_tool_calls=config.budgets.custom_attack_max_tool_calls,
-        max_iterations=config.budgets.custom_attack_max_iterations,
+        max_iterations=config.budgets.worker_max_iterations,
     )
     _CACHE[name] = cfg
     _DISPATCHABLE.add(name)
@@ -295,8 +295,7 @@ def register_generic_task(
         config_name=config_name,
         system_prompt=system_prompt,
         tools=[bash],
-        max_tool_calls=runtime_config.budgets.custom_attack_max_tool_calls,
-        max_iterations=runtime_config.budgets.custom_attack_max_iterations,
+        max_iterations=runtime_config.budgets.worker_max_iterations,
     )
     _CACHE[config_name] = cfg
     _DISPATCHABLE.add(config_name)

@@ -154,20 +154,6 @@ config = SimpleNamespace(
     budgets=SimpleNamespace(
         # ── Graph supervisor / planner ──
         planner_max_iters            = _cfg["budgets"]["planner_max_iters"],
-        # ── Escalation / dual-planner race (src/orchestration/escalation.py) ──
-        # When the first planner lane is still running after
-        # ``escalation_fork_after_seconds`` of wall clock without a
-        # capture, fork a SECOND, independent planner lane with a
-        # divergence persona and race them; first capture wins. Only ever
-        # fires for the hard runs that don't win early, so the fast-win
-        # path is untouched. The default (600 s = 10 min) is tuned to the
-        # win-timing data: ~87% of wins land within 10 minutes, so a run
-        # still going past that is the long tail where a divergent searcher
-        # helps. (A planner-iteration trigger was dropped — planner_iters
-        # also counts recon + web_search turns, so it does not track attack
-        # rounds.) Disable the whole mechanism with SWARM_ESCALATION=0.
-        escalation_enabled            = _cfg["budgets"]["escalation_enabled"],
-        escalation_fork_after_seconds = _cfg["budgets"]["escalation_fork_after_seconds"],
         # ── Worker agents (per invocation) ──
         worker_max_iterations        = _cfg["budgets"]["worker_max_iterations"],
         # ── Planner-invented "custom" attacks ──

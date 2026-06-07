@@ -57,7 +57,7 @@ _HEADER_COMMENTS = (
 
 # A one-line banner written above each table when the file is first created.
 _SECTION_COMMENTS = {
-    "budgets":   "Planner / worker / LLM budgets and the escalation race.",
+    "budgets":   "Planner / worker / LLM budgets.",
     "model":     "Model slug + Codex reasoning controls.",
     "verbosity": "Console verbosity: silent | compact | verbose.",
 }

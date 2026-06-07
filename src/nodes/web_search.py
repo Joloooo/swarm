@@ -114,12 +114,25 @@ async def _synthesize_with_refusal_retry(
     from src.llm.codex import CodexCyberPolicyError, CodexInvalidPromptError
     refusal_excs = (CodexCyberPolicyError, CodexInvalidPromptError)
     is_codex = LLMConfig().provider == Provider.CODEX
+    # Synthesis runs on the configured (cheaper, faster) synth model on Codex —
+    # it's a relay/summarize task, not a reasoning one. On other providers it
+    # uses that provider's default model. Set via swarm-config.toml [model]
+    # web_search_synth_model / _reasoning_effort (or the TUI).
+    synth_model = getattr(config.budgets, "web_search_synth_model", "gpt-5.4")
+    synth_effort = getattr(
+        config.budgets, "web_search_synth_reasoning_effort", "low"
+    )
+    primary_cfg = (
+        LLMConfig(provider=Provider.CODEX, model=synth_model,
+                  reasoning_effort=synth_effort)
+        if is_codex else LLMConfig()
+    )
     fb_model = getattr(config.budgets, "fallback_model", "gpt-5.4")
     fb_effort = getattr(config.budgets, "fallback_reasoning_effort", "low")
 
-    # ── Tier 1: primary model ───────────────────────────────────────────
+    # ── Tier 1: configured synthesis model ──────────────────────────────
     try:
-        analysis = await _synthesize(context, LLMConfig())
+        analysis = await _synthesize(context, primary_cfg)
         answer = getattr(analysis, "answer", None) if analysis else None
         if not answer or not looks_like_refusal(answer):
             return analysis  # success (or empty — caller handles empty)

@@ -226,6 +226,13 @@ config = SimpleNamespace(
         # "detailed" gives the most debugging power; "none" disables
         # summaries entirely (saves tokens but loses visibility).
         reasoning_summary            = _cfg["model"]["reasoning_summary"],
+        # ── Web-search synthesis model ──
+        # The web_search node's synthesis step (relay payloads from crawled
+        # markdown) runs on this model/effort instead of the flagship — a
+        # cheaper, faster, more refusal-resistant tier. Edit in swarm-config.toml
+        # ([model] web_search_synth_model / _reasoning_effort) or the TUI.
+        web_search_synth_model       = _cfg["model"]["web_search_synth_model"],
+        web_search_synth_reasoning_effort = _cfg["model"]["web_search_synth_reasoning_effort"],
     ),
     verbosity=SimpleNamespace(
         # silent  = only bench boundaries + final verdict on stderr

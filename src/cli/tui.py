@@ -736,6 +736,14 @@ def _config_menu() -> None:
         elif action == "reasoning_summary":
             _select_into(cfg, "model", "reasoning_summary",
                          "Reasoning summary:", config_store.REASONING_SUMMARY_CHOICES)
+        elif action == "web_synth_model":
+            _select_into(cfg, "model", "web_search_synth_model",
+                         "Web-search synthesis model:",
+                         config_store.WEB_SYNTH_MODEL_CHOICES)
+        elif action == "web_synth_effort":
+            _select_into(cfg, "model", "web_search_synth_reasoning_effort",
+                         "Web-search synthesis effort:",
+                         config_store.WEB_SYNTH_EFFORT_CHOICES)
         elif action == "verbosity":
             _select_into(cfg, "verbosity", "mode",
                          "Verbosity:", config_store.VERBOSITY_CHOICES)
@@ -756,6 +764,8 @@ def _config_top(cfg: dict[str, dict[str, Any]]) -> str | None:
         Choice(f"Model        {cfg['model']['slug']}",            value="model_slug"),
         Choice(f"Reasoning effort   {cfg['model']['reasoning_effort']}",   value="reasoning_effort"),
         Choice(f"Reasoning summary  {cfg['model']['reasoning_summary']}",  value="reasoning_summary"),
+        Choice(f"Web-search synth model   {cfg['model']['web_search_synth_model']}", value="web_synth_model"),
+        Choice(f"Web-search synth effort  {cfg['model']['web_search_synth_reasoning_effort']}", value="web_synth_effort"),
         Choice(f"Verbosity    {cfg['verbosity']['mode']}",        value="verbosity"),
         Choice("─" * 40,                                          value="__sep__", disabled="—"),
         Choice("Save & back",                                     value="save"),

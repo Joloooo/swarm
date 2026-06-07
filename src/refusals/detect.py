@@ -69,5 +69,16 @@ def looks_like_refusal(text: str) -> bool:
     """
     if not text:
         return False
-    lower = text.lower()
+    # Normalize Unicode apostrophes to ASCII before matching. GPT-family
+    # models emit the curly right-single-quote U+2019 ("I can’t") far more
+    # often than the ASCII apostrophe the patterns are written with, so
+    # without this every curly-quote refusal slips through. Verified live:
+    # the web_search synthesizer's "I can’t provide instructions, payloads…"
+    # bail-out (e2e run, 045-cmdi) went undetected until this normalization.
+    lower = (
+        text.lower()
+        .replace("’", "'")
+        .replace("‘", "'")
+        .replace("ʼ", "'")
+    )
     return any(p in lower for p in REFUSAL_PATTERNS)

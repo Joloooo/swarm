@@ -187,7 +187,7 @@ class RelevantSummary(TypedDict, total=False):
     """Structured shape for ``state["relevant_summary"]``.
 
     The planner rewrites this dict each turn as part of its decision
-    JSON. Three fixed keys, with size caps enforced by the validator
+    JSON. Four keys, with size caps enforced by the validator
     in ``src/nodes/planner.py`` to prevent unbounded growth across
     turns:
 
@@ -202,6 +202,14 @@ class RelevantSummary(TypedDict, total=False):
     - ``open_questions``: list of one-line strings (≤ 20 items, ≤ 200
       chars each) recording gaps in knowledge the next dispatch
       should address.
+    - ``untried``: ranked list of concrete next moves the swarm has
+      NOT yet attempted (≤ 10 items). Each item is a dict
+      ``{"where": str, "technique": str, "suggested_skill": str}`` —
+      a *machine-actionable* next move (unlike ``open_questions``,
+      which is free-text knowledge gaps). The planner consults this
+      when a line of attack stalls so it can spin up a genuinely
+      different angle instead of re-running the stuck one. See the
+      diversify-when-stuck directive in ``src/nodes/planner.py``.
 
     The seed builder in ``src/nodes/base/skill_runner.py`` renders
     this dict as markdown under "## Investigation state" for the
@@ -211,6 +219,7 @@ class RelevantSummary(TypedDict, total=False):
     current_hypothesis: str
     ruled_out: list[str]
     open_questions: list[str]
+    untried: list[dict]
 
 
 

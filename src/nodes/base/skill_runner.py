@@ -424,8 +424,12 @@ def _format_relevant_summary(state: dict) -> str | None:
         s.strip() for s in (rs.get("open_questions") or [])
         if isinstance(s, str) and s.strip()
     ]
+    untried = [
+        u for u in (rs.get("untried") or [])
+        if isinstance(u, dict) and (u.get("technique") or u.get("where"))
+    ]
 
-    if not (hypothesis or ruled_out or open_questions):
+    if not (hypothesis or ruled_out or open_questions or untried):
         return None
 
     sections: list[str] = []
@@ -437,6 +441,14 @@ def _format_relevant_summary(state: dict) -> str | None:
     if open_questions:
         body = "\n".join(f"- {item}" for item in open_questions)
         sections.append("### Open questions\n" + body)
+    if untried:
+        rows = []
+        for u in untried:
+            where = (u.get("where") or "").strip()
+            tech = (u.get("technique") or "").strip()
+            loc = f" — {where}" if where else ""
+            rows.append(f"- {tech or where}{loc if tech else ''}")
+        sections.append("### Untried next moves\n" + "\n".join(rows))
 
     return (
         "## Investigation state (current as of this turn)\n\n"

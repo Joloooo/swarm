@@ -43,7 +43,6 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "planner_max_iters": 50,
         "worker_max_iterations": 40,
         "llm_max_tokens": 4096,
-        "web_search_max_crawled_chars": 8000,
         # Per-benchmark agent wall-clock budget, in SECONDS (1200 = 20 min,
         # 2400 = 40 min). The leash on one graph run; when it expires the run
         # ends with "agent timeout after Ns". Edit here or via the TUI.

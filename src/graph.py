@@ -63,10 +63,8 @@ from types import SimpleNamespace
 # This is the universal entry point — every CLI command, the benchmark
 # runner, and the LangGraph Studio bootstrap all import src.graph, so a
 # single dotenv load here covers all entry points. Keys read from .env:
-# ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, TAVILY_API_KEY,
-# LANGSMITH_API_KEY. Without this, langchain_tavily.TavilySearch fails
-# at runtime even when the key IS in .env (only the shell-exported keys
-# would otherwise reach the process).
+# ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, LANGSMITH_API_KEY.
+# Without this, those keys only reach the process when shell-exported.
 try:
     from dotenv import load_dotenv as _load_dotenv
 

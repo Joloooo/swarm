@@ -1,0 +1,816 @@
+{
+  "fetched_at": "2026-06-08T20:24:16+00:00",
+  "sources": [
+    {
+      "group": "wstg",
+      "skill": "sqli",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection.md",
+      "file": "src/tools/web_recon/corpus/wstg/sqli/05-Testing_for_SQL_Injection.md",
+      "bytes": 44707,
+      "sha256": "dee5d22f2b803f514ce2af4a126907fd6e9af5e0e7490146960226e628645998",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "sqli",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05.6-Testing_for_NoSQL_Injection.md",
+      "file": "src/tools/web_recon/corpus/wstg/sqli/05.6-Testing_for_NoSQL_Injection.md",
+      "bytes": 7685,
+      "sha256": "f2eff60ab6079b6ceeb9a7f06eebb43c462eb61874010586474b27957553ef5f",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "sqli",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05.7-Testing_for_ORM_Injection.md",
+      "file": "src/tools/web_recon/corpus/wstg/sqli/05.7-Testing_for_ORM_Injection.md",
+      "bytes": 5399,
+      "sha256": "92312ce77de3d3d57bdbac5b9a5d2a7a7b0165718cfc4fe7e2d2d389df80b53b",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "xss",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/07-Input_Validation_Testing/01-Testing_for_Reflected_Cross_Site_Scripting.md",
+      "file": "src/tools/web_recon/corpus/wstg/xss/01-Testing_for_Reflected_Cross_Site_Scripting.md",
+      "bytes": 14152,
+      "sha256": "e6b4f587063428cb5cc1526b16d748d5d366d4e847bd4cf2eb1cc76f75833654",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "xss",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/07-Input_Validation_Testing/02-Testing_for_Stored_Cross_Site_Scripting.md",
+      "file": "src/tools/web_recon/corpus/wstg/xss/02-Testing_for_Stored_Cross_Site_Scripting.md",
+      "bytes": 13807,
+      "sha256": "49ee930e6feb0ee395b6f16c47ffc8afe716fd7828fb3e9c8b5de2a8eee1d2c8",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "xss",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/11-Client-side_Testing/01-Testing_for_DOM-based_Cross_Site_Scripting.md",
+      "file": "src/tools/web_recon/corpus/wstg/xss/01-Testing_for_DOM-based_Cross_Site_Scripting.md",
+      "bytes": 7634,
+      "sha256": "9cb32ff0650e3dacd9e83c5122d2ef2f2a4d7c2aa8c1b26836e12157f0bca180",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "ssti",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/07-Input_Validation_Testing/18-Testing_for_Server-side_Template_Injection.md",
+      "file": "src/tools/web_recon/corpus/wstg/ssti/18-Testing_for_Server-side_Template_Injection.md",
+      "bytes": 6296,
+      "sha256": "840b161f29bac77bf6caf3c66771fa64aeb55698edd6ee01ef8b91a8417c4ec8",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "ssrf",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/07-Input_Validation_Testing/19-Testing_for_Server-Side_Request_Forgery.md",
+      "file": "src/tools/web_recon/corpus/wstg/ssrf/19-Testing_for_Server-Side_Request_Forgery.md",
+      "bytes": 5873,
+      "sha256": "2c3171ae8f57928e7055b433c25ab38d07c0c6e28183f8dd24e917207cf25738",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "ssrf",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/07-Input_Validation_Testing/17-Testing_for_Host_Header_Injection.md",
+      "file": "src/tools/web_recon/corpus/wstg/ssrf/17-Testing_for_Host_Header_Injection.md",
+      "bytes": 5411,
+      "sha256": "69a3f993ed8fe2bf7f1b87412ff68c534021a8a4c095a3024c0f1a6f4207d045",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "lfi",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/05-Authorization_Testing/01-Testing_Directory_Traversal_File_Include.md",
+      "file": "src/tools/web_recon/corpus/wstg/lfi/01-Testing_Directory_Traversal_File_Include.md",
+      "bytes": 10719,
+      "sha256": "98b0305c389ce0ef1617a74c7b74adde5903c2139a955fb09bc8c965ab492936",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "lfi",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/07-Input_Validation_Testing/11.1-Testing_for_File_Inclusion.md",
+      "file": "src/tools/web_recon/corpus/wstg/lfi/11.1-Testing_for_File_Inclusion.md",
+      "bytes": 11480,
+      "sha256": "b85f301fdc2a6101dc4bcde32e714177c4317d837b85e20cea3dd97f08efd0ac",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "xxe",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/07-Input_Validation_Testing/07-Testing_for_XML_Injection.md",
+      "file": "src/tools/web_recon/corpus/wstg/xxe/07-Testing_for_XML_Injection.md",
+      "bytes": 13814,
+      "sha256": "6543c77253457f35ae8730556f755345ce7bd806bed45f310b1ff7c8a7588971",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/07-Input_Validation_Testing/12-Testing_for_Command_Injection.md",
+      "file": "src/tools/web_recon/corpus/wstg/rce/12-Testing_for_Command_Injection.md",
+      "bytes": 14392,
+      "sha256": "f06a20ba9078378108f9e21015e7b3a9f0eed2dc651f0afaa786223ade82749c",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/07-Input_Validation_Testing/11-Testing_for_Code_Injection.md",
+      "file": "src/tools/web_recon/corpus/wstg/rce/11-Testing_for_Code_Injection.md",
+      "bytes": 2075,
+      "sha256": "edc69205f198de69ab3d7b5d79b0d3887d6dce89d5c1a862ce172862a240ed52",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "csrf",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/06-Session_Management_Testing/05-Testing_for_Cross_Site_Request_Forgery.md",
+      "file": "src/tools/web_recon/corpus/wstg/csrf/05-Testing_for_Cross_Site_Request_Forgery.md",
+      "bytes": 13303,
+      "sha256": "50d8441acde1165b60f78a54613077a1fb22b64ccc74cfe4c0be883030c379c1",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "idor",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/05-Authorization_Testing/04-Testing_for_Insecure_Direct_Object_References.md",
+      "file": "src/tools/web_recon/corpus/wstg/idor/04-Testing_for_Insecure_Direct_Object_References.md",
+      "bytes": 5865,
+      "sha256": "1a90528ef1417e5609cb6904cfb5da93fe01671c5cbc3da665e1d074f6fa907c",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "bfla",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/12-API_Testing/04-API_Broken_Function_Level_Authorization.md",
+      "file": "src/tools/web_recon/corpus/wstg/bfla/04-API_Broken_Function_Level_Authorization.md",
+      "bytes": 5303,
+      "sha256": "647cc55ba1e9c595dd64a6b415084d2a9ba5610af2e8349c42ebe0faa41be70d",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "bfla",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/12-API_Testing/02-API_Broken_Object_Level_Authorization.md",
+      "file": "src/tools/web_recon/corpus/wstg/bfla/02-API_Broken_Object_Level_Authorization.md",
+      "bytes": 5772,
+      "sha256": "3f256b9aaecdf585c83e91e3b145c2ca6981a4e0afed056b06685591bdf8f8ca",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "bfla",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/05-Authorization_Testing/02-Testing_for_Bypassing_Authorization_Schema.md",
+      "file": "src/tools/web_recon/corpus/wstg/bfla/02-Testing_for_Bypassing_Authorization_Schema.md",
+      "bytes": 8906,
+      "sha256": "b364cf644ebc7482bf5d022d69762adc9ca71c152cd655cdf388514f27fbf66e",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "open-redirect",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/11-Client-side_Testing/04-Testing_for_Client-side_URL_Redirect.md",
+      "file": "src/tools/web_recon/corpus/wstg/open-redirect/04-Testing_for_Client-side_URL_Redirect.md",
+      "bytes": 3215,
+      "sha256": "cebbf149481115c033fea76afafedbd4e79da7bccf3cb0f2f9adfb361d97a957",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "auth-testing",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/04-Authentication_Testing/04-Testing_for_Bypassing_Authentication_Schema.md",
+      "file": "src/tools/web_recon/corpus/wstg/auth-testing/04-Testing_for_Bypassing_Authentication_Schema.md",
+      "bytes": 7273,
+      "sha256": "105d428a8f8fa005a2812473339d25fb095f69058473230a3a8cbc54e44bea01",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "auth-testing",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/06-Session_Management_Testing/10-Testing_JSON_Web_Tokens.md",
+      "file": "src/tools/web_recon/corpus/wstg/auth-testing/10-Testing_JSON_Web_Tokens.md",
+      "bytes": 13131,
+      "sha256": "49d45d4841d900d13f8ebb8fd14b0e66345e5f731c355a65017822af40c22271",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "auth-testing",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/05-Authorization_Testing/05-Testing_for_OAuth_Weaknesses.md",
+      "file": "src/tools/web_recon/corpus/wstg/auth-testing/05-Testing_for_OAuth_Weaknesses.md",
+      "bytes": 12047,
+      "sha256": "e5d65dfb9d39f2b99c8030c965e4ee95d5171c70184c71368b451e7c9f84af11",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "auth-testing",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/04-Authentication_Testing/02-Testing_for_Default_Credentials.md",
+      "file": "src/tools/web_recon/corpus/wstg/auth-testing/02-Testing_for_Default_Credentials.md",
+      "bytes": 4495,
+      "sha256": "cd93909169cd19539cdcac4490595ea12ec7894d0cb26a14892e37e5dd55ae97",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "session-mgmt",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/06-Session_Management_Testing/01-Testing_for_Session_Management_Schema.md",
+      "file": "src/tools/web_recon/corpus/wstg/session-mgmt/01-Testing_for_Session_Management_Schema.md",
+      "bytes": 17671,
+      "sha256": "6d48b5aca82b018abf752ba9af1b35bbadafca45b39e72a09c689e320b424a23",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "session-mgmt",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/06-Session_Management_Testing/02-Testing_for_Cookies_Attributes.md",
+      "file": "src/tools/web_recon/corpus/wstg/session-mgmt/02-Testing_for_Cookies_Attributes.md",
+      "bytes": 11924,
+      "sha256": "1b7c5347dd6518a88f2fb1d2530e59789a85d9aba70e0eb1a9030d982a43eb3c",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "session-mgmt",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/06-Session_Management_Testing/03-Testing_for_Session_Fixation.md",
+      "file": "src/tools/web_recon/corpus/wstg/session-mgmt/03-Testing_for_Session_Fixation.md",
+      "bytes": 6327,
+      "sha256": "2157d8e5f0e7e84417acaf30aef6ebd7ff50fc054b83646c3734d6806476d04d",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "mass-assignment",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/07-Input_Validation_Testing/20-Testing_for_Mass_Assignment.md",
+      "file": "src/tools/web_recon/corpus/wstg/mass-assignment/20-Testing_for_Mass_Assignment.md",
+      "bytes": 9908,
+      "sha256": "7339f82c43e082a76802704cf0761b3e40a8b54a58c7e8b1f7557bc841083f20",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "parameter-pollution",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/07-Input_Validation_Testing/04-Testing_for_HTTP_Parameter_Pollution.md",
+      "file": "src/tools/web_recon/corpus/wstg/parameter-pollution/04-Testing_for_HTTP_Parameter_Pollution.md",
+      "bytes": 12225,
+      "sha256": "91d2d062ad1926e1187a134c9628e681312838d2721e3b3a4ed84b05e2ff859c",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "request-smuggling",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/07-Input_Validation_Testing/16-Testing_for_HTTP_Request_Smuggling.md",
+      "file": "src/tools/web_recon/corpus/wstg/request-smuggling/16-Testing_for_HTTP_Request_Smuggling.md",
+      "bytes": 7793,
+      "sha256": "004a797a99e39a67eb7107adfefa00afbb55b54fc5065ed38fa54590ac314757",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "graphql",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/12-API_Testing/99-Testing_GraphQL.md",
+      "file": "src/tools/web_recon/corpus/wstg/graphql/99-Testing_GraphQL.md",
+      "bytes": 26435,
+      "sha256": "56454c37a2664c48c82de7402fe1fafee655c0432780b5130c3ab5d0384f6357",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "insecure-file-uploads",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/10-Business_Logic_Testing/09-Test_Upload_of_Malicious_Files.md",
+      "file": "src/tools/web_recon/corpus/wstg/insecure-file-uploads/09-Test_Upload_of_Malicious_Files.md",
+      "bytes": 15535,
+      "sha256": "a131b1ac0f1a04f45269c69c4134bc22b33813aeaf8ca2781c6fc1834b3d304e",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "business-logic",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/10-Business_Logic_Testing/01-Test_Business_Logic_Data_Validation.md",
+      "file": "src/tools/web_recon/corpus/wstg/business-logic/01-Test_Business_Logic_Data_Validation.md",
+      "bytes": 6065,
+      "sha256": "6eec1d7efb412554f37dd25f2e9b654cebcaacb92e3c6307f9792812e6644037",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "business-logic",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/10-Business_Logic_Testing/06-Testing_for_the_Circumvention_of_Work_Flows.md",
+      "file": "src/tools/web_recon/corpus/wstg/business-logic/06-Testing_for_the_Circumvention_of_Work_Flows.md",
+      "bytes": 7216,
+      "sha256": "1399aed7bb26c31edf17644b74cf8c9424588ce895f4e74f2d05e41cbe3856ec",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "business-logic",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/10-Business_Logic_Testing/02-Test_Ability_to_Forge_Requests.md",
+      "file": "src/tools/web_recon/corpus/wstg/business-logic/02-Test_Ability_to_Forge_Requests.md",
+      "bytes": 5406,
+      "sha256": "c079485231e06e1ef737947bad707800aced2caa7e7d7b6a83c3d87281ac7af8",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "subdomain-takeover",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/10-Test_for_Subdomain_Takeover.md",
+      "file": "src/tools/web_recon/corpus/wstg/subdomain-takeover/10-Test_for_Subdomain_Takeover.md",
+      "bytes": 7107,
+      "sha256": "d8a4c215d35cfd7e619a17d79008f0b197937320978450e20cc3af229a5f45c3",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "crypto",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/09-Testing_for_Weak_Cryptography/02-Testing_for_Padding_Oracle.md",
+      "file": "src/tools/web_recon/corpus/wstg/crypto/02-Testing_for_Padding_Oracle.md",
+      "bytes": 7097,
+      "sha256": "36bac1a0d89a090026c3484dec4044f31c704aa11aafd0fad101b64fe2661090",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "error-handling",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/08-Testing_for_Error_Handling/01-Testing_For_Improper_Error_Handling.md",
+      "file": "src/tools/web_recon/corpus/wstg/error-handling/01-Testing_For_Improper_Error_Handling.md",
+      "bytes": 6208,
+      "sha256": "a82f4e3b8b9e77773146f3c90bf085867a4f9c754a640e9a3a2a475006baaaf3",
+      "status": 200
+    },
+    {
+      "group": "wstg",
+      "skill": "information-disclosure",
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/master/document/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/04-Review_Old_Backup_and_Unreferenced_Files_for_Sensitive_Information.md",
+      "file": "src/tools/web_recon/corpus/wstg/information-disclosure/04-Review_Old_Backup_and_Unreferenced_Files_for_Sensitive_Information.md",
+      "bytes": 18738,
+      "sha256": "d29b520bf7fc52255d73df7b5d597cd34e0da6b27fe28f549c1c84642e8cc392",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/python",
+      "file": "src/tools/web_recon/corpus/gtfobins/python.md",
+      "bytes": 2506,
+      "sha256": "963350fd61f9fb024682406c58f8068a8d9ff335612f809acf78b968009ef478",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/python2",
+      "file": null,
+      "status": 404
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/python3",
+      "file": null,
+      "status": 404
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/perl",
+      "file": "src/tools/web_recon/corpus/gtfobins/perl.md",
+      "bytes": 1995,
+      "sha256": "0da8235ccde5d7867632a442370dc7aa6233037bb09cccbced5276bf2e621767",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/ruby",
+      "file": "src/tools/web_recon/corpus/gtfobins/ruby.md",
+      "bytes": 1309,
+      "sha256": "2980f2669ee479a000a99f3d31998e4c29be0fa5ff25e0151b01d9b010bb615c",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/php",
+      "file": "src/tools/web_recon/corpus/gtfobins/php.md",
+      "bytes": 2947,
+      "sha256": "d7e5c34b98f78ba7657538be6b5e36855466cb51b39b8772a5cfc1b4ee1e33a6",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/node",
+      "file": "src/tools/web_recon/corpus/gtfobins/node.md",
+      "bytes": 2549,
+      "sha256": "2287cbc317f33406a36bb09583f747fef9b55d6d19f200f3a6d20db89a2b5221",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/lua",
+      "file": "src/tools/web_recon/corpus/gtfobins/lua.md",
+      "bytes": 2389,
+      "sha256": "e7b9b660a488087a429e22d7ff1b2a4c4fdd981227a3ba76bbdb20dcb51ff132",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/bash",
+      "file": "src/tools/web_recon/corpus/gtfobins/bash.md",
+      "bytes": 3234,
+      "sha256": "15ad06daf647730a0b51dcd456babe29e91183e108dc3830a5a1151fc5685bad",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/sh",
+      "file": null,
+      "status": 404
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/awk",
+      "file": "src/tools/web_recon/corpus/gtfobins/awk.md",
+      "bytes": 20,
+      "sha256": "a31aca8d69d52a273e4740d61f33e6910963b60c9dc4c18b1c6e8a7ce030422b",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/gawk",
+      "file": "src/tools/web_recon/corpus/gtfobins/gawk.md",
+      "bytes": 1097,
+      "sha256": "941a7f5dfc552695283bb807e9bbb8d239c3c1d523b35e848031e9467b911694",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/busybox",
+      "file": "src/tools/web_recon/corpus/gtfobins/busybox.md",
+      "bytes": 692,
+      "sha256": "b1c460fd7a7beddffee19c642aaef1992ee5a587028ba71278a819e42cb65eb8",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/nc",
+      "file": "src/tools/web_recon/corpus/gtfobins/nc.md",
+      "bytes": 1356,
+      "sha256": "fa2844000f950ea34df462ac44eb9a871549218aad5b0f77f49128853b958751",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/ncat",
+      "file": null,
+      "status": 404
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/socat",
+      "file": "src/tools/web_recon/corpus/gtfobins/socat.md",
+      "bytes": 1607,
+      "sha256": "5791048bffceafb70c785dbee1a645b7296c28ed75fea186b6f7363d525714f2",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/tar",
+      "file": "src/tools/web_recon/corpus/gtfobins/tar.md",
+      "bytes": 2045,
+      "sha256": "fdd01680e2e002efcbe9f49ea7ae019284d7bd2810839998920f409ea3b6bce6",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/zip",
+      "file": "src/tools/web_recon/corpus/gtfobins/zip.md",
+      "bytes": 345,
+      "sha256": "d9e814d0c809061db499654428eef62e4edd11670101337013636477afc74abe",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/unzip",
+      "file": "src/tools/web_recon/corpus/gtfobins/unzip.md",
+      "bytes": 346,
+      "sha256": "06f9c68d13072cc7d9545e8921a44942342c17389474d1a1ac370ff0cd6cd449",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/gzip",
+      "file": "src/tools/web_recon/corpus/gtfobins/gzip.md",
+      "bytes": 431,
+      "sha256": "56c05b985a6d3354cf3502be6b660bd01571faaae1c490aefbb2a3a0243629c3",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/curl",
+      "file": "src/tools/web_recon/corpus/gtfobins/curl.md",
+      "bytes": 1160,
+      "sha256": "95ce78f41de188b5897c8b5bb9eb80f7ccd7a13f25083ee5ff5c7d00efc1a217",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/wget",
+      "file": "src/tools/web_recon/corpus/gtfobins/wget.md",
+      "bytes": 1576,
+      "sha256": "3a8abd8a137db80f7ed945c05315f4692725a322a76d801887a1466fe9e8dd83",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/find",
+      "file": "src/tools/web_recon/corpus/gtfobins/find.md",
+      "bytes": 724,
+      "sha256": "05ca0fbad02068f852e26a7853eb4f6305b6ff6529eb95096f332f5698bd228a",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/vi",
+      "file": "src/tools/web_recon/corpus/gtfobins/vi.md",
+      "bytes": 951,
+      "sha256": "9a4d9e7f29d5aadf588f5d1ad0788726caafc05c898e7e7a8d7e9865f1ba2ae2",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/vim",
+      "file": "src/tools/web_recon/corpus/gtfobins/vim.md",
+      "bytes": 642,
+      "sha256": "c0d79bb5fadf74b5e455923601dcdd586afae406f15a99896052a0ab2eebf2c5",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/nano",
+      "file": "src/tools/web_recon/corpus/gtfobins/nano.md",
+      "bytes": 873,
+      "sha256": "4c852462958c6a5dff76ce4e143aea67f60ef924f00d2984a92f33262549428b",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/less",
+      "file": "src/tools/web_recon/corpus/gtfobins/less.md",
+      "bytes": 1548,
+      "sha256": "4a9e46aad38d0972f615d4dd30eeb6d347ae42a4d83990f0b4858720ded0c84d",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/more",
+      "file": "src/tools/web_recon/corpus/gtfobins/more.md",
+      "bytes": 342,
+      "sha256": "d9b579a9edc500e13a8643af430525fb8711cc1f8de205e725aa74beb45e7b0f",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/man",
+      "file": "src/tools/web_recon/corpus/gtfobins/man.md",
+      "bytes": 567,
+      "sha256": "339abc7b728330064e849b5382c7ebea8a4503648acd053885833ce6c9ec2f3c",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/env",
+      "file": "src/tools/web_recon/corpus/gtfobins/env.md",
+      "bytes": 180,
+      "sha256": "30634b3d23c15ef4dba16942d2572a753667e4e1f90d4c3b513eab2ff7d488e4",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/nohup",
+      "file": "src/tools/web_recon/corpus/gtfobins/nohup.md",
+      "bytes": 592,
+      "sha256": "1daecf379e68eed4cabbd5eb4e197c13533264cfb3dea4eb43c535e2cb64092e",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/expect",
+      "file": "src/tools/web_recon/corpus/gtfobins/expect.md",
+      "bytes": 493,
+      "sha256": "f15aee99e241e049f84732f177194fd6b8f425e74fd9697081091d83b9f13342",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/tclsh",
+      "file": "src/tools/web_recon/corpus/gtfobins/tclsh.md",
+      "bytes": 568,
+      "sha256": "b1278a910a1195f0bfb6b77d3713dc0ed011540ef7e65971d62a898237a303ec",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/gdb",
+      "file": "src/tools/web_recon/corpus/gtfobins/gdb.md",
+      "bytes": 662,
+      "sha256": "e3dab1a66b1eda4cc746ddf516897bc9414924f82384e89b33bf66c6a73cdaeb",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/base64",
+      "file": "src/tools/web_recon/corpus/gtfobins/base64.md",
+      "bytes": 154,
+      "sha256": "d8385206ee59428e347980801b05aca4bd323c82f972300d2bca6e38d32d7c81",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/xxd",
+      "file": "src/tools/web_recon/corpus/gtfobins/xxd.md",
+      "bytes": 281,
+      "sha256": "4536a86bced55183ff566a4bc5a91f40c30b3a734abaa2f5a1b9941d6aeb84ca",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/openssl",
+      "file": "src/tools/web_recon/corpus/gtfobins/openssl.md",
+      "bytes": 1252,
+      "sha256": "6cf49993f78eec0d13cd5c385218290e47907dcbc1b1e3b56f2d334b687109eb",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/sed",
+      "file": "src/tools/web_recon/corpus/gtfobins/sed.md",
+      "bytes": 598,
+      "sha256": "56218490a20d363436a3d12f285ddecaca7687c295f411e44a0361881e614371",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/ed",
+      "file": "src/tools/web_recon/corpus/gtfobins/ed.md",
+      "bytes": 475,
+      "sha256": "12d2ee692a009a37a930106d586c5f48019c2c19aef86004d6d8be38e971f389",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/dd",
+      "file": "src/tools/web_recon/corpus/gtfobins/dd.md",
+      "bytes": 265,
+      "sha256": "54de087805bd0242409ffe7c0f1a004cfb690563fe1abd059926ffc04eaa85bb",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/cp",
+      "file": "src/tools/web_recon/corpus/gtfobins/cp.md",
+      "bytes": 959,
+      "sha256": "9d5c3a79eda284a660be698ecd8fb39fe6215257c339b36a25af3eea5a64ab6e",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/ssh",
+      "file": "src/tools/web_recon/corpus/gtfobins/ssh.md",
+      "bytes": 1068,
+      "sha256": "332fa7c0a4f9de13f04ddd0f4fbcf5a355f167b95aa6b7954ce75a7de227bdec",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/scp",
+      "file": "src/tools/web_recon/corpus/gtfobins/scp.md",
+      "bytes": 739,
+      "sha256": "991192b35498e48970a51df0cb340938b0417a8a2ff3ea1b329f41085d9b3042",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/git",
+      "file": "src/tools/web_recon/corpus/gtfobins/git.md",
+      "bytes": 1825,
+      "sha256": "541245c19dbf8430be015a465963ae395eef0dca96f3ad0082b8895c21da11db",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/make",
+      "file": "src/tools/web_recon/corpus/gtfobins/make.md",
+      "bytes": 563,
+      "sha256": "18795c363ce5896bd6f284c21c9265b509e793ae4ad231370913d4e4d75afd90",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/sqlite3",
+      "file": "src/tools/web_recon/corpus/gtfobins/sqlite3.md",
+      "bytes": 561,
+      "sha256": "941a581ddea073cc5a2b38c17582654bdc7eb9008d1c57655e7ee052e17b8c60",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/mysql",
+      "file": "src/tools/web_recon/corpus/gtfobins/mysql.md",
+      "bytes": 461,
+      "sha256": "80c94bf23b734bd1ff8c4f5503f4fcd13c0b6aebfe117d66a8cfd9f846ff5fe2",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/java",
+      "file": "src/tools/web_recon/corpus/gtfobins/java.md",
+      "bytes": 482,
+      "sha256": "999d58ff4c718fb10656e7f676bb76e688ead6ca4f36b57dfcd78328110f9895",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/jrunscript",
+      "file": "src/tools/web_recon/corpus/gtfobins/jrunscript.md",
+      "bytes": 1910,
+      "sha256": "6db841b13f59fb5a8556e1d2ac243598eef0f148e85460f091dc17ea07a1063b",
+      "status": 200
+    },
+    {
+      "group": "gtfobins",
+      "skill": "rce",
+      "url": "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master/_gtfobins/rlwrap",
+      "file": "src/tools/web_recon/corpus/gtfobins/rlwrap.md",
+      "bytes": 443,
+      "sha256": "f96c32a33f149af455a289a4a4aa401ec635bce0e6aa1fdb401fa45e32813f6b",
+      "status": 200
+    },
+    {
+      "group": "can-i-take-over",
+      "skill": "subdomain-takeover",
+      "url": "https://raw.githubusercontent.com/EdOverflow/can-i-take-over-xyz/master/fingerprints.json",
+      "file": "src/tools/web_recon/corpus/can-i-take-over/fingerprints.json",
+      "bytes": 30804,
+      "sha256": "a108bf6e6d10d4e4861c4293eef8c224a0fd243ec4f3a39de321de69f284c64f",
+      "status": 200
+    },
+    {
+      "group": "can-i-take-over",
+      "skill": "subdomain-takeover",
+      "url": "https://raw.githubusercontent.com/EdOverflow/can-i-take-over-xyz/master/README.md",
+      "file": "src/tools/web_recon/corpus/can-i-take-over/README.md",
+      "bytes": 84788,
+      "sha256": "7a3242d7373e9a6d66be111e2f2d8ef6e9c4750ca0914d5d76de2c2b4dbb8e49",
+      "status": 200
+    }
+  ]
+}

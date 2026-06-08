@@ -7,22 +7,17 @@ import shlex
 from langchain_core.tools import tool
 
 from src.tools.shell import bash_exec
+from src.tools.wordlists import WordlistNotFound, resolve_wordlist
 
 
 _DEFAULT_TIMEOUT = 600
 
-# Tiny built-in lists for first-pass tests. The agent should escalate to
-# real wordlists on the host (rockyou, seclists) only after a small probe
-# confirms the form is brute-forceable at all.
-_USERLIST_PRESETS = {
-    "common": "/usr/share/wordlists/metasploit/http_default_users.txt",
-    "tiny": "/usr/share/seclists/Usernames/top-usernames-shortlist.txt",
-}
-_PASSLIST_PRESETS = {
-    "common": "/usr/share/wordlists/metasploit/http_default_pass.txt",
-    "tiny": "/usr/share/seclists/Passwords/Common-Credentials/10-million-password-list-top-100.txt",
-    "rockyou": "/usr/share/wordlists/rockyou.txt",
-}
+# Preset names map onto the shared wordlist resolver (src/tools/wordlists.py),
+# which finds the repo-bundled lists, the ~/.swarmattacker/seclists cache, or a
+# Kali install — so hydra works on this host without a Kali layout. Escalate to
+# a big passlist only after a small probe confirms the form is brute-forceable.
+_USERLIST_ALIASES = {"tiny": "usernames", "common": "usernames"}
+_PASSLIST_ALIASES = {"tiny": "passwords", "common": "passwords", "rockyou": "rockyou"}
 
 
 @tool
@@ -69,8 +64,11 @@ async def hydra_http_form(
         hydra stdout. Successful guesses appear as ``[<port>][http*-post-form]
         host: ... login: ... password: ...`` lines.
     """
-    user_path = _USERLIST_PRESETS.get(userlist, userlist)
-    pass_path = _PASSLIST_PRESETS.get(passlist, passlist)
+    try:
+        user_path = resolve_wordlist(_USERLIST_ALIASES.get(userlist, userlist))
+        pass_path = resolve_wordlist(_PASSLIST_ALIASES.get(passlist, passlist))
+    except WordlistNotFound as e:
+        return f"[hydra_http_form] {e}"
     module = "https-post-form" if https else "http-post-form"
 
     # The form_spec already embeds the path as its first segment. Rebuild

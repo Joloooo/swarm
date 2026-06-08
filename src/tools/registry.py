@@ -37,6 +37,7 @@ from src.tools.sqlmap import sqlmap_basic, sqlmap_dump_table, sqlmap_enum_dbs
 from src.tools.sslscan import sslscan_full
 from src.tools.testssl import testssl_full
 from src.tools.web_recon import fetch_page, gobuster_dir, nikto_scan
+from src.tools.wordlists import get_wordlist, list_wordlists
 
 
 _REGISTRY: dict[str, BaseTool] = {
@@ -78,6 +79,11 @@ _REGISTRY: dict[str, BaseTool] = {
 
     # Auth (typed)
     "hydra_http_form":        hydra_http_form,
+
+    # Wordlists — discovery skills only (recon, fuzzing). Enumeration is a
+    # last resort; the base prompt steers every other skill away from it.
+    "get_wordlist":           get_wordlist,
+    "list_wordlists":         list_wordlists,
 }
 
 

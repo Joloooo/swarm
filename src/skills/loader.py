@@ -333,11 +333,53 @@ def list_dispatchable_skills() -> list[tuple[str, str]]:
 def load_reference(skill_name: str, reference_file: str) -> str | None:
     """Load a file from ``src/skills/<skill>/references/<file>``.
 
-    Used for progressive-disclosure knowledge — the agent pulls a payload
-    library or method reference only when it actually needs it. Returns
-    None if the file doesn't exist.
+    Used for progressive-disclosure knowledge — the agent pulls a reference
+    only when it actually needs it. Returns None if the file doesn't exist.
     """
     path = SKILLS_DIR / skill_name / "references" / reference_file
     if not path.exists():
         return None
     return path.read_text(encoding="utf-8")
+
+
+def list_references(skill_name: str) -> list[str]:
+    """Markdown reference filenames under ``src/skills/<skill>/references/``.
+
+    Returns the ``*.md`` files (sorted), skipping any ``wordlists/`` data
+    subdir and non-markdown artifacts. Empty when the skill has no
+    references/ dir — callers use that to decide whether to advertise and
+    bind the progressive-disclosure machinery at all.
+    """
+    rdir = SKILLS_DIR / skill_name / "references"
+    if not rdir.is_dir():
+        return []
+    return sorted(
+        p.name for p in rdir.iterdir() if p.is_file() and p.suffix == ".md"
+    )
+
+
+def reference_index(skill_name: str) -> list[tuple[str, str]]:
+    """``[(filename, one-line description)]`` for a skill's references.
+
+    The description is each file's first H1 header (the ``# ...`` line),
+    which by convention reads ``<what it is> — Open WHEN: <trigger>``. The
+    index is therefore a generated *view* of the files themselves — there is
+    no separate manifest to drift out of sync. Falls back to the filename
+    when a file has no H1.
+    """
+    out: list[tuple[str, str]] = []
+    for fname in list_references(skill_name):
+        path = SKILLS_DIR / skill_name / "references" / fname
+        desc = fname
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("# "):
+                    desc = stripped[2:].strip()
+                    break
+                if stripped:
+                    break  # first real content isn't an H1 — use the filename
+        except OSError:
+            pass
+        out.append((fname, desc))
+    return out

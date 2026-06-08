@@ -639,6 +639,26 @@ def get_universal_prompt(stealth_level: int = 0) -> str:
     return "\n\n".join(_universal_parts(stealth_level))
 
 
+ENUMERATION_DISCIPLINE = """\
+## Brute-forcing / wordlist enumeration is a last resort
+Directory or parameter brute-forcing and wordlist spraying is NOT a default
+move — for an LLM agent it is the most common way a run burns its whole budget
+chasing nothing. Reach for it ONLY when there is a concrete signal that real
+content is hidden behind unguessable paths or parameters, for example:
+- the task or a hint says so directly ("find the hidden directory/bucket",
+  "search for hidden directories");
+- recon shows a near-empty app on an obviously larger stack, or a router that
+  returns the same 404 / SPA shell for every unknown path, with nothing
+  visible left to test.
+In THAT case enumeration is exactly right and you should run it with
+confidence — but it is the job of the recon and fuzzing skills, which carry the
+wordlist tools (get_wordlist / list_wordlists, gobuster, ffuf). If you are any
+OTHER skill and feel the urge to brute-force, treat it as a sign you are stuck
+on the wrong thing: re-read the visible surface, or hand the discovery need
+back to the planner. Do not hand-roll wordlist enumeration from a non-discovery
+skill."""
+
+
 def get_executor_prompt(stealth_level: int = 0) -> str:
     """Universal blocks + executor-only methodology + category guidance.
 
@@ -650,6 +670,7 @@ def get_executor_prompt(stealth_level: int = 0) -> str:
         DEMONSTRATED_STANDARD,
         EXHAUSTION_DISCIPLINE,
         DIVERSITY_RULES,
+        ENUMERATION_DISCIPLINE,
         TRANSFORMATION_HYPOTHESIS,
         SEVERITY_RULES,
         FINDING_CATEGORY_GUIDANCE,

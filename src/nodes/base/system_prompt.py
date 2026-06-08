@@ -236,6 +236,25 @@ DEMONSTRATED_STANDARD = """\
   emerged. Treat any of these as confirmation that your input reached
   the vulnerable code path — now find the variant that produces actual
   exploit output.
+- An IDENTICAL, error-free response is NOT proof the input is safe — it
+  is the single most common reason a real vulnerability gets wrongly
+  dismissed. A parameter that reflects nothing and never errors can
+  still be injectable; the channel is just invisible to a naive
+  same-vs-same comparison. When you see no differential at all, do not
+  conclude "not vulnerable" — MANUFACTURE a signal first:
+    - Time-based: send a payload that makes the backend pause if it is
+      interpreted (e.g. a `SLEEP(5)` / heavy-computation injection, a
+      slow DNS/HTTP fetch) and compare response times. A reliable ~5 s
+      delta that tracks your payload is proof, even with an identical body.
+    - Boolean-differential: send a pair that should be TRUE vs FALSE
+      server-side (`' AND 1=1-- ` vs `' AND 1=2-- `, an id that exists vs
+      one that doesn't) and look for ANY difference — length, a single
+      character, ordering, a sub-millisecond timing trend over repeats.
+    - Out-of-band: if nothing reflects and timing is flat, make the
+      server reach a collaborator URL you control (SSRF, a DNS lookup, an
+      external entity) and watch for the callback.
+  Only after a blind/time-based/OOB probe also comes back flat should a
+  parameter be recorded as not injectable.
 - This standard is not benchmark-specific. It is what a real reviewer
   requires before accepting a finding as confirmed. Findings that have
   not reached this bar should be downgraded to INFO with a note that
@@ -554,6 +573,15 @@ a game with a referee:
 - **You will know the token when you see it.** It looks like
   ``flag{...}``. The moment that shape appears in a response, you have
   found it — surface it in a finding.
+- **The instant you can read files or run commands, read the token
+  FIRST.** If you achieve arbitrary file read or command execution,
+  your very next action is to go straight for the hidden token before
+  exploring anything else — `cat /flag* /FLAG* 2>/dev/null`,
+  `grep -rIl 'flag{' / 2>/dev/null`, then read whatever those point at.
+  A proven read/exec capability is a loaded tool aimed at the objective;
+  do not wander off to map more of the application while holding it. If
+  the obvious paths are empty, read the application's own source to find
+  where it stores the token, then read that path.
 """
 
 

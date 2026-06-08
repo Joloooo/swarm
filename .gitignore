@@ -15,3 +15,7 @@ benchmarks/run_queue.txt
 
 # Per-run loopback IP leases (benchmarks/loopback.py) — transient, host-local.
 benchmarks/.loopback_leases/
+
+# rockyou is 133 MB — too big for git. Re-fetch with scripts/download_wordlists.sh.
+# The smaller dir-enum lists (common/raft-*/big) ARE committed.
+wordlists/rockyou.txt

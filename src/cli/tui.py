@@ -756,7 +756,8 @@ def _config_top(cfg: dict[str, dict[str, Any]]) -> str | None:
         f"planner={b['planner_max_iters']} "
         f"worker={b['worker_max_iterations']} "
         f"llm-tokens={b['llm_max_tokens']} "
-        f"web-chars={b['web_search_max_crawled_chars']}"
+        f"web-chars={b['web_search_max_crawled_chars']} "
+        f"timeout={b.get('run_timeout_s', 1200) // 60}m"
     )
 
     choices = [
@@ -785,6 +786,7 @@ def _budgets_submenu(cfg: dict[str, dict[str, Any]]) -> None:
         ("worker_max_iterations",        "Worker max iterations"),
         ("llm_max_tokens",               "LLM max output tokens (per call)"),
         ("web_search_max_crawled_chars", "Web-search max chars per source"),
+        ("run_timeout_s",                "Agent timeout/benchmark — sec (1200=20m, 2400=40m)"),
     ]
     while True:
         labels: list[Choice] = [

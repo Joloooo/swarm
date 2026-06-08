@@ -245,8 +245,9 @@ class SwarmGraphState(TypedDict, total=False):
     # Web-search ("crawler") fire policy for this run. Seeded from the
     # SWARM_CRAWL_MODE env var by the runner; read by the planner. "1"
     # BASELINE (planner's own firing), "2" CHARACTERIZATION, "3" STUCK,
-    # "5" STUCK_DIVERGENCE. See src/nodes/crawl_policy.py. Empty/absent =>
-    # treated as baseline. A/B harness knob, not a permanent setting.
+    # "5" STUCK_DIVERGENCE, "6" TOOL_DESC, "9" ALL (everything on). See
+    # src/nodes/crawl_policy.py. Empty/absent => "9" (all-on) is the DEFAULT,
+    # so the full crawl policy runs from any entry point unless overridden.
     crawl_mode: str
 
     # Planning

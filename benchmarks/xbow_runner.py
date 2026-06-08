@@ -952,10 +952,12 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
             "findings": [],
             "agent_results": [],
             "active_agents": [],
-            # Web-search fire-policy mode for this run (A/B harness). "1"
-            # baseline, "2"/"3"/"5" deterministic policies. See
-            # src/nodes/crawl_policy.py. Defaults to baseline.
-            "crawl_mode": os.environ.get("SWARM_CRAWL_MODE", "1"),
+            # Web-search fire-policy mode for this run. Default "9" = all-on
+            # (characterization + stuck + divergence + the when-to-use
+            # description), so the full crawl policy is active by default.
+            # Override SWARM_CRAWL_MODE=1 for the crawl-off baseline, or
+            # 2/3/5/6 to isolate one policy. See src/nodes/crawl_policy.py.
+            "crawl_mode": os.environ.get("SWARM_CRAWL_MODE", "9"),
             # Benchmark-mode signal — workers and the planner read this
             # to know the run has an explicit flag-extraction success
             # criterion. Empty string in non-benchmark contexts.

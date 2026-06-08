@@ -138,6 +138,7 @@ def summarize(campaign: Path) -> dict:
             "flag_found": bool(row.get("flag_found")),
             "duration_s": dur,
             "findings": row.get("findings_count"),
+            "findings_by_severity": row.get("findings_by_severity") or {},
             "error": row.get("error"),
             "captured_flag": row.get("captured_flag") or "",
         }

@@ -759,6 +759,49 @@ def _container_bridge_target(benchmark_id: str) -> str | None:
     return None
 
 
+# Canonical severity order — drives the ordering of the breakdown shown in
+# the end-of-bench line and stored in summary.json. Matches Severity in
+# src/state.py (critical → info).
+_SEVERITY_ORDER = ("critical", "high", "medium", "low", "info")
+
+
+def _findings_breakdown(findings: list) -> dict[str, int]:
+    """Count findings per severity, ordered critical→info, omitting zeros.
+
+    ``Finding.severity`` is a ``Severity`` str-enum (see src/state.py); we
+    read ``.value`` and fall back to the raw value / ``"info"`` so a
+    malformed finding can never break the tally. Returns an insertion-
+    ordered dict so callers can render ``"1 high, 2 medium"`` directly.
+    """
+    counts: dict[str, int] = {}
+    for f in findings or []:
+        sev = getattr(f, "severity", None)
+        val = getattr(sev, "value", sev)
+        key = str(val or "info").lower()
+        counts[key] = counts.get(key, 0) + 1
+    ordered = {s: counts[s] for s in _SEVERITY_ORDER if s in counts}
+    # Surface any non-canonical severity strings too, after the known ones.
+    for s in counts:
+        if s not in ordered:
+            ordered[s] = counts[s]
+    return ordered
+
+
+def _record_findings(result: dict, agent_state: dict) -> None:
+    """Populate ``findings_count`` + ``findings_by_severity`` on ``result``
+    from a graph-state snapshot.
+
+    Called on the normal completion path AND in the timeout / crash
+    handlers. Because the graph is now streamed (``graph.astream`` below),
+    ``agent_state`` holds the latest full-state snapshot even when
+    ``ainvoke`` would never have returned — so a timed-out run reports the
+    findings it actually accumulated instead of a hollow ``0``.
+    """
+    findings = list((agent_state or {}).get("findings") or [])
+    result["findings_count"] = len(findings)
+    result["findings_by_severity"] = _findings_breakdown(findings)
+
+
 async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
     flag = expected_flag(benchmark_id)
     started = time.time()
@@ -808,6 +851,7 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "flag_found": False,
         "findings_count": 0,
+        "findings_by_severity": {},
         "duration_s": None,
         "target_url": None,
         "error": None,
@@ -915,15 +959,28 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
             # this. See state.AgentState for the field docstring.
             "expected_flag_candidates": candidates,
         }
-        # Single-planner run — drop-in graph.ainvoke; returns the final
-        # state, so the verdict logic below is unchanged.
-        agent_state = await asyncio.wait_for(
-            graph.ainvoke(
+        # Stream (rather than ainvoke) so the latest full-state snapshot —
+        # including findings accumulated so far — survives a timeout cancel.
+        # ``stream_mode="values"`` yields the complete state after each
+        # super-step; the final yield equals what ainvoke would have
+        # returned, so the verdict logic below is unchanged on the normal
+        # path. On RUN_TIMEOUT_S the inner stream is cancelled but
+        # ``agent_state`` already holds the last completed step's state, so
+        # the timeout handler can still read its findings instead of
+        # reporting a hollow 0 (the bug that made every timed-out bench show
+        # "0 findings" even after workers had classified real ones). Mirrors
+        # the same partial-snapshot pattern in
+        # ``src/nodes/base/skill_runner.py``.
+        async def _drive_graph() -> None:
+            nonlocal agent_state
+            async for snapshot in graph.astream(
                 initial_state,
                 config={"recursion_limit": GRAPH_RECURSION_LIMIT},
-            ),
-            timeout=RUN_TIMEOUT_S,
-        )
+                stream_mode="values",
+            ):
+                agent_state = snapshot
+
+        await asyncio.wait_for(_drive_graph(), timeout=RUN_TIMEOUT_S)
 
         # Verdict: did the planner submit a verified flag?
         #
@@ -953,9 +1010,14 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         else:
             result["flag_found"] = False
             result["captured_flag"] = ""
-        result["findings_count"] = len(agent_state.get("findings") or [])
+        _record_findings(result, agent_state)
 
     except asyncio.TimeoutError:
+        # Harvest findings from the partial snapshot FIRST — the streamed
+        # ``agent_state`` holds the last completed super-step's state even
+        # though ainvoke never returned, so a timed-out run reports the
+        # findings it actually accumulated instead of 0.
+        _record_findings(result, agent_state)
         # Late-capture rescue: a worker may have raised FlagCapturedSignal
         # and set the process-global mid-flight, but the summarizer's
         # Codex call (60–90s) didn't finish before RUN_TIMEOUT_S fired,
@@ -1000,6 +1062,8 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
     except Exception as e:  # noqa: BLE001
         result["error"] = f"{type(e).__name__}: {e}"
         logger.exception("[%s] failed", benchmark_id)
+        # A crash mid-run may still leave findings on the streamed snapshot.
+        _record_findings(result, agent_state)
     finally:
         try:
             docker_down(benchmark_id)
@@ -1315,6 +1379,7 @@ async def main_async(args) -> int:
             ok=bool(r["flag_found"]),
             duration_s=float(r["duration_s"] or 0.0),
             findings_n=int(r["findings_count"] or 0),
+            findings_by_severity=dict(r.get("findings_by_severity") or {}),
             # The summary.md artefact was removed in the 2026-05 log
             # consolidation; we now point the end-of-bench line at the
             # plain-text terminal log instead. The structured log is one

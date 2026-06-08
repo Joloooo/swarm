@@ -440,11 +440,22 @@ it in this exact format (the parser accepts either ``**FINDING:**`` or
 - Payload: [Exact payload that triggers the vulnerability]
 - Evidence: [Relevant response excerpt proving the finding]
 - CWE: [CWE ID if known, e.g. CWE-89 for SQLi]
+- Primitive: [OPTIONAL — set ONLY when you have DEMONSTRATED a proven
+  exploit capability that is a *means to the objective*, not the
+  objective itself. Use one tag: rce (you ran a command and saw its
+  output) / file_read (you read an arbitrary file's contents) /
+  sqli_read (you extracted at least one real row/value via injection) /
+  auth_bypass (you reached a privileged action with a non-privileged or
+  forged session) / ssrf (you confirmed a server-side request to your
+  URL). Leave this OUT for anything you only suspect or for ordinary
+  info-disclosure. Setting it tells the supervisor "this is a loaded
+  gun — keep firing it at the objective," so be honest: only mark it
+  when the evidence above actually proves the capability.]
 
 Only ``Title:`` and ``Severity:`` are required; the rest are optional but
-strongly preferred. JSON output of the form
-``{"findings": [{"title": "...", "severity": "...", ...}]}`` is also
-accepted as a fallback.
+strongly preferred. Put ``Primitive:`` LAST in the block. JSON output of
+the form ``{"findings": [{"title": "...", "severity": "...",
+"primitive": "rce", ...}]}`` is also accepted as a fallback.
 """
 
 

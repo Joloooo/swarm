@@ -1,19 +1,20 @@
 """Curated authoritative reference sources, keyed by vulnerability class.
 
-Why: the e2e research test (2026-06-07) showed Tavily's top-10 often miss the
-payload-rich pages, and the richest references — HackTricks, PayloadsAllTheThings
-— either can't be crawled (book.hacktricks.xyz is JS/bot-protected) or hide the
-payloads in linked leaf files (PayloadsAllTheThings' per-dir README is an index).
+Why: the richest references — HackTricks, PayloadsAllTheThings — either can't
+be crawled (book.hacktricks.xyz is JS/bot-protected) or hide the payloads in
+linked leaf files (PayloadsAllTheThings' per-dir README is an index).
 
-So for known vuln classes we skip search entirely and deep-fetch the canonical
-GitHub *raw markdown* directly: the HackTricks-wiki mirror (full page, ~50k
-chars, crawlable over plain HTTP) and the PayloadsAllTheThings leaf files (the
-engine-specific payload dumps, not the index). All URLs were HTTP-200 verified
-on 2026-06-07. These are markdown already, so the crawler's HTML→md extractor
-passes them through untouched.
+So for known vuln classes we deep-fetch the canonical GitHub *raw markdown*
+directly: the HackTricks-wiki mirror (full page, ~50k chars, crawlable over
+plain HTTP) and the PayloadsAllTheThings leaf files (the engine-specific
+payload dumps, not the index). All URLs were HTTP-200 verified on 2026-06-07.
+These are markdown already, so the crawler's HTML→md extractor passes them
+through untouched.
 
-The web_search node fetches these IN ADDITION to Tavily, prioritized first.
-For classes not in the map, Tavily remains the path.
+The web_search node passes this curated markdown to the Codex hosted
+``web_search`` tool as context, so the model reads the payload-rich pages
+alongside its own searches. For classes not in the map there is no curated
+prepend — the Codex model's own web searches are the path.
 """
 
 from __future__ import annotations

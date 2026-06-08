@@ -81,10 +81,15 @@ _ALL_MODES = {
 
 
 def normalize_mode(raw: str | None) -> str:
-    """Coerce a raw ``crawl_mode`` value to a known mode, defaulting to
-    BASELINE for anything unrecognised (including ``None`` / empty)."""
+    """Coerce a raw ``crawl_mode`` value to a known mode.
+
+    Default is ALL (mode 9, everything on): when nothing is specified — any
+    entry point that does not seed ``crawl_mode`` (TUI single run, oneshot,
+    benchmarks/runner) — the agent runs with the full crawl policy active.
+    Set ``SWARM_CRAWL_MODE=1`` for the crawl-off baseline, or 2/3/5/6 to
+    isolate one policy for an A/B."""
     m = (raw or "").strip()
-    return m if m in _ALL_MODES else BASELINE
+    return m if m in _ALL_MODES else ALL
 
 
 # --- Tunables -------------------------------------------------------------

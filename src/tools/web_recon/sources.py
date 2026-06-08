@@ -84,7 +84,7 @@ CURATED_SOURCES: dict[str, list[str]] = {
     ],
     "csrf": [
         f"{_HT}/csrf-cross-site-request-forgery.md",
-        f"{_PA}/CSRF%20Injection/README.md",
+        f"{_PA}/Cross-Site%20Request%20Forgery/README.md",
     ],
 }
 

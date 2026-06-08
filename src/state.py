@@ -275,6 +275,17 @@ class SwarmGraphState(TypedDict, total=False):
     # Planning
     active_agents: Annotated[list[str], operator.add]
 
+    # Config names (skill identities) that were forced onto the tier-2
+    # fallback model (gpt-5.4 low) by a cyber_policy refusal this run.
+    # Once a skill's prompt has tripped the primary model's safety
+    # classifier, its NEXT dispatch starts directly on the fallback model
+    # (skipping the 3 doomed primary retries), since the same prompt would
+    # refuse identically. Written by ``run_skill_agent`` when a worker used
+    # the fallback tier (rescued or exhausted); read at dispatch time to set
+    # ``start_on_fallback`` on the refusal-retry ladder. ``operator.add``
+    # accumulates across turns; consumers dedup via ``set(...)``.
+    fallback_configs: Annotated[list[str], operator.add]
+
     # -- Supervisor planner state (src/nodes/planner.py) --
     # The action the planner chose on its most recent turn. Read by
     # route_after_planner to pick the next node.

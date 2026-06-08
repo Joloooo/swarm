@@ -958,6 +958,21 @@ async def _run_skill_agent_impl(
     worker_last_tier = "primary"
     flag_watcher_capture: str | None = None
     sibling_captured_value: str = ""
+
+    # Sticky fallback: if this config's prompt already tripped the primary
+    # model's cyber_policy classifier earlier this run, start its dispatch
+    # directly on the fallback model — the primary would refuse the same
+    # prompt again, wasting 3 retries. (No-op when no fallback is wired.)
+    start_on_fallback = (
+        fallback_factory is not None
+        and config.config_name in set((state or {}).get("fallback_configs") or [])
+    )
+    if start_on_fallback:
+        node.log.info(
+            "[%s] config %r refused on the primary model earlier this run — "
+            "dispatching directly on the fallback model",
+            config.agent_id, config.config_name,
+        )
     try:
         # Inner try catches the FlagWatcher's short-circuit signals so
         # they never reach the outer ``except Exception`` (which would
@@ -993,6 +1008,7 @@ async def _run_skill_agent_impl(
                 call_config=call_config,
                 config=config,
                 log=node.log,
+                start_on_fallback=start_on_fallback,
             )
         except FlagCapturedSignal as sig:
             flag_watcher_capture = sig.flag
@@ -1197,6 +1213,13 @@ async def _run_skill_agent_impl(
             _rate_limit_types = ()
         if _rate_limit_types and isinstance(e, _rate_limit_types):
             raise
+
+        # The refusal-retry ladder tags the exception with the tier it
+        # reached. On a terminal refusal the tuple-unpack above never ran,
+        # so ``worker_last_tier`` is still its "primary" default — recover
+        # the real tier here so the sticky-fallback record below fires when
+        # this config exhausted the fallback model too.
+        worker_last_tier = getattr(e, "_swarm_last_tier", worker_last_tier)
 
         # Cyber-policy / invalid-prompt failures from the Codex API
         # are *refusals*, not crashes. Surface them on the
@@ -1675,6 +1698,11 @@ async def _run_skill_agent_impl(
         "findings": findings,
         "active_agents": [config.agent_id],
     }
+    # Sticky-fallback bookkeeping: if this dispatch used the fallback model
+    # (rescued by it, exhausted it, or was sent straight to it), record the
+    # config so its NEXT dispatch this run skips the doomed primary tier.
+    if start_on_fallback or worker_last_tier == "fallback":
+        update["fallback_configs"] = [config.config_name]
     if captured_flag_value is not None:
         update["captured_flag"] = captured_flag_value
         # Mirror onto submission_attempts so xbow_runner.run_one's

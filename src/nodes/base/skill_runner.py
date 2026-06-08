@@ -137,7 +137,11 @@ FINDING_PATTERN = re.compile(
     r"Severity:\s*(\w+)"
     r"(?:[\s\S]{0,200}?Category:\s*([\w-]+))?"
     r"(?:[\s\S]{0,400}?URL:\s*(.+?)$)?"
-    r"(?:[\s\S]{0,400}?Evidence:\s*(.+?)$)?",
+    r"(?:[\s\S]{0,400}?Evidence:\s*(.+?)$)?"
+    # Primitive is OPTIONAL and instructed to come LAST in the block, so a
+    # generous gap after Evidence lets it tolerate a CWE / Payload line in
+    # between. Group 6. Absent → "" → ordinary (non-primitive) finding.
+    r"(?:[\s\S]{0,400}?Primitive:\s*([\w-]+))?",
     re.MULTILINE,
 )
 
@@ -165,6 +169,7 @@ def _findings_from_markdown(content: str, agent_id: str) -> list[Finding]:
         category = (match.group(3) or "unknown").strip().lower()
         url = (match.group(4) or "").strip()
         evidence = (match.group(5) or "").strip()
+        primitive = (match.group(6) or "").strip().lower()
         out.append(Finding(
             title=title,
             severity=SEVERITY_MAP.get(severity_str, Severity.INFO),
@@ -173,6 +178,7 @@ def _findings_from_markdown(content: str, agent_id: str) -> list[Finding]:
             evidence=evidence[:500],
             agent_id=agent_id,
             url=url,
+            primitive=primitive,
         ))
     return out
 
@@ -193,6 +199,7 @@ def _findings_from_json(content: str, agent_id: str) -> list[Finding]:
             category = str(item.get("category") or "unknown").strip().lower()
             url = str(item.get("url") or "").strip()
             evidence = str(item.get("evidence") or item.get("payload") or "")[:500]
+            primitive = str(item.get("primitive") or "").strip().lower()
             out.append(Finding(
                 title=title,
                 severity=SEVERITY_MAP.get(severity_str, Severity.INFO),
@@ -201,6 +208,7 @@ def _findings_from_json(content: str, agent_id: str) -> list[Finding]:
                 evidence=evidence,
                 agent_id=agent_id,
                 url=url,
+                primitive=primitive,
             ))
     return out
 

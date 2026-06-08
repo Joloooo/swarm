@@ -32,6 +32,19 @@ class Finding:
     url: str = ""
     cwe: str = ""
     reproduced: bool = False
+    # A *demonstrated exploit primitive* — a proven capability that is a
+    # means to the objective but not yet the objective itself (e.g. "I can
+    # run shell commands" / "I can read any file" / "I have a working data-
+    # leaking SQL injection" / "I hold a privileged session"). Set by the
+    # worker (parsed from a ``Primitive:`` line in its FINDING block) when
+    # the finding meets the demonstrated-standard for an exploit-capable
+    # class. Empty for ordinary observations. The planner's last-mile
+    # directive (``src/nodes/planner.py:_unconverted_primitive_directive``)
+    # reads this to keep an executor driving the primitive to the flag
+    # before opening any new, lower-probability surface. Free-form short
+    # tag; the canonical values are rce / file_read / sqli_read /
+    # auth_bypass / ssrf, but a worker may coin another.
+    primitive: str = ""
 
 
 @dataclass

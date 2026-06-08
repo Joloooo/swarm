@@ -1853,11 +1853,14 @@ class PlannerNode(BaseNode):
                     lead_note.replace("\n", " | ")[:300],
                 )
                 prior_messages.append(HumanMessage(content=lead_note))
-        elif crawl_mode == crawl_policy.TOOL_DESC:
-            # Mode 6: the rich when-to-use description IS the fire policy — the
-            # planner self-routes web_search/research_query from it. No
-            # deterministic firing (mode 6 is not in DETERMINISTIC_MODES) and
-            # no soft nudge, so description-driven routing is measured alone.
+        elif crawl_mode in (crawl_policy.TOOL_DESC, crawl_policy.ALL):
+            # Mode 6 (description self-trigger) and Mode 9 (all-on) both inject
+            # the rich when-to-use description. In Mode 6 it is the ONLY
+            # mechanism (no deterministic firing). In Mode 9 the deterministic
+            # triggers ALSO fire at the attack branch, so the planner can both
+            # self-route and be auto-fired — each crawl stays attributable (a
+            # deterministic fire emits a CRAWL-FIRE tag, a self-routed one does
+            # not).
             prior_messages.append(
                 HumanMessage(content=crawl_policy.web_search_when_to_use_note())
             )

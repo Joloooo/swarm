@@ -61,13 +61,23 @@ STUCK_DIVERGENCE = "5"
 # description alone). A/B'd against the hard code-gates of 2/3/5.
 TOOL_DESC = "6"
 
+# Mode 9 — "all-on" discovery mode: every deterministic trigger
+# (characterization + stuck + divergence, normalizer-backed) AND the Mode-6
+# description note fire together. For ONE combined sweep where each crawl is
+# tagged by trigger and assessed independently, rather than a per-arm A/B.
+# Attribution survives because every deterministic fire emits a CRAWL-FIRE
+# log line; planner-self-routed crawls (from the description) do not.
+ALL = "9"
+
 # Modes whose deterministic policy replaces the planner's own firing. When
 # any of these is active the planner suppresses the soft lead directive so
 # the two mechanisms do not confound the measurement. Mode 6 is NOT here —
 # it fires nothing deterministically; the description does the steering.
-DETERMINISTIC_MODES = {CHARACTERIZATION, STUCK, STUCK_DIVERGENCE}
+DETERMINISTIC_MODES = {CHARACTERIZATION, STUCK, STUCK_DIVERGENCE, ALL}
 
-_ALL_MODES = {BASELINE, CHARACTERIZATION, STUCK, STUCK_DIVERGENCE, TOOL_DESC}
+_ALL_MODES = {
+    BASELINE, CHARACTERIZATION, STUCK, STUCK_DIVERGENCE, TOOL_DESC, ALL,
+}
 
 
 def normalize_mode(raw: str | None) -> str:
@@ -605,4 +615,12 @@ def select_crawl_query(state: dict, mode: str) -> CrawlDecision | None:
         return stuck_conversion_fire(state)
     if mode == STUCK_DIVERGENCE:
         return stuck_conversion_fire(state) or divergence_fire(state)
+    if mode == ALL:
+        # Everything on: characterization wins early (fires once before any
+        # crawl), then stuck/divergence take over once a crawl has run.
+        return (
+            characterization_fire(state)
+            or stuck_conversion_fire(state)
+            or divergence_fire(state)
+        )
     return None

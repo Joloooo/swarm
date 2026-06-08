@@ -103,8 +103,12 @@ def test_recon_system_prompt_mentions_curl_replacement():
 
 
 def test_gobuster_common_resolves_after_changes():
-    """The bundled wordlist is enough to satisfy `wordlist=\"common\"`."""
-    path = gobuster_mod._resolve_wordlist("common")
+    """The bundled wordlist is enough to satisfy `wordlist=\"common\"`.
+
+    The resolver moved to ``src.tools.wordlists.resolve_wordlist``; gobuster
+    re-exports it, so the recon path still resolves ``common`` to a real file.
+    """
+    path = gobuster_mod.resolve_wordlist("common")
     assert Path(path).is_file()
 
 

@@ -1,18 +1,23 @@
-"""Tier 1 — gobuster wordlist resolver.
+"""Tier 1 — shared wordlist resolver.
 
-The resolver in :mod:`src.tools.web_recon.gobuster` decides which file on
-disk the ``-w`` flag of gobuster points at when an agent calls
-``gobuster_dir(wordlist="common")``. Before the SecLists rework this was
-a static dict pointing at Kali paths (``/usr/share/wordlists/dirb/...``)
-that don't exist on macOS, so every gobuster call on a clean Mac failed
-with a "wordlist not found" error from gobuster itself — wasting an LLM
-turn per attempt. These tests pin the new behaviour:
+The resolver in :mod:`src.tools.wordlists` decides which file on disk a
+wordlist name maps to — used by ``gobuster_dir(wordlist="common")``,
+``hydra_http_form``, and the agent-facing ``get_wordlist`` tool. Before
+the SecLists rework this was a static dict pointing at Kali paths
+(``/usr/share/wordlists/dirb/...``) that don't exist on macOS, so every
+gobuster call on a clean Mac failed with a "wordlist not found" error —
+wasting an LLM turn per attempt.
 
-- ``common`` always resolves to *something* on every machine, because
-  the repo bundles a smoke-test ``wordlists/common.txt``.
-- Larger presets (``medium`` / ``big``) raise ``FileNotFoundError`` with
-  a hint pointing at ``./scripts/setup.sh --with-seclists`` when no
-  SecLists install is present.
+The resolver moved out of ``web_recon.gobuster`` into the shared
+``src.tools.wordlists`` module (gobuster re-exports it). These tests pin
+the current behaviour:
+
+- ``common`` always resolves to *something* on every machine, because the
+  repo bundles a ``wordlists/common.txt``.
+- ``medium`` now ALSO resolves on every machine — ``raft-medium-
+  directories.txt`` is vendored into ``wordlists/`` by
+  ``scripts/download_wordlists.sh``. (It used to raise; that changed when
+  the SecLists lists were vendored.)
 - Absolute paths pass through unchanged when they exist; raise when not.
 - Unknown preset names fail with a helpful error listing the known
   presets, not a silent "file not found".
@@ -24,13 +29,13 @@ from pathlib import Path
 
 import pytest
 
-from src.tools.web_recon import gobuster as gobuster_mod
-from src.tools.web_recon.gobuster import _resolve_wordlist
+from src.tools import wordlists as wl_mod
+from src.tools.wordlists import WordlistNotFound, resolve_wordlist
 
 
 def test_common_resolves_from_bundled_fallback():
     """``common`` always works — bundled wordlist is shipped in-repo."""
-    path = _resolve_wordlist("common")
+    path = resolve_wordlist("common")
     assert Path(path).is_file(), f"resolver returned non-existent path: {path}"
     # Must be ``common.txt`` somewhere — whether SecLists, dirb, or bundled.
     assert Path(path).name == "common.txt"
@@ -44,42 +49,36 @@ def test_common_falls_back_to_repo_when_no_system_install(monkeypatch, tmp_path)
     is the only thing keeping gobuster usable in that case.
     """
     nowhere = tmp_path / "does-not-exist"
-    monkeypatch.setattr(gobuster_mod, "_USER_SECLISTS", nowhere)
-    monkeypatch.setattr(gobuster_mod, "_SYSTEM_SECLISTS_ROOTS", (nowhere,))
-    monkeypatch.setattr(gobuster_mod, "_SYSTEM_WORDLIST_ROOTS", (nowhere,))
+    monkeypatch.setattr(wl_mod, "_USER_SECLISTS", nowhere)
+    monkeypatch.setattr(wl_mod, "_SYSTEM_SECLISTS_ROOTS", (nowhere,))
+    monkeypatch.setattr(wl_mod, "_SYSTEM_WORDLIST_ROOTS", (nowhere,))
 
-    path = _resolve_wordlist("common")
+    path = resolve_wordlist("common")
     # Should be the repo-bundled copy, not a system file.
-    assert path.startswith(str(gobuster_mod._BUNDLED_DIR))
+    assert path.startswith(str(wl_mod._BUNDLED_DIR))
     assert Path(path).is_file()
 
 
-def test_medium_without_seclists_raises_with_hint(monkeypatch, tmp_path):
-    """``medium`` has no bundled fallback — must surface a clear install hint."""
-    nowhere = tmp_path / "does-not-exist"
-    monkeypatch.setattr(gobuster_mod, "_USER_SECLISTS", nowhere)
-    monkeypatch.setattr(gobuster_mod, "_SYSTEM_SECLISTS_ROOTS", (nowhere,))
-    monkeypatch.setattr(gobuster_mod, "_SYSTEM_WORDLIST_ROOTS", (nowhere,))
-    # Make sure the bundled dir has no medium list (it shouldn't).
-    bundled = gobuster_mod._BUNDLED_DIR
-    assert not any(
-        (bundled / Path(rel).name).is_file()
-        for rel in gobuster_mod._PRESETS["medium"]
-    ), "test assumes no medium wordlist is bundled — adjust if that changes"
+def test_medium_resolves_from_bundled_vendored_list():
+    """``medium`` now resolves on every machine — the SecLists list is vendored.
 
-    with pytest.raises(FileNotFoundError) as exc:
-        _resolve_wordlist("medium")
-    msg = str(exc.value)
-    assert "medium" in msg
-    assert "--with-seclists" in msg, (
-        "error message must point operators at the install command"
-    )
+    ``scripts/download_wordlists.sh`` drops ``raft-medium-directories.txt``
+    into ``wordlists/``, so even with no system SecLists install the bundled
+    fallback satisfies ``medium``. (This is the inverse of the old behaviour,
+    which raised a "--with-seclists" hint.)
+    """
+    path = resolve_wordlist("medium")
+    assert Path(path).is_file(), f"resolver returned non-existent path: {path}"
+    # Any of the registered medium candidates' basenames is acceptable; the
+    # vendored one is raft-medium-directories.txt.
+    expected = {Path(rel).name for rel in wl_mod._PRESETS["medium"]}
+    assert Path(path).name in expected
 
 
 def test_unknown_preset_lists_known_options():
     """Typos like ``wordlist='comon'`` should fail fast with the menu."""
-    with pytest.raises(FileNotFoundError) as exc:
-        _resolve_wordlist("comon")
+    with pytest.raises(WordlistNotFound) as exc:
+        resolve_wordlist("comon")
     msg = str(exc.value)
     assert "unknown wordlist preset" in msg
     assert "common" in msg  # the known-preset list must appear
@@ -89,23 +88,18 @@ def test_absolute_path_passthrough(tmp_path):
     """Absolute path to an existing file is returned unchanged."""
     f = tmp_path / "my-list.txt"
     f.write_text("admin\napi\n", encoding="utf-8")
-    assert _resolve_wordlist(str(f)) == str(f)
+    assert resolve_wordlist(str(f)) == str(f)
 
 
 def test_absolute_path_missing_raises(tmp_path):
     """Absolute path that doesn't exist must raise, not silently fall back."""
     missing = tmp_path / "nope.txt"
+    # WordlistNotFound subclasses FileNotFoundError — assert the base type.
     with pytest.raises(FileNotFoundError):
-        _resolve_wordlist(str(missing))
+        resolve_wordlist(str(missing))
 
 
-def test_relative_path_in_repo_bundled_dir():
-    """Bundled directory should expose any list dropped in it by filename.
-
-    The resolver allows future bundled wordlists to be discovered by
-    bare filename without code changes — we already exercise this for
-    ``common.txt`` (which is also a registered preset), so the relative
-    path mechanism is the underlying contract.
-    """
-    bundled_common = gobuster_mod._BUNDLED_DIR / "common.txt"
+def test_bundled_dir_exposes_common():
+    """The bundled directory ships ``common.txt`` so ``common`` is always usable."""
+    bundled_common = wl_mod._BUNDLED_DIR / "common.txt"
     assert bundled_common.is_file()

@@ -27,6 +27,7 @@ node catches that and falls back to the curated raw-markdown stitch.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import re
@@ -37,6 +38,27 @@ from urllib.parse import urlparse
 from src.llm import codex
 
 log = logging.getLogger("tools.codex_search")
+
+# Local rate-limit retry policy for the web_search path. On a ChatGPT Pro
+# plan a 429 here is almost always a per-minute REQUEST burst (the planner
+# fires web_search concurrently with executors), not the 5-hour account wall.
+# So we back off and retry locally instead of aborting the run on the first
+# 429 — backoff schedule 5/10/20/30s rides out a full RPM minute. Only when
+# these retries are exhausted (or the error is a real, non-retryable quota
+# exhaustion) do we trip the process-global run-abort signal.
+_WS_RL_MAX_ATTEMPTS = 5
+_WS_RL_BASE_DELAY_S = 5.0
+
+
+def _ws_retry_delay(retry_after: float | None, attempt: int) -> float:
+    """Seconds to sleep before the next web_search attempt.
+
+    Honors a server ``retry_after`` hint when present (capped), else
+    exponential backoff anchored at ``_WS_RL_BASE_DELAY_S``.
+    """
+    if retry_after is not None:
+        return min(retry_after, codex.MAX_RETRY_DELAY_S)
+    return min(_WS_RL_BASE_DELAY_S * (2 ** attempt), codex.MAX_RETRY_DELAY_S)
 
 # Bare-URL matcher for the citation fallback: the Codex backend does not always
 # emit structured annotation events, but the model writes the source URLs inline
@@ -159,16 +181,19 @@ async def codex_web_search(
     reasoning_effort: str = "low",
     timeout: float = 240.0,
 ) -> CodexWebSearchResult:
-    """Run one Codex-native web search and return the model's cited summary.
+    """Run a Codex-native web search and return the model's cited summary.
 
     ``extra_context`` is optional already-retrieved authoritative markdown
     (the curated HackTricks / PayloadsAllTheThings pages) appended to the
     query so the model reads it alongside its own searches.
 
-    Raises nothing for the normal failure paths — a hard cyber_policy refusal,
-    a stream failure, or missing Codex auth all come back as a
-    :class:`CodexWebSearchResult` with ``answer=""`` and ``hard_refused`` /
-    ``error`` set, so the caller can fall back without a try/except.
+    A transient rate-limit (429 / overload) is retried locally with backoff
+    (``_WS_RL_MAX_ATTEMPTS``); only an exhausted retry budget or a genuine,
+    non-retryable quota exhaustion trips the run-abort signal. Every other
+    failure — a hard cyber_policy refusal, a stream error, or missing Codex
+    auth — comes back as a :class:`CodexWebSearchResult` with ``answer=""``
+    and ``hard_refused`` / ``error`` set, so the caller falls back without a
+    try/except.
     """
     try:
         tokens = codex.load_tokens()
@@ -192,6 +217,62 @@ async def codex_web_search(
         "content": [{"type": "input_text", "text": user_text}],
     }]
 
+    # Retry transient rate-limit / overload bursts locally with backoff; only
+    # escalate to the global run-abort signal when the budget is exhausted or
+    # the error is a non-retryable quota exhaustion.
+    last_exc: BaseException | None = None
+    for attempt in range(_WS_RL_MAX_ATTEMPTS):
+        try:
+            return await _stream_once(
+                tokens, model=model, input_items=input_items,
+                reasoning_effort=reasoning_effort, timeout=timeout,
+            )
+        except (
+            codex.CodexRateLimitError,
+            codex.CodexServerOverloadedError,
+            codex.CodexQuotaExceededError,
+            codex.CodexAPIError,
+        ) as e:
+            last_exc = e
+            non_retryable_quota = isinstance(e, codex.CodexQuotaExceededError)
+            last_attempt = attempt >= _WS_RL_MAX_ATTEMPTS - 1
+            if non_retryable_quota or last_attempt:
+                # Sustained quota, or RPM retries exhausted → trip the run-abort
+                # safety net (only fires for rate-limit / quota / 429; a bare
+                # overload does not signal).
+                _maybe_signal_rate_limit(e)
+                return CodexWebSearchResult("", error=(
+                    f"{type(e).__name__}: {str(e)[:160]} "
+                    f"(after {attempt + 1} attempt(s))"
+                ))
+            delay = _ws_retry_delay(getattr(e, "retry_after", None), attempt)
+            log.warning(
+                "web_search %s (attempt %d/%d) — backing off %.1fs then retrying",
+                type(e).__name__, attempt + 1, _WS_RL_MAX_ATTEMPTS, delay,
+            )
+            await asyncio.sleep(delay)
+
+    # The loop only exits via return; this is a defensive backstop.
+    return CodexWebSearchResult("", error=f"rate-limited: {last_exc}")
+
+
+async def _stream_once(
+    tokens: "codex.CodexTokens",
+    *,
+    model: str,
+    input_items: list[dict],
+    reasoning_effort: str,
+    timeout: float,
+) -> CodexWebSearchResult:
+    """One web_search stream attempt.
+
+    Returns a populated result on success, a ``hard_refused`` result on
+    cyber_policy, and a graceful ``error`` result for non-retryable failures.
+    RAISES the retryable rate-limit family (``CodexRateLimitError`` /
+    ``CodexServerOverloadedError`` / ``CodexQuotaExceededError`` / a 429
+    ``CodexAPIError``) so the caller's backoff loop can retry — accumulators
+    are local, so each retry starts clean.
+    """
     answer_parts: list[str] = []
     citations: list[tuple[str, str]] = []
     seen_urls: set[str] = set()
@@ -206,7 +287,7 @@ async def codex_web_search(
         ):
             t = str(ev.get("type", ""))
 
-            # Stream-level failure — classify cyber_policy vs other.
+            # Stream-level failure — classify and route.
             if t == "response.failed":
                 resp = ev.get("response") or {}
                 exc = codex._classify_response_failed(resp.get("error"))
@@ -215,7 +296,12 @@ async def codex_web_search(
                         "", citations, num_searches,
                         hard_refused=True, error=str(exc)[:200],
                     )
-                _maybe_signal_rate_limit(exc)
+                if isinstance(exc, (
+                    codex.CodexRateLimitError,
+                    codex.CodexServerOverloadedError,
+                    codex.CodexQuotaExceededError,
+                )):
+                    raise exc  # let the backoff loop retry / signal
                 return CodexWebSearchResult(
                     "", citations, num_searches, error=str(exc)[:200]
                 )
@@ -246,8 +332,21 @@ async def codex_web_search(
         return CodexWebSearchResult(
             "", citations, num_searches, hard_refused=True, error=str(e)[:200]
         )
+    except (
+        codex.CodexRateLimitError,
+        codex.CodexServerOverloadedError,
+        codex.CodexQuotaExceededError,
+    ):
+        raise  # retryable family — handled by the backoff loop
+    except codex.CodexAPIError as e:
+        # HTTP-level error from astream_codex. Only a 429 is a transient rate
+        # limit worth retrying; anything else is a graceful, non-retryable miss.
+        if getattr(e, "status_code", None) == 429:
+            raise
+        return CodexWebSearchResult(
+            "", citations, num_searches, error=f"{type(e).__name__}: {str(e)[:200]}"
+        )
     except Exception as e:
-        _maybe_signal_rate_limit(e)
         return CodexWebSearchResult(
             "", citations, num_searches, error=f"{type(e).__name__}: {str(e)[:200]}"
         )

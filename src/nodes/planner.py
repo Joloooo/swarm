@@ -1495,6 +1495,84 @@ def _unconverted_primitive_directive(state: SwarmGraphState) -> str | None:
     return "\n".join(lines)
 
 
+def _diversify_when_stuck_directive(state: SwarmGraphState) -> str | None:
+    """When a vuln class has been dispatched repeatedly with no flag, ADD a
+    parallel different angle — do NOT abandon the stuck line.
+
+    This is deliberately *additive*, not a pivot. A hard vulnerability can
+    legitimately take many turns to land (a SQLi that needs an unusual
+    pattern, a filter that takes several rounds to map), and the swarm's
+    persistence is a feature — so this directive never says "stop." It says
+    "keep going AND also open a genuinely different angle this turn," and
+    points the planner at its own structured ``untried`` list
+    (:data:`RelevantSummary.untried`) as the source of the new angle so the
+    diversification is concrete rather than generic.
+
+    Reuses crawl_policy's per-class dispatch counter (``active_agents`` →
+    class counts); the stuck threshold (≥ 2 dispatches of a class with no
+    flag) matches ``crawl_policy._has_stuck_signal``.
+
+    PRECEDENCE: suppressed while an unconverted exploit primitive exists.
+    When the swarm holds a loaded primitive, finishing it
+    (:func:`_unconverted_primitive_directive`) is higher-value than adding
+    breadth, and the two directives would otherwise pull the planner in
+    opposite directions on the same turn. So this one yields.
+
+    Returns ``None`` when a flag is captured, a primitive is unconverted, or
+    no class is stuck yet.
+    """
+    if (state.get("captured_flag") or "").strip():
+        return None
+    # Precedence: a loaded primitive owns the turn — let the last-mile
+    # directive drive, don't dilute it with breadth.
+    findings = list(state.get("findings") or [])
+    if any(_is_exploit_primitive(f) for f in findings):
+        return None
+
+    counts = crawl_policy._class_dispatch_counts(state)
+    stuck = sorted(
+        (cls for cls, n in counts.items() if n >= 2),
+        key=lambda c: counts[c],
+        reverse=True,
+    )
+    if not stuck:
+        return None
+
+    rs = state.get("relevant_summary") or {}
+    untried = [
+        u for u in (rs.get("untried") or [])
+        if isinstance(u, dict) and (u.get("technique") or u.get("where"))
+    ]
+
+    stuck_desc = ", ".join(f"{c} (×{counts[c]})" for c in stuck[:4])
+    lines = [
+        "[SYSTEM NOTE] The swarm has dispatched the same line of attack "
+        f"repeatedly this run without capturing the flag: {stuck_desc}. "
+        "Persistence is correct — a hard vulnerability can take many tries — "
+        "so do NOT abandon it. But running more variants of the SAME idea "
+        "against the SAME surface has diminishing returns. This turn, KEEP "
+        "that line going AND ALSO dispatch a parallel executor on a "
+        "genuinely DIFFERENT angle (a different vuln class, parameter, or "
+        "surface), so breadth and depth advance together.",
+    ]
+    if untried:
+        lines.append("  • Draw the new angle from your untried list:")
+        for u in untried[:4]:
+            where = (u.get("where") or "").strip()
+            tech = (u.get("technique") or "").strip()
+            skill = (u.get("suggested_skill") or "").strip()
+            loc = f" at {where}" if where else ""
+            sk = f" [skill: {skill}]" if skill else ""
+            lines.append(f"      - {tech or where}{loc if tech else ''}{sk}")
+    else:
+        lines.append(
+            "  • Your untried list is empty — brainstorm ONE concrete new "
+            "angle now (a different class/parameter/surface), add it to "
+            "untried, and dispatch it alongside the current line."
+        )
+    return "\n".join(lines)
+
+
 def _build_forced_search_query(finding, state: SwarmGraphState) -> str:
     """Build a focused web-search query from a blocking finding.
 
@@ -2078,6 +2156,20 @@ class PlannerNode(BaseNode):
             prior_messages.append(
                 HumanMessage(content=crawl_policy.web_search_when_to_use_note())
             )
+
+        # Diversify-when-stuck directive. When a vuln class has been
+        # dispatched repeatedly with no flag, add a parallel DIFFERENT angle
+        # (from the planner's own untried list) WITHOUT abandoning the stuck
+        # line — breadth alongside depth. Yields to the last-mile directive:
+        # if a primitive is unconverted, that one owns the turn and this
+        # stays silent (see _diversify_when_stuck_directive's precedence).
+        diversify_note = _diversify_when_stuck_directive(state)
+        if diversify_note:
+            self.log.info(
+                "diversify-when-stuck directive: %s",
+                diversify_note.replace("\n", " | ")[:300],
+            )
+            prior_messages.append(HumanMessage(content=diversify_note))
 
         # Surface the prior turn's relevant_summary so the planner can
         # see its own previous notes and rewrite them on this turn. The

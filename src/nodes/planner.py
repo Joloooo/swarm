@@ -418,12 +418,30 @@ omit a key):
   knowledge the next dispatch should close. Examples: "does
   /edit_profile/N enforce server-side role checks?", "does the JWT
   cookie carry a server-validated role claim?".
+- ``untried``: ranked list of CONCRETE NEXT MOVES the swarm has not
+  yet attempted — your live to-do list of alternate angles. Unlike
+  ``open_questions`` (free-text knowledge gaps), each entry is an
+  ACTIONABLE move: an object
+  ``{"where": "<endpoint/param/surface>", "technique": "<what to
+  try>", "suggested_skill": "<skill name, or empty>"}``. Order by
+  how promising the move is — most promising first. This is the list
+  the swarm falls back to when a line of attack stalls: keep it
+  populated with genuinely different angles (a different vuln class,
+  a different parameter, a different surface), NOT restatements of
+  what is already running. Examples:
+  ``{"where": "/login username param", "technique": "time-based
+  blind SQLi with SLEEP(5) to confirm injection a uniform response
+  hides", "suggested_skill": "sqli"}``,
+  ``{"where": "transient failed-login state", "technique":
+  "concurrent requests to race the partially-populated admin
+  session", "suggested_skill": "race-conditions"}``.
 
 Sizing rules (enforced by validator — exceeding them gets your entry
 silently dropped):
 - ``current_hypothesis`` ≤ 500 chars.
 - ``ruled_out`` ≤ 20 items, each ≤ 200 chars.
 - ``open_questions`` ≤ 20 items, each ≤ 200 chars.
+- ``untried`` ≤ 10 items, each field ≤ 200 chars.
 
 On every turn you SEE the previous turn's ``relevant_summary`` as a
 ``[SYSTEM NOTE]`` near the end of your input. Treat it as your prior
@@ -460,6 +478,10 @@ End EVERY turn with a fenced JSON block of this exact shape:
     "open_questions": [
       "Does GET /order/<N>/receipt validate the session's user_id against the order's owner?",
       "Are there other authenticated-only routes the gobuster common wordlist missed?"
+    ],
+    "untried": [
+      {"where": "/api/v1/orders id param", "technique": "IDOR sweep id=1..50 from the authenticated session, diff response owners", "suggested_skill": "idor"},
+      {"where": "POST / username", "technique": "time-based blind SQLi (SLEEP) — the uniform 200 may hide a blind oracle", "suggested_skill": "sqli"}
     ]
   }
 }
@@ -689,6 +711,11 @@ def _looks_transient(err: Exception) -> bool:
 _RELEVANT_HYPOTHESIS_MAX_CHARS = 500
 _RELEVANT_LIST_MAX_ITEMS = 20
 _RELEVANT_LIST_ITEM_MAX_CHARS = 200
+# ``untried`` is a richer per-item structure than ruled_out / open_questions
+# (a dict, not a one-liner), so it carries a tighter item cap — these are the
+# top next-moves, not an exhaustive backlog.
+_RELEVANT_UNTRIED_MAX_ITEMS = 10
+_RELEVANT_UNTRIED_FIELD_MAX_CHARS = 200
 
 
 def _validate_relevant_summary(raw: Any) -> dict | None:
@@ -749,13 +776,52 @@ def _validate_relevant_summary(raw: Any) -> dict | None:
     ruled_out = _clean_list(raw.get("ruled_out"))
     open_questions = _clean_list(raw.get("open_questions"))
 
-    if not (hypothesis or ruled_out or open_questions):
+    def _clean_untried(value: Any) -> list[dict]:
+        """Coerce ``untried`` into a list of ``{where, technique,
+        suggested_skill}`` dicts. Drops entries that carry no actual
+        next-move text; tolerates a bare string by treating it as the
+        technique. Each field truncated; list capped."""
+        if not isinstance(value, list):
+            return []
+        out: list[dict] = []
+        for item in value:
+            if isinstance(item, str):
+                item = {"technique": item}
+            if not isinstance(item, dict):
+                continue
+
+            def _field(key: str) -> str:
+                v = item.get(key, "")
+                if not isinstance(v, str):
+                    v = str(v or "")
+                v = v.strip()
+                if len(v) > _RELEVANT_UNTRIED_FIELD_MAX_CHARS:
+                    v = v[: _RELEVANT_UNTRIED_FIELD_MAX_CHARS - 1] + "…"
+                return v
+
+            entry = {
+                "where": _field("where"),
+                "technique": _field("technique"),
+                "suggested_skill": _field("suggested_skill"),
+            }
+            # An entry with no technique AND no location is noise.
+            if not (entry["technique"] or entry["where"]):
+                continue
+            out.append(entry)
+            if len(out) >= _RELEVANT_UNTRIED_MAX_ITEMS:
+                break
+        return out
+
+    untried = _clean_untried(raw.get("untried"))
+
+    if not (hypothesis or ruled_out or open_questions or untried):
         return None
 
     return {
         "current_hypothesis": hypothesis,
         "ruled_out": ruled_out,
         "open_questions": open_questions,
+        "untried": untried,
     }
 
 
@@ -781,8 +847,12 @@ def _format_relevant_summary_for_planner(rs: dict | None) -> str | None:
         s for s in (rs.get("open_questions") or [])
         if isinstance(s, str) and s.strip()
     ]
+    untried = [
+        u for u in (rs.get("untried") or [])
+        if isinstance(u, dict) and (u.get("technique") or u.get("where"))
+    ]
 
-    if not (hypothesis or ruled_out or open_questions):
+    if not (hypothesis or ruled_out or open_questions or untried):
         return None
 
     sections: list[str] = [
@@ -800,6 +870,20 @@ def _format_relevant_summary_for_planner(rs: dict | None) -> str | None:
         sections.append("  • open_questions:")
         for item in open_questions:
             sections.append(f"      - {item}")
+    if untried:
+        sections.append("  • untried (concrete next moves not yet attempted):")
+        for u in untried:
+            where = (u.get("where") or "").strip()
+            tech = (u.get("technique") or "").strip()
+            skill = (u.get("suggested_skill") or "").strip()
+            label = tech or where
+            extra = ", ".join(
+                p for p in (
+                    f"at {where}" if (where and tech) else "",
+                    f"skill={skill}" if skill else "",
+                ) if p
+            )
+            sections.append(f"      - {label}" + (f" ({extra})" if extra else ""))
     return "\n".join(sections)
 
 

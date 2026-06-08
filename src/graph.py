@@ -167,6 +167,13 @@ config = SimpleNamespace(
         # SWARM_WEB_MAX_CHARS if synthesis quality degrades on very
         # small-context fallback models.
         web_search_max_crawled_chars = _cfg["budgets"]["web_search_max_crawled_chars"],
+        # ── Per-benchmark agent wall-clock (seconds) ──
+        # The leash on one graph run: xbow_runner wraps graph.ainvoke in
+        # asyncio.wait_for(timeout=run_timeout_s). 1200 = 20 min, 2400 = 40 min.
+        # Config/TUI-driven (swarm-config.toml [budgets] run_timeout_s); the
+        # SWARM_RUN_TIMEOUT_S env var still overrides for a one-off CLI run.
+        run_timeout_s                = _env_int("SWARM_RUN_TIMEOUT_S",
+                                                _cfg["budgets"]["run_timeout_s"]),
         # ── Provider selection ──
         # Which LLM backend ``get_llm()`` returns by default. ``codex``
         # uses your ChatGPT subscription via the bundled ``ChatCodex``;

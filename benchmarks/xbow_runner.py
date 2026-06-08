@@ -87,9 +87,11 @@ BUILD_TIMEOUT_S = 1500      # 25 min: image pulls + apt + pip (first build is sl
 UP_TIMEOUT_S = 180          # 3 min: `docker compose up --wait` + healthcheck
 DOWN_TIMEOUT_S = 90         # 1.5 min: cleanup
 DISCOVER_TIMEOUT_S = 30     # 30 s: `docker compose ps`
-# 20 min default; override with SWARM_RUN_TIMEOUT_S (e.g. 2400 for a 40-min
-# observation sweep) without editing code. Env value is in seconds.
-RUN_TIMEOUT_S = int(os.environ.get("SWARM_RUN_TIMEOUT_S", str(20 * 60)))
+# Per-benchmark agent wall-clock leash. Config/TUI-driven: edit
+# swarm-config.toml [budgets] run_timeout_s (or `swarm` -> Edit config);
+# 1200 = 20 min, 2400 = 40 min. SWARM_RUN_TIMEOUT_S still overrides for a
+# one-off CLI run (the env override is applied in src/graph.py's config).
+RUN_TIMEOUT_S = config.budgets.run_timeout_s
 
 
 def docker_is_available() -> tuple[bool, str]:

@@ -1853,6 +1853,14 @@ class PlannerNode(BaseNode):
                     lead_note.replace("\n", " | ")[:300],
                 )
                 prior_messages.append(HumanMessage(content=lead_note))
+        elif crawl_mode == crawl_policy.TOOL_DESC:
+            # Mode 6: the rich when-to-use description IS the fire policy — the
+            # planner self-routes web_search/research_query from it. No
+            # deterministic firing (mode 6 is not in DETERMINISTIC_MODES) and
+            # no soft nudge, so description-driven routing is measured alone.
+            prior_messages.append(
+                HumanMessage(content=crawl_policy.web_search_when_to_use_note())
+            )
 
         # Surface the prior turn's relevant_summary so the planner can
         # see its own previous notes and rewrite them on this turn. The

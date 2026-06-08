@@ -156,15 +156,6 @@ config = SimpleNamespace(
         worker_max_iterations        = _cfg["budgets"]["worker_max_iterations"],
         # ── LLM (per-call output cap) ──
         llm_max_tokens               = _cfg["budgets"]["llm_max_tokens"],
-        # ── Web search node (LLM context budget per source) ──
-        # 8000 chars ≈ first ~1300 words of each crawled page. Tuned so
-        # PortSwigger / OWASP / exploit-db articles include the actual
-        # bypass technique (typically ~5000-8000 chars in), not just the
-        # intro/definition. 10 sources × 8000 chars = ~80K tokens which
-        # comfortably fits any modern model's context. Lower this with
-        # SWARM_WEB_MAX_CHARS if synthesis quality degrades on very
-        # small-context fallback models.
-        web_search_max_crawled_chars = _cfg["budgets"]["web_search_max_crawled_chars"],
         # ── Per-benchmark agent wall-clock (seconds) ──
         # The leash on one graph run: xbow_runner wraps graph.ainvoke in
         # asyncio.wait_for(timeout=run_timeout_s). 1200 = 20 min, 2400 = 40 min.

@@ -806,6 +806,27 @@ def _build_system_message(
     if config.system_prompt:
         parts.append(config.system_prompt)
 
+    # Progressive-disclosure references: when the dispatched skill ships
+    # reference files (src/skills/<name>/references/*.md), advertise them so
+    # the worker can page one in on demand with the read_reference tool. The
+    # index is generated from each file's H1 header, so there is no manifest
+    # to maintain. Skills without references inject nothing.
+    try:
+        from src.skills.loader import reference_index
+        _refs = reference_index(config.config_name)
+    except Exception:
+        _refs = []
+    if _refs:
+        _ref_lines = [
+            "## References",
+            "Additional reference material for this skill (test inputs and "
+            "engine-specific techniques), kept out of this prompt for size. "
+            "Open ONE on demand with the read_reference tool (pass the filename "
+            "only) when a finding matches its \"Open WHEN\" note:",
+        ]
+        _ref_lines += [f"- `{fn}` — {desc}" for fn, desc in _refs]
+        parts.append("\n".join(_ref_lines))
+
     # Benchmark-mode addendum — executor-only, benchmark-only. Placed
     # AFTER the skill body so "the app is the referee, submit and read
     # its reply" is the last behavioural instruction the worker reads

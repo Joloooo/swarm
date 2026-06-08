@@ -871,10 +871,24 @@ async def _run_skill_agent_impl(
         agent_id=config.agent_id, log=node.log,
     )
 
+    # Per-dispatch progressive-disclosure tool: when this skill ships
+    # reference files (src/skills/<name>/references/*.md), bind a scoped
+    # read_reference tool so the worker can page one in on demand. Skills
+    # without references (generic executor, custom, recon) keep config.tools
+    # unchanged. Wrapped defensively — reference wiring must never break a run.
+    _run_tools = list(config.tools)
+    try:
+        from src.skills.loader import list_references
+        from src.tools.references import make_read_reference_tool
+        if list_references(config.config_name):
+            _run_tools.append(make_read_reference_tool(config.config_name))
+    except Exception as _ref_exc:
+        node.log.debug("read_reference wiring skipped: %s", _ref_exc)
+
     def _agent_factory(sys_prompt: str):
         return create_agent(
             model=llm,
-            tools=config.tools,
+            tools=_run_tools,
             system_prompt=sys_prompt,
             middleware=[_no_progress_mw],
         )
@@ -912,7 +926,7 @@ async def _run_skill_agent_impl(
             ))
             return create_agent(
                 model=fb_llm,
-                tools=config.tools,
+                tools=_run_tools,
                 system_prompt=sys_prompt,
                 middleware=[_no_progress_mw],
             )

@@ -830,6 +830,7 @@ class _Live:
         expected_flag: str = "",
         last_submission: str = "",
         expected_flag_candidates: tuple[str, ...] = (),
+        findings_by_severity: dict[str, int] | None = None,
     ) -> None:
         """Render the end-of-bench summary line plus an optional
         expected-vs-captured verification block.
@@ -865,8 +866,19 @@ class _Live:
         else:  # FAIL — ran its budget or gave up; show the reason if any.
             head = _paint(f"◇ {bench_id}", _YELLOW)
             verdict = _paint("✗ no flag" + (f" — {error}" if error else ""), _YELLOW)
-        tail = (f"({format_duration(duration_s)}, "
-                f"{findings_n} finding{'s' if findings_n != 1 else ''})")
+        # Append a compact severity breakdown ("3 findings: 1 high, 2
+        # medium") so a glance at the end-of-bench line tells you not just
+        # how many findings landed but what kind — without dumping the full
+        # findings state. Falls back to the bare count when no breakdown was
+        # supplied (e.g. real-pentest callers that don't pass it).
+        findings_tail = f"{findings_n} finding{'s' if findings_n != 1 else ''}"
+        if findings_by_severity:
+            breakdown = ", ".join(
+                f"{n} {sev}" for sev, n in findings_by_severity.items() if n
+            )
+            if breakdown:
+                findings_tail += f": {breakdown}"
+        tail = f"({format_duration(duration_s)}, {findings_tail})"
         _emit(f"{_now()}  {head}  {verdict}  {tail}")
 
         # Verification block — benchmark mode only. Skipped silently

@@ -87,7 +87,9 @@ BUILD_TIMEOUT_S = 1500      # 25 min: image pulls + apt + pip (first build is sl
 UP_TIMEOUT_S = 180          # 3 min: `docker compose up --wait` + healthcheck
 DOWN_TIMEOUT_S = 90         # 1.5 min: cleanup
 DISCOVER_TIMEOUT_S = 30     # 30 s: `docker compose ps`
-RUN_TIMEOUT_S = 20 * 60     # 20 min: per-bench wall-clock leash on graph.ainvoke
+# 20 min default; override with SWARM_RUN_TIMEOUT_S (e.g. 2400 for a 40-min
+# observation sweep) without editing code. Env value is in seconds.
+RUN_TIMEOUT_S = int(os.environ.get("SWARM_RUN_TIMEOUT_S", str(20 * 60)))
 
 
 def docker_is_available() -> tuple[bool, str]:
@@ -950,6 +952,10 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
             "findings": [],
             "agent_results": [],
             "active_agents": [],
+            # Web-search fire-policy mode for this run (A/B harness). "1"
+            # baseline, "2"/"3"/"5" deterministic policies. See
+            # src/nodes/crawl_policy.py. Defaults to baseline.
+            "crawl_mode": os.environ.get("SWARM_CRAWL_MODE", "1"),
             # Benchmark-mode signal — workers and the planner read this
             # to know the run has an explicit flag-extraction success
             # criterion. Empty string in non-benchmark contexts.

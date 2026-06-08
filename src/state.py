@@ -242,6 +242,13 @@ class SwarmGraphState(TypedDict, total=False):
     # Workflow mode
     mode: str  # "analyze" or "full" — controls whether exploit phase runs
 
+    # Web-search ("crawler") fire policy for this run. Seeded from the
+    # SWARM_CRAWL_MODE env var by the runner; read by the planner. "1"
+    # BASELINE (planner's own firing), "2" CHARACTERIZATION, "3" STUCK,
+    # "5" STUCK_DIVERGENCE. See src/nodes/crawl_policy.py. Empty/absent =>
+    # treated as baseline. A/B harness knob, not a permanent setting.
+    crawl_mode: str
+
     # Planning
     active_agents: Annotated[list[str], operator.add]
 

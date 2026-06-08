@@ -295,7 +295,3 @@ A finding is real only when:
   `whereRaw` / `orderByRaw` and identifier interpolation specifically.
 - Document the exact query shape your payload exploits — defenses must
   match the construction, not assumptions about it.
-
-## Reference
-- `references/payloads.md` — full payload library, sqlmap flag matrix, and
-  per-context cheatsheet.

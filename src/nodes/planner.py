@@ -1381,6 +1381,120 @@ def _unexploited_lead_directive(state: SwarmGraphState) -> str | None:
     return "\n".join(lines)
 
 
+def _is_exploit_primitive(finding) -> bool:
+    """True when a finding represents a DEMONSTRATED exploit primitive — a
+    proven capability (RCE, arbitrary file read, data-leaking SQLi, a
+    privileged session) that is a means to the objective, not yet the
+    objective itself.
+
+    Two signals, OR'd (belt and suspenders): the explicit ``primitive``
+    marker a worker set on the finding (the authoritative signal), OR the
+    existing :func:`_impact_demonstrated` keyword match on the finding text
+    (the fallback for when a worker proved impact but didn't set the tag).
+    """
+    if (_finding_attr(finding, "primitive") or "").strip():
+        return True
+    return _impact_demonstrated(finding)
+
+
+# Per-primitive "cheapest read toward the objective" hint. Keyed on the
+# canonical ``primitive`` tags; an unknown tag falls back to the generic
+# line. These name the FIRST thing to do with a loaded primitive so the
+# directive can be concrete rather than "go exploit it".
+_PRIMITIVE_FINISH_HINT = {
+    "rce": "run a command that reads the objective directly — e.g. "
+           "`cat /flag* /FLAG* 2>/dev/null; grep -rIl 'flag{' / 2>/dev/null` "
+           "— before anything fancier.",
+    "file_read": "read the most likely objective files FIRST "
+                 "(/flag, /flag.txt, /FLAG.txt, app source that names the "
+                 "flag path), then widen.",
+    "sqli_read": "extract toward the objective now — enumerate tables, then "
+                 "dump the row/column that would hold the flag or a "
+                 "credential that unlocks it.",
+    "auth_bypass": "use the privileged session/identity to reach the "
+                   "objective action or data directly.",
+    "ssrf": "point the confirmed server-side request at the objective "
+            "(internal metadata, an internal service, or the file URL that "
+            "returns the flag).",
+}
+
+
+def _unconverted_primitive_directive(state: SwarmGraphState) -> str | None:
+    """Force the planner to drive a CONFIRMED primitive to the objective
+    before opening any new, lower-probability surface.
+
+    This is the orchestration half of the "finish what you proved" fix
+    (the prompt half lives in ``BENCHMARK_GUIDANCE`` /
+    ``DEMONSTRATED_STANDARD``). The dominant failure mode across the
+    06-08 benchmark sweep was a worker proving a primitive (RCE in
+    XBEN-061, a data-leaking SQLi in XBEN-095) and the swarm then
+    wandering to a fresh idea instead of spending the few remaining
+    mechanical steps to read the flag with it.
+
+    Fires whenever an unconverted exploit primitive exists (see
+    :func:`_is_exploit_primitive`) and no flag is captured yet, and keeps
+    firing every turn until the flag lands — that persistence is the
+    point: a loaded primitive is the single highest-probability path to
+    the objective, so the planner should always have an executor on it.
+    Mirrors the self-suppressing structure of the other directives, but
+    the only thing that suppresses THIS one is capturing the flag (which
+    ends the run).
+
+    Returns ``None`` when a flag is already captured or no primitive has
+    been demonstrated.
+    """
+    if (state.get("captured_flag") or "").strip():
+        return None
+    findings = list(state.get("findings") or [])
+    if not findings:
+        return None
+    primitives = [f for f in findings if _is_exploit_primitive(f)]
+    if not primitives:
+        return None
+
+    # Keep the freshest few (findings is append-ordered); the most recent
+    # primitive is usually the one a worker just proved and is mid-exploit.
+    _SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    primitives.sort(
+        key=lambda f: _SEV_RANK.get(_severity_str(f), 5),
+    )
+
+    lines = [
+        "[SYSTEM NOTE] One or more CONFIRMED exploit primitives are not yet "
+        "turned into the flag. A proven primitive (command execution, "
+        "arbitrary file read, a data-leaking injection, a privileged "
+        "session) is the single highest-probability path to the objective "
+        "— finishing it beats starting anything new:"
+    ]
+    seen: set[tuple[str, str]] = set()
+    for f in primitives:
+        title = (_finding_attr(f, "title") or "").strip()[:90]
+        url = (_finding_attr(f, "url") or "").strip()
+        prim = (_finding_attr(f, "primitive") or "").strip().lower()
+        key = (title, url)
+        if key in seen:
+            continue
+        seen.add(key)
+        hint = _PRIMITIVE_FINISH_HINT.get(prim)
+        loc = f" — {url}" if url else ""
+        tag = f" [{prim}]" if prim else ""
+        lines.append(f"  • {title}{tag}{loc}")
+        if hint:
+            lines.append(f"      → finish move: {hint}")
+        if len(seen) >= 3:
+            break
+    lines.append(
+        "  • Rule: on this turn KEEP an executor driving the primitive to "
+        "the objective — carry the exact working payload/oracle forward in "
+        "its dispatch reason, and instruct the cheapest reliable read "
+        "FIRST. Do NOT open a new, lower-probability surface until this "
+        "primitive captures the flag or is genuinely exhausted. If a "
+        "previous worker proved it but ran out of steps, re-dispatch the "
+        "same line of attack rather than a fresh idea."
+    )
+    return "\n".join(lines)
+
+
 def _build_forced_search_query(finding, state: SwarmGraphState) -> str:
     """Build a focused web-search query from a blocking finding.
 
@@ -1906,6 +2020,22 @@ class PlannerNode(BaseNode):
         # NOTE so the planner targets the co-located service instead of
         # fixating on a proxy in the main app that only reads from it.
         # Suppresses itself once an attack worker has engaged the service.
+        # Last-mile directive (highest-priority steer). When a worker has
+        # DEMONSTRATED an exploit primitive (RCE, arbitrary file read, a
+        # data-leaking injection, a privileged session) that has not yet
+        # produced the flag, force the planner to keep an executor driving
+        # that primitive to the objective before it opens any new, lower-
+        # probability surface. This counters the dominant 06-08 failure
+        # mode: proving a primitive then wandering off it. Injected FIRST so
+        # it frames the decision. Self-suppresses only on flag capture.
+        primitive_note = _unconverted_primitive_directive(state)
+        if primitive_note:
+            self.log.info(
+                "unconverted-primitive directive: %s",
+                primitive_note.replace("\n", " | ")[:300],
+            )
+            prior_messages.append(HumanMessage(content=primitive_note))
+
         service_note = _colocated_service_directive(state)
         if service_note:
             self.log.info(

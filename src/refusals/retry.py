@@ -91,6 +91,7 @@ async def astream_with_refusal_retry(
     fallback_agent_factory: Callable[[str], Any] | None = None,
     max_retries_per_tier: int = 2,
     mode: str = "astream",
+    start_on_fallback: bool = False,
 ) -> tuple[dict | None, int, str]:
     """Run agent.astream with preventive vocab filter + tiered retry.
 
@@ -120,6 +121,13 @@ async def astream_with_refusal_retry(
         max_retries_per_tier: how many additional attempts after the
             first within each tier. Default 2 → 3 attempts per tier
             → up to 6 attempts total when both tiers are configured.
+        start_on_fallback: when True (and a fallback factory exists),
+            skip the primary tier entirely and dispatch directly on the
+            fallback model. Set by the caller when this config already
+            tripped the primary model's classifier earlier in the run —
+            the same prompt would refuse identically, so the 3 primary
+            attempts are pure waste. Ignored (primary runs normally) when
+            no fallback factory is supplied.
 
     Returns:
         ``(last_snapshot, total_attempts, last_tier_used)`` on success.
@@ -204,27 +212,39 @@ async def astream_with_refusal_retry(
             pass
 
     # ── Tier 1: primary model, vocab-filtered, retry × N ────────
-    agent = agent_factory(filtered_sys)
-    for attempt in range(max_retries_per_tier + 1):
-        total_attempts += 1
-        try:
-            last_snapshot = await _run_agent_once(
-                agent, filtered_seed, call_config, mode,
-            )
-            # Success.
-            return last_snapshot, total_attempts, last_tier
-        except REFUSAL_EXCS as e:
-            last_exc = e
-            log.warning(
-                "[%s] worker refused (tier=primary, attempt=%d/%d): %s",
-                config.agent_id, attempt + 1,
-                max_retries_per_tier + 1, str(e)[:160],
-            )
-            _dump_to_live(e, "primary")
-            if attempt < max_retries_per_tier:
-                await asyncio.sleep(1.5)
-                continue
-            # exhausted primary tier, fall through to tier 2
+    # Skipped entirely when the caller knows this config already tripped
+    # the primary model's classifier earlier this run — the same prompt
+    # would refuse identically, so the 3 primary attempts are wasted. We
+    # only skip when a fallback factory exists to skip TO.
+    skip_primary = start_on_fallback and fallback_agent_factory is not None
+    if skip_primary:
+        log.info(
+            "[%s] starting directly on fallback model — this config refused "
+            "on the primary model earlier this run",
+            config.agent_id,
+        )
+    else:
+        agent = agent_factory(filtered_sys)
+        for attempt in range(max_retries_per_tier + 1):
+            total_attempts += 1
+            try:
+                last_snapshot = await _run_agent_once(
+                    agent, filtered_seed, call_config, mode,
+                )
+                # Success.
+                return last_snapshot, total_attempts, last_tier
+            except REFUSAL_EXCS as e:
+                last_exc = e
+                log.warning(
+                    "[%s] worker refused (tier=primary, attempt=%d/%d): %s",
+                    config.agent_id, attempt + 1,
+                    max_retries_per_tier + 1, str(e)[:160],
+                )
+                _dump_to_live(e, "primary")
+                if attempt < max_retries_per_tier:
+                    await asyncio.sleep(1.5)
+                    continue
+                # exhausted primary tier, fall through to tier 2
 
     # ── Tier 2: fallback model, vocab-filtered, retry × N ───────
     if fallback_agent_factory is None:

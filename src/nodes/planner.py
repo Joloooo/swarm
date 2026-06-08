@@ -81,6 +81,11 @@ logger = logging.getLogger(__name__)
 # ~301/353/... don't all need to change.
 from src.graph import config
 
+# Deterministic web-search fire policies (modes 2/3/5). Self-contained
+# stdlib-only module, imported after ``src.graph`` has resolved the package
+# cycle so this submodule import is safe.
+import src.nodes.crawl_policy as crawl_policy
+
 # Money-runaway safety net, NOT the primary termination signal. Set high
 # enough that it almost never fires for legitimate work — the right way for
 # a run to end is the planner picking action="report" (routed to END) by
@@ -1835,13 +1840,19 @@ class PlannerNode(BaseNode):
         # surfaces the lead the moment it lands and self-suppresses once the
         # class is researched. Category — not severity — is the gate, because
         # host-noise and real leads were both tagged MEDIUM.
-        lead_note = _unexploited_lead_directive(state)
-        if lead_note:
-            self.log.info(
-                "unexploited-lead research directive: %s",
-                lead_note.replace("\n", " | ")[:300],
-            )
-            prior_messages.append(HumanMessage(content=lead_note))
+        # In a deterministic crawl mode (2/3/5) the policy at the attack
+        # branch fires the crawl itself; suppress this soft nudge so the two
+        # mechanisms do not confound the A/B measurement. Baseline (mode 1)
+        # keeps the prior nudge-only behaviour as the control.
+        crawl_mode = crawl_policy.normalize_mode(state.get("crawl_mode"))
+        if crawl_mode == crawl_policy.BASELINE:
+            lead_note = _unexploited_lead_directive(state)
+            if lead_note:
+                self.log.info(
+                    "unexploited-lead research directive: %s",
+                    lead_note.replace("\n", " | ")[:300],
+                )
+                prior_messages.append(HumanMessage(content=lead_note))
 
         # Surface the prior turn's relevant_summary so the planner can
         # see its own previous notes and rewrite them on this turn. The
@@ -2132,9 +2143,22 @@ class PlannerNode(BaseNode):
                 # summarizer fan-in), so research runs in parallel instead of
                 # stealing a serial turn. Always written (empty when absent)
                 # so a prior turn's value never leaks into this one.
-                update["research_query"] = (
-                    decision.get("research_query") or ""
-                ).strip()
+                planner_rq = (decision.get("research_query") or "").strip()
+                # In a deterministic crawl mode, the fire policy decides
+                # whether to spend this concurrent branch and builds the
+                # (defensively-framed, templated) query. When it fires it
+                # overrides the planner's own research_query for clean
+                # measurement; otherwise the planner's choice stands.
+                crawl = (
+                    crawl_policy.select_crawl_query(state, crawl_mode)
+                    if crawl_mode in crawl_policy.DETERMINISTIC_MODES
+                    else None
+                )
+                if crawl is not None:
+                    self.log.info("%s", crawl.log_line())
+                    update["research_query"] = crawl.query
+                else:
+                    update["research_query"] = planner_rq
         elif action == "web_search":
             query = (decision.get("search_query") or "").strip()
             if query:

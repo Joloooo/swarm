@@ -1357,6 +1357,21 @@ async def _run_skill_agent_impl(
         # so the parent chat / nodes.jsonl still show what the
         # worker did before dying. Without this, recursion-limit
         # crashes look like the worker did literally nothing.
+        #
+        # On a terminal refusal / step-budget stop / crash the tuple-unpack
+        # at the ``astream_with_refusal_retry`` call site never ran, so
+        # ``last_snapshot`` is still its ``None`` init. ``_run_agent_once``
+        # and the retry helper attach the worker's richest partial trace to
+        # the exception — recover it here so the salvage / wrap-up / summary
+        # below (and the success-path flag auto-verify scan further down)
+        # operate on the REAL work. Without this, an exception exit produced
+        # ``tool_msgs_scanned: 0`` and 0 findings even when the worker had
+        # already extracted data (XBEN-095 auth-testing, 2026-06-09 — ~24
+        # loops of SQL work lost across a refusal and a step-budget stop).
+        if last_snapshot is None:
+            _recovered = getattr(e, "_swarm_partial_snapshot", None)
+            if isinstance(_recovered, dict):
+                last_snapshot = _recovered
         partial_messages = (last_snapshot or {}).get("messages", []) or []
 
         if refusal_exc_types and isinstance(e, refusal_exc_types):

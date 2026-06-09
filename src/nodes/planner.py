@@ -106,6 +106,30 @@ _FORCE_RECOVERY_ENABLED = os.environ.get("SWARM_FORCE_RECOVERY", "1") != "0"
 # its keywords never took effect. Removed 2026-06-09; add new impact keywords
 # to the canonical tuple only.
 
+# High-value routing markers that frequently live PAST the first sentence of
+# a SKILL.md description — which is all the menu hint shows. Each skill's
+# description is ~2 KB of progressive-disclosure text; we cannot inline the
+# whole thing for ~30 skills without bloating the supervisor prompt, so we
+# trim to the headline sentence. The cost was silent: e.g. race-conditions
+# carries its auth-race "(TOCTOU)" signal at char ~795, so an auth-race
+# benchmark (XBEN-088) never matched the menu line and the skill was never
+# dispatched. Fix: scan the FULL description for these markers and surface any
+# present as a compact suffix. Only ever ADDS routing signal; never hides the
+# headline. Matched case-insensitively; keep this list to terms that (a) route
+# decisively to one skill and (b) tend to hide past the first sentence.
+# Kept to TECHNIQUE-specific signals only — NOT class names that already have
+# their own dedicated menu line (ssti, ssrf, xxe, deserialization, …). Those
+# appear as cross-references in many descriptions, so surfacing them here would
+# create misleading cross-talk (e.g. "crypto · Routing signals: SSTI"). A term
+# belongs here only if it routes decisively to ONE skill AND tends to hide past
+# that skill's headline sentence.
+_MENU_ROUTING_SIGNALS: tuple[str, ...] = (
+    "TOCTOU", "time-of-check", "race window", "second-order", "out-of-band",
+    "prototype pollution", "type juggling", "magic hash", "padding oracle",
+    "alg:none", "PHAR", "CRLF", "host header", "cache poisoning",
+)
+
+
 def _build_skills_menu() -> str:
     """Render the dispatchable-skills list as a bulleted menu.
 
@@ -129,9 +153,23 @@ def _build_skills_menu() -> str:
         short = desc.split(". ")[0].strip().rstrip(".")
         if len(short) > 220:
             short = short[:220].rstrip() + "..."
+        # Surface high-value routing markers that live past the headline
+        # sentence so the planner can route on them (see _MENU_ROUTING_SIGNALS).
+        desc_low = desc.lower()
+        shown_low = short.lower()
+        signals = sorted(
+            {
+                s for s in _MENU_ROUTING_SIGNALS
+                if s.lower() in desc_low and s.lower() not in shown_low
+            },
+            key=str.lower,
+        )
+        signal_suffix = (
+            f" Routing signals: {', '.join(signals)}." if signals else ""
+        )
         pairs = sorted({p for p in pair_re.findall(desc) if p != name})
         suffix = f" Pair with: {', '.join(pairs)}." if pairs else ""
-        lines.append(f"- {name}: {short}.{suffix}")
+        lines.append(f"- {name}: {short}.{signal_suffix}{suffix}")
     return "\n".join(lines)
 
 

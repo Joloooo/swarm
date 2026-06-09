@@ -156,6 +156,12 @@ config = SimpleNamespace(
         worker_max_iterations        = _cfg["budgets"]["worker_max_iterations"],
         # ── LLM (per-call output cap) ──
         llm_max_tokens               = _cfg["budgets"]["llm_max_tokens"],
+        # ── LLM (per-call timeout, seconds) ──
+        # httpx read/connect timeout for one Codex streaming call. gpt-5.5
+        # medium calls reach ~114s; 120 was too tight (some timed out).
+        # SWARM_LLM_TIMEOUT_S overrides for a one-off CLI run.
+        llm_call_timeout_s           = _env_int("SWARM_LLM_TIMEOUT_S",
+                                                _cfg["budgets"]["llm_call_timeout_s"]),
         # ── Per-benchmark agent wall-clock (seconds) ──
         # The leash on one graph run: xbow_runner wraps graph.ainvoke in
         # asyncio.wait_for(timeout=run_timeout_s). 1200 = 20 min, 2400 = 40 min.

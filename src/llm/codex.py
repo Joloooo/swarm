@@ -203,7 +203,7 @@ def stream_codex(
     max_output_tokens: int | None = None,
     reasoning_effort: str | None = None,
     reasoning_summary: str | None = None,
-    timeout: float = 120.0,
+    timeout: float = 240.0,
 ) -> Iterator[dict[str, Any]]:
     """Stream SSE events from the Codex Responses API.
 
@@ -305,7 +305,7 @@ async def astream_codex(
     max_output_tokens: int | None = None,
     reasoning_effort: str | None = None,
     reasoning_summary: str | None = None,
-    timeout: float = 120.0,
+    timeout: float = 240.0,
 ) -> Any:
     """Async stream SSE events from the Codex Responses API.
 
@@ -1095,6 +1095,11 @@ class ChatCodex(BaseChatModel):
     # by get_llm() in src/llm/provider.py.
     reasoning_effort: str | None = None
     reasoning_summary: str | None = None
+    # Per-call httpx timeout (seconds). Set by ``get_llm`` from
+    # ``config.budgets.llm_call_timeout_s``; flows through
+    # ``_build_request_kwargs`` into stream_codex / astream_codex. Default 240
+    # (gpt-5.5 medium calls observed up to ~114s; 120 was too tight).
+    request_timeout_s: float = 240.0
 
     _tokens: CodexTokens | None = None
 
@@ -1188,6 +1193,8 @@ class ChatCodex(BaseChatModel):
             kwargs["reasoning_effort"] = self.reasoning_effort
         if self.reasoning_summary:
             kwargs["reasoning_summary"] = self.reasoning_summary
+        # Per-call timeout -> stream_codex / astream_codex's httpx client.
+        kwargs["timeout"] = self.request_timeout_s
         # Note: temperature and max_tokens are not always supported by the
         # Codex backend (depends on the model). We pass them through and
         # let the stream function handle 400 errors by retrying without them.

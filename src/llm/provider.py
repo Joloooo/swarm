@@ -66,6 +66,11 @@ class LLMConfig:
     )
     temperature: float = 0.0
     max_tokens: int = field(default_factory=lambda: config.budgets.llm_max_tokens)
+    # Per-call httpx timeout (seconds) for Codex streaming calls. Sourced from
+    # ``config.budgets.llm_call_timeout_s`` (SWARM_LLM_TIMEOUT_S overrides).
+    request_timeout_s: float = field(
+        default_factory=lambda: float(config.budgets.llm_call_timeout_s)
+    )
     # ── Codex-only reasoning controls ─────────────────────────────────
     # Effort: how hard the model thinks before responding. Higher levels
     # produce longer (and more expensive) internal chain-of-thought.
@@ -290,6 +295,7 @@ def get_llm(config: LLMConfig | None = None) -> BaseChatModel:
             max_tokens=config.max_tokens,
             reasoning_effort=config.reasoning_effort,
             reasoning_summary=config.reasoning_summary,
+            request_timeout_s=config.request_timeout_s,
         )
 
     raise ValueError(f"Unknown provider: {config.provider}")

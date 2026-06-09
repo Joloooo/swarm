@@ -48,6 +48,11 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # a multi-step exploit finish inside one dispatch.
         "worker_max_iterations": 20,
         "llm_max_tokens": 4096,
+        # Per-LLM-call timeout in SECONDS (httpx read/connect for one Codex
+        # streaming call). gpt-5.5 at reasoning_effort=medium produces calls up
+        # to ~114s; 120 was too tight (calls hit it -> retryable
+        # CodexTransportError). 240 gives headroom. SWARM_LLM_TIMEOUT_S overrides.
+        "llm_call_timeout_s": 240,
         # Per-benchmark agent wall-clock budget, in SECONDS (1200 = 20 min,
         # 2400 = 40 min). The leash on one graph run; when it expires the run
         # ends with "agent timeout after Ns". Edit here or via the TUI.

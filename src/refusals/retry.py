@@ -71,13 +71,53 @@ async def _run_agent_once(
         )
     # default "astream"
     last: dict | None = None
-    async for snap in agent.astream(
-        {"messages": messages},
-        config=call_config,
-        stream_mode="values",
-    ):
-        last = snap
+    try:
+        async for snap in agent.astream(
+            {"messages": messages},
+            config=call_config,
+            stream_mode="values",
+        ):
+            last = snap
+    except BaseException as e:
+        # Preserve the accumulated snapshot on ANY exception — a
+        # cyber_policy refusal, a ``GraphRecursionError`` step-budget stop,
+        # or an ordinary crash. Without this the ``return last`` below is
+        # skipped on the unwind, so every message the worker produced
+        # before dying is discarded. Two callers depend on it: the retry
+        # ladder uses it to CONTINUE the next tier from where the worker
+        # got to (instead of restarting from the seed), and
+        # ``run_skill_agent``'s except block uses it so the salvage /
+        # wrap-up / summary run on the real trace. Attaching to the
+        # exception lets the snapshot survive the unwind; mirrors the
+        # ``_swarm_attempts`` pattern in ``astream_with_refusal_retry``.
+        # Motivated by the XBEN-095 auth-testing worker (2026-06-09), which
+        # lost ~8 loops of SQL work to a refusal and another ~16 to a
+        # step-budget stop and surfaced 0 findings (``tool_msgs_scanned: 0``).
+        try:
+            if getattr(e, "_swarm_partial_snapshot", None) is None:
+                e._swarm_partial_snapshot = last  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            pass
+        raise
     return last
+
+
+def _is_resumable(messages: list) -> bool:
+    """True if ``messages`` is a valid point to resume an agent from.
+
+    A history is resumable unless its final turn is an assistant message
+    that still has unanswered ``tool_calls`` — most providers reject a
+    request whose last tool call has no matching tool result. A
+    cyber_policy refusal never produces that shape (the refused LLM call
+    emits no message, so the trace ends on a ``ToolMessage`` or the seed
+    ``HumanMessage``), but the guard keeps a malformed partial from
+    erroring the continuation: we fall back to restarting from the seed
+    instead.
+    """
+    if not messages:
+        return False
+    tool_calls = getattr(messages[-1], "tool_calls", None)
+    return not tool_calls
 
 
 async def astream_with_refusal_retry(
@@ -185,6 +225,17 @@ async def astream_with_refusal_retry(
     total_attempts = 0
     last_tier = "primary"
 
+    # ── Continue-from-where-it-refused state ────────────────────
+    # ``current_messages`` is what we feed the NEXT attempt. It starts as
+    # the filtered seed, but after a refusal we roll it forward to the
+    # worker's accumulated trace so the retry CONTINUES instead of
+    # restarting from the seed and re-doing (and re-tripping) all the work.
+    # ``best_partial`` keeps the richest trace seen across every attempt so
+    # that, if all tiers exhaust, the caller's salvage path still gets the
+    # real work rather than ``[]``.
+    current_messages: list = filtered_seed
+    best_partial: dict | None = None
+
     # Track per-tier "have we dumped yet" so the live refused-prompt
     # render fires once per tier instead of once per retry. Retries
     # within a tier reuse the same payload — dumping all of them
@@ -211,6 +262,33 @@ async def astream_with_refusal_retry(
             # about to re-raise.
             pass
 
+    def _absorb_partial(exc: BaseException) -> None:
+        """Roll the accumulated trace forward after a refusal.
+
+        Reads the partial snapshot ``_run_agent_once`` attached to the
+        refusal and, if the worker made progress beyond what we last fed
+        it, makes that trace the input for the next attempt — so the next
+        attempt (and the next tier) CONTINUES from the refusal point
+        instead of restarting from the seed. Also records the richest
+        partial for the terminal-failure salvage path. A refusal on the
+        very first call yields no new messages, so ``current_messages`` is
+        unchanged and the historical restart-from-seed behavior is
+        preserved for opening-content refusals.
+        """
+        nonlocal current_messages, best_partial
+        snap = getattr(exc, "_swarm_partial_snapshot", None)
+        if not isinstance(snap, dict):
+            return
+        msgs = snap.get("messages") or []
+        if not _is_resumable(msgs):
+            return
+        if len(msgs) > len(current_messages):
+            current_messages = list(msgs)
+        if best_partial is None or len(msgs) > len(
+            best_partial.get("messages") or []
+        ):
+            best_partial = snap
+
     # ── Tier 1: primary model, vocab-filtered, retry × N ────────
     # Skipped entirely when the caller knows this config already tripped
     # the primary model's classifier earlier this run — the same prompt
@@ -229,16 +307,19 @@ async def astream_with_refusal_retry(
             total_attempts += 1
             try:
                 last_snapshot = await _run_agent_once(
-                    agent, filtered_seed, call_config, mode,
+                    agent, current_messages, call_config, mode,
                 )
                 # Success.
                 return last_snapshot, total_attempts, last_tier
             except REFUSAL_EXCS as e:
                 last_exc = e
+                _absorb_partial(e)
                 log.warning(
-                    "[%s] worker refused (tier=primary, attempt=%d/%d): %s",
+                    "[%s] worker refused (tier=primary, attempt=%d/%d, "
+                    "continuing from %d msg(s)): %s",
                     config.agent_id, attempt + 1,
-                    max_retries_per_tier + 1, str(e)[:160],
+                    max_retries_per_tier + 1, len(current_messages),
+                    str(e)[:160],
                 )
                 _dump_to_live(e, "primary")
                 if attempt < max_retries_per_tier:
@@ -266,19 +347,23 @@ async def astream_with_refusal_retry(
             total_attempts += 1
             try:
                 last_snapshot = await _run_agent_once(
-                    fb_agent, filtered_seed, call_config, mode,
+                    fb_agent, current_messages, call_config, mode,
                 )
                 log.info(
-                    "[%s] rescued by fallback model on attempt %d",
-                    config.agent_id, attempt + 1,
+                    "[%s] rescued by fallback model on attempt %d "
+                    "(continued from %d msg(s))",
+                    config.agent_id, attempt + 1, len(current_messages),
                 )
                 return last_snapshot, total_attempts, last_tier
             except REFUSAL_EXCS as e:
                 last_exc = e
+                _absorb_partial(e)
                 log.warning(
-                    "[%s] worker refused (tier=fallback, attempt=%d/%d): %s",
+                    "[%s] worker refused (tier=fallback, attempt=%d/%d, "
+                    "continuing from %d msg(s)): %s",
                     config.agent_id, attempt + 1,
-                    max_retries_per_tier + 1, str(e)[:160],
+                    max_retries_per_tier + 1, len(current_messages),
+                    str(e)[:160],
                 )
                 _dump_to_live(e, "fallback")
                 if attempt < max_retries_per_tier:
@@ -292,6 +377,11 @@ async def astream_with_refusal_retry(
     try:
         last_exc._swarm_attempts = total_attempts  # type: ignore[attr-defined]
         last_exc._swarm_last_tier = last_tier  # type: ignore[attr-defined]
+        # Attach the richest partial trace seen across all tiers so
+        # ``run_skill_agent``'s except block recovers the worker's real
+        # work for salvage / summary instead of an empty list.
+        if best_partial is not None:
+            last_exc._swarm_partial_snapshot = best_partial  # type: ignore[attr-defined]
     except (AttributeError, TypeError):
         # Some exception classes use ``__slots__``; falling back
         # to the locals at the call site is acceptable.

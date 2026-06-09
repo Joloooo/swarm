@@ -157,6 +157,15 @@ _FINGERPRINT_RE = re.compile(
 # query, not a CVE query) — used only to rank fingerprint candidates.
 _GENERIC_SERVERS = {"apache", "apache httpd", "nginx", "php", "openssl", "lighttpd"}
 
+# Bare web-server names that are never related to an app-logic vuln class.
+# Injecting one into a "{class} in {component}" query just pollutes it
+# ("sqli in Apache 2.4.59"). Narrower than _GENERIC_SERVERS: it EXCLUDES
+# php, which DOES relate to deserialization (phar) / LFI / RCE, so a
+# "deserialization in PHP" query stays useful. Stripped from the
+# stuck-conversion and divergence component slots only; characterization
+# keeps its component (there the component IS the subject of the search).
+_SERVER_ONLY_COMPONENTS = {"apache", "apache httpd", "nginx", "lighttpd", "openssl"}
+
 # A server/filter announcing a denylist, or a probe rendering inert — the
 # strongest machine-observable "stuck on a documented technique" signals.
 _STUCK_PHRASE_RE = re.compile(
@@ -275,6 +284,17 @@ def extract_fingerprint(recon_summary: str) -> tuple[str, str]:
     if best is None:
         return "", ""
     return best[1], best[2]
+
+
+def _strip_server_component(component: str, version: str) -> tuple[str, str]:
+    """Drop a bare web-server component (Apache/nginx/etc.) from a
+    class-technique query — it is unrelated to the vuln class and only
+    pollutes the search ("sqli in Apache"). App frameworks (Flask/Express/
+    Django) are kept; there the component genuinely narrows the technique
+    ("SSTI in Flask"). PHP is kept too (phar deserialization / LFI / RCE)."""
+    if component.strip().lower() in _SERVER_ONLY_COMPONENTS:
+        return "", ""
+    return component, version
 
 
 def extract_parameter(finding: Any) -> str:
@@ -557,6 +577,7 @@ def stuck_conversion_fire(state: dict) -> CrawlDecision | None:
         if not _has_stuck_signal(state, finding, vuln_class):
             continue
         component, version = extract_fingerprint(state.get("recon_summary") or "")
+        component, version = _strip_server_component(component, version)
         parameter = extract_parameter(finding)
         observed = extract_observed_behaviour(state, finding)
         query = build_crawl_query(
@@ -599,6 +620,7 @@ def divergence_fire(state: dict) -> CrawlDecision | None:
             component, version = extract_fingerprint(
                 state.get("recon_summary") or ""
             )
+            component, version = _strip_server_component(component, version)
             query = build_crawl_query(
                 vuln_class=sibling,
                 component=component,

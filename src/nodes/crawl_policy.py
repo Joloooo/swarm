@@ -99,8 +99,21 @@ def normalize_mode(raw: str | None) -> str:
 # researchable-lead gate).
 _CRAWLABLE_SEV = {"critical", "high", "medium"}
 
-# Categories that are recon host-noise, not a real vulnerability class.
-_NON_RESEARCHABLE_CATEGORIES = {"", "exposed-service", "unknown", "info-disclosure"}
+# Categories that are NOT a researchable vulnerability class: recon
+# host-noise, or a bare severity label that leaked into the category slot
+# ("info" / "informational"), plus the info-disclosure family — an exposed
+# surface is something to read directly, not a technique to look up.
+#
+# SINGLE SOURCE OF TRUTH: planner._researchable_lead imports this exact set,
+# so the planner's "research this lead" nudge and this module's
+# stuck-conversion trigger can never drift again. They previously did: the
+# planner copy lacked "info-disclosure", and *neither* blocked the bare
+# "info" slug that was actually leaking — 14 of 35 stuck-conversion fires
+# fired on findings mis-tagged "info" (405 banners, recon snippets).
+_NON_RESEARCHABLE_CATEGORIES = {
+    "", "exposed-service", "unknown",
+    "info", "informational", "info-disclosure", "information-disclosure",
+}
 
 # Divergence: how many same-class dispatches count as "fixated".
 _FIXATION_MIN = 3

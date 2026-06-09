@@ -1352,7 +1352,11 @@ def _colocated_service_directive(state: SwarmGraphState) -> str | None:
 # co-located host noise / second-port services (handled by
 # ``_colocated_service_directive``); ``""`` / ``unknown`` carry no class
 # for the crawler to research.
-_NON_RESEARCHABLE_CATEGORIES = {"", "exposed-service", "unknown"}
+# Single source of truth lives in crawl_policy (it adds the info /
+# info-disclosure family, which is a surface to read, not a technique to
+# look up) so this gate and the deterministic stuck-conversion trigger can
+# never drift apart again — they previously did.
+_NON_RESEARCHABLE_CATEGORIES = crawl_policy._NON_RESEARCHABLE_CATEGORIES
 
 
 def _researchable_lead(finding) -> bool:

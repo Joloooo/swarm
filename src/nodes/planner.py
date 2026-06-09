@@ -99,26 +99,12 @@ VALID_ACTIONS = {"attack", "recon", "web_search", "report", "submit_flag"}
 # where reporting an unexploited HIGH-severity vuln is a valid deliverable).
 _FORCE_RECOVERY_ENABLED = os.environ.get("SWARM_FORCE_RECOVERY", "1") != "0"
 
-# Substrings that indicate a finding has reached extracted impact (not just
-# vulnerability discovery). Tuned for benchmark-style runs where the goal is
-# a CTF flag, but the broader keywords (``extracted``, ``dumped``, etc.) cover
-# generic pentest impact too. Matched case-insensitively against the title +
-# evidence concatenation. Add new keywords here when a real run mis-fires —
-# the false-negative cost is one wasted ``web_search`` round-trip.
-_IMPACT_KEYWORDS = (
-    "flag{",                # canonical CTF / benchmark flag marker
-    "flag:",                # alternate flag prefix some challenges use
-    "extracted",            # "extracted user data", "extracted credentials"
-    "dumped",               # "dumped database table"
-    "exfiltrated",          # "exfiltrated 50 records"
-    "rce confirmed",        # explicit RCE evidence
-    "code execution",       # alternate RCE phrasing
-    "command output",       # shell injection actually returned data
-    "session as",           # "obtained session as user X"
-    "authenticated as",     # "authenticated as admin"
-    "privilege escalat",    # "privilege escalated to root"
-    "shell obtained",       # interactive shell achieved
-)
+# NOTE: the canonical ``_IMPACT_KEYWORDS`` lives further down, next to
+# ``_impact_demonstrated`` (search for "Keywords whose presence in finding
+# evidence"). An earlier duplicate definition here was DEAD CODE — being a
+# second module-level binding it was silently shadowed by the later one, so
+# its keywords never took effect. Removed 2026-06-09; add new impact keywords
+# to the canonical tuple only.
 
 def _build_skills_menu() -> str:
     """Render the dispatchable-skills list as a bulleted menu.
@@ -921,8 +907,10 @@ def _format_relevant_summary_for_planner(rs: dict | None) -> str | None:
 # (we miss the override and the prompt rules handle it).
 _IMPACT_KEYWORDS: tuple[str, ...] = (
     "flag{",
+    "flag:",
     "extracted",
     "dumped",
+    "exfiltrated",
     "leaked",
     "executed",
     "captured",
@@ -930,11 +918,41 @@ _IMPACT_KEYWORDS: tuple[str, ...] = (
     "rce confirmed",
     "code execution",
     "authenticated as",
+    "session as",
     "as admin",
     "shell access",
+    "shell obtained",
+    "privilege escalat",
     "command output",
     "retrieved row",
     "retrieved record",
+)
+
+
+# Evidence substrings that signal a usable EXPLOIT PRIMITIVE even when the
+# worker under-labels the finding (e.g. files a data-leaking UNION as INFO,
+# "no exploitable issue" — XBEN-095, 2026-06-09). These are raw injected-query
+# / extraction-output markers: their presence in finding evidence means the
+# worker actually pulled data out, which is a data-leaking-injection primitive
+# the planner should drive to the flag.
+#
+# Deliberately kept SEPARATE from ``_IMPACT_KEYWORDS`` and checked ONLY in
+# ``_is_exploit_primitive`` — NOT in ``_impact_demonstrated``. The reason is
+# the asymmetry documented above: a false positive in ``_impact_demonstrated``
+# lets the planner REPORT prematurely (bad), whereas a false positive in the
+# primitive path merely spends one turn driving a lead that self-suppresses
+# (cheap). These tokens are loose enough to occasionally match a written
+# payload rather than real output, so they only ever feed the cheap path.
+_PRIMITIVE_EVIDENCE_KEYWORDS: tuple[str, ...] = (
+    "group_concat",         # SQL mass-extraction function in returned data
+    "information_schema",   # schema/table/column enumeration output
+    "@@version",            # DB version banner actually returned
+    "database()",           # current-DB name extracted
+    "current_user",         # DB user extracted
+    "0x3a",                 # hex ':' — the classic concat(user,0x3a,pass) tell
+    "union select",         # a UNION extraction was actually run
+    "rows returned",        # injected query returned data
+    "row returned",
 )
 
 
@@ -1387,14 +1405,24 @@ def _is_exploit_primitive(finding) -> bool:
     privileged session) that is a means to the objective, not yet the
     objective itself.
 
-    Two signals, OR'd (belt and suspenders): the explicit ``primitive``
-    marker a worker set on the finding (the authoritative signal), OR the
-    existing :func:`_impact_demonstrated` keyword match on the finding text
-    (the fallback for when a worker proved impact but didn't set the tag).
+    Three signals, OR'd (belt and suspenders): the explicit ``primitive``
+    marker a worker set on the finding (the authoritative signal); the
+    :func:`_impact_demonstrated` keyword match on the finding text (the
+    fallback for when a worker proved impact but didn't set the tag); OR a
+    raw injected-query / extraction-output marker in the evidence
+    (``_PRIMITIVE_EVIDENCE_KEYWORDS``) — the case where a worker actually
+    leaked data but under-labelled the finding as INFO / "not exploitable"
+    (XBEN-095). The third signal is scoped to THIS function on purpose: it is
+    loose enough to risk a false positive, which is cheap here (drive a lead
+    for one turn) but would be harmful in ``_impact_demonstrated`` (premature
+    report).
     """
     if (_finding_attr(finding, "primitive") or "").strip():
         return True
-    return _impact_demonstrated(finding)
+    if _impact_demonstrated(finding):
+        return True
+    evidence = (_finding_attr(finding, "evidence") or "").lower()
+    return any(kw in evidence for kw in _PRIMITIVE_EVIDENCE_KEYWORDS)
 
 
 # Per-primitive "cheapest read toward the objective" hint. Keyed on the

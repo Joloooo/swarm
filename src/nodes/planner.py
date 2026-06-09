@@ -1639,21 +1639,37 @@ def _diversify_when_stuck_directive(state: SwarmGraphState) -> str | None:
     return "\n".join(lines)
 
 
+# A CVE identifier anywhere in a finding's title/evidence is the single most
+# targetable thing to search for — the empirical probe (scripts/websearch_probe
+# .py, 2026-06-09) showed a query naming the exact CVE returns its working
+# request shape, whereas a generic "<server> <version> vulnerabilities" sweep
+# returns unrelated CVEs. So if a finding carries a CVE id, the forced query
+# names it and asks for the exploit request.
+_CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
+
+
 def _build_forced_search_query(finding, state: SwarmGraphState) -> str:
     """Build a focused web-search query from a blocking finding.
 
-    Format: ``"<category> bypass technique <truncated title>"``. Falls
-    back to a generic flag-extraction query when no finding is available.
+    Targets the SPECIFIC blocker, never a generic stack/version sweep:
+      * a CVE id in the finding → ``"<CVE-id> exploit request proof of
+        concept <category>"`` (the highest-yield query — see ``_CVE_RE``);
+      * otherwise ``"<category> bypass technique <truncated title>"``.
+    Falls back to a class-named query when no finding is available.
     """
     if finding is None:
-        target = (state.get("target_url") or "").strip()
-        return (
-            "web vulnerability flag extraction technique "
-            f"{target[:80]}"
-        ).strip()
+        # No specific finding — still name the most-recently-engaged vuln
+        # class if state carries one, rather than a vague banner sweep.
+        vclass = (state.get("vuln_class") or state.get("attack_type") or "").strip()
+        lead = f"{vclass} " if vclass else "web application "
+        return f"{lead}exploitation technique payload flag extraction".strip()
+    title = _finding_attr(finding, "title")[:120].strip()
+    evidence = _finding_attr(finding, "evidence")[:300]
+    cve = _CVE_RE.search(f"{title} {evidence}")
     cat = _finding_attr(finding, "category") or "web vulnerability"
-    title = _finding_attr(finding, "title")[:80].strip()
-    return f"{cat} bypass technique {title}".strip()
+    if cve:
+        return f"{cve.group(0).upper()} exploit request proof of concept {cat}".strip()
+    return f"{cat} bypass technique {title[:80]}".strip()
 
 
 def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:

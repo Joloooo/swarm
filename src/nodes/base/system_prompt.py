@@ -236,6 +236,14 @@ DEMONSTRATED_STANDARD = """\
   emerged. Treat any of these as confirmation that your input reached
   the vulnerable code path — now find the variant that produces actual
   exploit output.
+- A class-specific filter is positive evidence, not a dead end. If your
+  canonical probe for a class is selectively stripped, escaped, or
+  rejected while ordinary input passes (your `../` is removed, your
+  `<script>` is stripped, your `{{` is neutralised, `' OR 1=1` is blocked
+  but `' OR 1=2` is not), someone built a defense against THAT class at
+  THAT sink — which means the sink is there. Record it as a SUSPECTED
+  finding for that class and go find the bypass; never read a filtered
+  probe as "safe."
 - An IDENTICAL, error-free response is NOT proof the input is safe — it
   is the single most common reason a real vulnerability gets wrongly
   dismissed. A parameter that reflects nothing and never errors can

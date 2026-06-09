@@ -202,8 +202,17 @@ A finding is real only when at least one holds:
 
 Reject false positives:
 - Math evaluating only in the browser → XSS, not SSTI
-- Payload reflected literally with no error and no evaluation → not vulnerable
-- WAF echoing the payload back in an error page → not evaluation
+- Payload reflected back **verbatim and unchanged**, with no error and no
+  evaluation → not yet demonstrated; keep probing other engines/contexts
+
+A blocked or neutralised probe is NOT a false positive — it is a signpost.
+If your `{{...}}` / `${...}` / `<%...%>` comes back **stripped, HTML-escaped,
+or replaced** while the rest of the response changed, a filter is sitting in
+front of a template sink — that is positive evidence the class is present.
+Record it as SUSPECTED SSTI and move to the WAF-bypass variants (`|attr()`,
+hex/octal encoding, string concatenation) before concluding "not vulnerable."
+A template error or stack trace naming an engine (Jinja2, Twig, Velocity,
+Freemarker) is the OPPOSITE of safe: the engine is confirmed present.
 
 ## Tools to use
 - `curl` and `httpie` for manual payload injection

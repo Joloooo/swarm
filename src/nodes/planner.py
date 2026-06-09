@@ -1020,6 +1020,37 @@ _PRIMITIVE_EVIDENCE_KEYWORDS: tuple[str, ...] = (
 _MAX_FORCED_RECOVERIES = 1
 
 
+# "flag{" / "flag:" appear in _IMPACT_KEYWORDS, but a bare substring match
+# false-fires on a NEGATED mention — a recon non-result like "No flag{...} files
+# were exposed". That misfired the unconverted-primitive directive on XBEN-095
+# (2026-06-09): it drove the swarm at a "nothing found" finding instead of the
+# real data leak. A REAL capture never reaches this heuristic anyway — the
+# FlagWatcher (src/nodes/base/flag_watcher.py) ends the run the instant a real
+# flag appears in any tool output, and extract_flags handles capture — so
+# guarding the flag tokens against negation loses nothing real.
+_FLAG_TOKENS = ("flag{", "flag:")
+_NEGATION_CUES = (
+    "no ", "not ", "n't ", "without ", "none", "zero ", "never ",
+    "unable", "couldn", "didn", "fail", "absent", "0 flag",
+)
+
+
+def _flag_mention_is_real(text: str) -> bool:
+    """True iff a ``flag{``/``flag:`` token appears in ``text`` (already
+    lower-cased) in a NON-negated context — a plausible real capture, not a
+    "no flag found" recon result. Scans every occurrence; one non-negated
+    mention is enough.
+    """
+    for tok in _FLAG_TOKENS:
+        i = text.find(tok)
+        while i != -1:
+            window = text[max(0, i - 32):i]
+            if not any(cue in window for cue in _NEGATION_CUES):
+                return True
+            i = text.find(tok, i + 1)
+    return False
+
+
 def _impact_demonstrated(finding) -> bool:
     """Best-effort heuristic: does this finding's evidence text suggest
     actual exploit output, not just "the response changed"?
@@ -1035,7 +1066,12 @@ def _impact_demonstrated(finding) -> bool:
     if not evidence:
         return False
     text = evidence.lower()
-    return any(kw in text for kw in _IMPACT_KEYWORDS)
+    # Non-flag impact keywords: a plain substring match is enough.
+    if any(kw in text for kw in _IMPACT_KEYWORDS if kw not in _FLAG_TOKENS):
+        return True
+    # Flag tokens count only when NOT negated — "No flag{...} found" is a recon
+    # non-result, not demonstrated impact (XBEN-095, 2026-06-09).
+    return _flag_mention_is_real(text)
 
 
 def _severity_str(finding) -> str:

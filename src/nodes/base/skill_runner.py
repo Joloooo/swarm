@@ -91,8 +91,12 @@ class AgentConfig:
     # Tools (LangChain tool instances, resolved from SKILL.md tool names)
     tools: list[BaseTool] = field(default_factory=list)
 
-    # Iteration budget (the only worker cap; one global knob feeds it)
-    max_iterations: int = 30
+    # Worker budget in REAL tool-using rounds (model decides + a tool runs);
+    # the only worker cap, fed by ``budgets.worker_max_iterations``. Converted
+    # to a LangGraph super-step ``recursion_limit`` (~3 super-steps/round) where
+    # ``call_config`` is built. This dataclass default is only a fallback for
+    # configs constructed outside the loader.
+    max_iterations: int = 20
 
     # Prompt assembly opt-out. When True, ``_build_system_message``
     # skips the identity preamble, pentesting-rules block, role
@@ -970,11 +974,21 @@ async def _run_skill_agent_impl(
             expected_flag=expected_flag_candidates_for_callback,
             agent_id=config.agent_id,
         ))
+    # ``config.max_iterations`` is the worker's budget in REAL tool-using
+    # rounds (one round = the model decides + a tool runs). LangGraph's
+    # ``recursion_limit`` instead counts super-steps, and the create_agent
+    # loop spends ~3 super-steps per round (the no-progress middleware's
+    # before_model node + the model node + the tools node) — empirically a
+    # limit of 40 stops a worker at exactly 13 rounds (measured across
+    # XBEN-030/088/095, see tests/FAILURES.md 2026-06-10). Convert rounds →
+    # super-steps here (``3*rounds + 1``) so the config, this budget, and
+    # ``_count_worker_iterations`` all speak in the same real-round units.
+    recursion_limit = config.max_iterations * 3 + 1
     call_config = make_call_config(
         run_id=run_id,
         agent_id=config.agent_id,
         node=node.name,
-        recursion_limit=config.max_iterations,
+        recursion_limit=recursion_limit,
         extra_callbacks=worker_callbacks or None,
     )
 
@@ -1548,7 +1562,8 @@ async def _run_skill_agent_impl(
         ):
             # ── Step-budget stop (NOT a crash) ──────────────────────
             # The worker exhausted its LangGraph ``recursion_limit``
-            # (``config.max_iterations``). The model is still perfectly
+            # (``config.max_iterations`` real rounds, converted to super-steps
+            # where ``call_config`` is built). The model is still perfectly
             # reachable — it just ran out of turns. So we do NOT use the
             # post-crash salvage guesser here (that exists for the case
             # the LLM channel is dead — a refusal). Instead:

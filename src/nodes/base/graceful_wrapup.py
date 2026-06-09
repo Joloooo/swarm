@@ -3,9 +3,9 @@
 Why this exists
 ---------------
 
-A worker's per-run budget is its LangGraph ``recursion_limit``
-(``config.max_iterations``). When it is exhausted mid-loop, LangGraph
-raises ``GraphRecursionError``. Crucially, the model itself is still
+A worker's per-run budget is ``config.max_iterations`` real tool-using
+rounds, set as a LangGraph ``recursion_limit`` (~3 super-steps per round).
+When it is exhausted mid-loop, LangGraph raises ``GraphRecursionError``. Crucially, the model itself is still
 perfectly reachable — the worker simply ran out of turns. So the right
 recovery is **not** the post-crash *salvage* path: salvage
 (:mod:`src.refusals.salvage`) exists for the case the LLM channel is

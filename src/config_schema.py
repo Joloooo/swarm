@@ -41,7 +41,12 @@ from typing import Any
 DEFAULTS: dict[str, dict[str, Any]] = {
     "budgets": {
         "planner_max_iters": 50,
-        "worker_max_iterations": 40,
+        # Worker budget in REAL tool-using rounds (model decides + a tool runs).
+        # Converted to a LangGraph super-step recursion_limit (~3 super-steps
+        # per round) in skill_runner, so 20 here == 20 real rounds. The old
+        # value 40 was super-steps and gave only ~13 real rounds; 20 rounds lets
+        # a multi-step exploit finish inside one dispatch.
+        "worker_max_iterations": 20,
         "llm_max_tokens": 4096,
         # Per-benchmark agent wall-clock budget, in SECONDS (1200 = 20 min,
         # 2400 = 40 min). The leash on one graph run; when it expires the run

@@ -388,6 +388,23 @@ After each worker, look at what came back:
                     - Auth finding, admin:true in body ignored
                       → "authorization bypass JSON parameter pollution
                       duplicate keys"
+                    - A specific component+version or CVE id is known
+                      (e.g. a WordPress plugin "Backup Migration 1.3.5",
+                      or you already named "CVE-2023-6553")
+                      → name the CVE and ask for its PROOF-OF-CONCEPT
+                      REQUEST, "CVE-2023-6553 Backup Migration 1.3.5
+                      proof-of-concept request backup-heart.php" — this
+                      returns the exact request to send.
+                  ANTI-PATTERN — never fire a generic banner/stack sweep
+                  like "known vulnerabilities in Apache 2.4.41": a query
+                  aimed at the server version returns unrelated CVEs and
+                  reinforces a dead end. ALWAYS name the SPECIFIC blocker —
+                  the CVE id, the exact filter/blacklist behavior you
+                  observed, or the vuln class + technique. (Precise
+                  exploit-oriented queries are NOT blocked; an empirical
+                  probe found every targeted query returned usable sources
+                  and none were refused, while the banner sweep returned
+                  off-target results.)
 
                   Once the research is back, attack from MULTIPLE
                   ANGLES: dispatch one worker per MAJOR technique it
@@ -1433,6 +1450,14 @@ def _unexploited_lead_directive(state: SwarmGraphState) -> str | None:
         "attack turn. If the exploitation path is already obvious, or you "
         "have tried the documented technique and it failed, skip the search "
         "and proceed."
+    )
+    lines.append(
+        "  • If a finding names a specific CVE id or an outdated "
+        "component+version, the search_query MUST name THAT (e.g. "
+        "\"CVE-2023-6553 proof-of-concept request\", \"WordPress Backup "
+        "Migration 1.3.5 proof-of-concept request\") — never a generic "
+        "\"known vulnerabilities in <server> <version>\" banner sweep, which "
+        "returns unrelated CVEs."
     )
     return "\n".join(lines)
 

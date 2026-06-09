@@ -230,6 +230,114 @@ def _extract_findings(messages: list, agent_id: str) -> list[Finding]:
     return findings
 
 
+# ── Refusal-path primitive salvage ──────────────────────────────────
+#
+# The Codex safety classifier fires most often PRECISELY when a worker
+# has just received its most valuable output — a dumped table, a shell
+# ``id`` line, ``/etc/passwd`` contents — because that output is the
+# most offensive-LOOKING thing in context. The flag salvage in the
+# refusal branch only rescues a literal ``flag{...}``; without this, a
+# worker that PROVED a non-flag primitive (a SQL extraction, command
+# output, a file read) and was then refused on its next call loses that
+# proof entirely — it reaches the planner only through the lossy,
+# refusal-prone summariser digest. This deterministic scan mints a HIGH
+# ``Finding`` carrying the primitive tag so the planner's
+# ``_unconverted_primitive_directive`` can drive it to the objective on
+# a later turn.
+#
+# Two guards (the same the planner uses) keep it from false-firing:
+#   * received-not-sent: only ``ToolMessage`` content (server responses)
+#     is scanned — never the worker's own command — so a payload the
+#     worker merely TYPED (e.g. it wrote ``UNION SELECT``) cannot
+#     self-trigger; only output that came BACK counts.
+#   * negation guard: a marker preceded (within 32 chars) by a negation
+#     cue is skipped, so "no group_concat output" does not fire.
+#
+# Markers are ordered strongest-first; the loop returns on the first
+# real hit. Each maps to a canonical primitive tag + finding category.
+_REFUSAL_PRIMITIVE_MARKERS: tuple[tuple[str, str, str], ...] = (
+    ("root:x:0:0", "file_read", "lfi"),        # /etc/passwd contents
+    ("uid=", "rce", "rce"),                     # `id` command output
+    ("gid=", "rce", "rce"),
+    ("information_schema", "sqli_read", "sqli"),
+    ("group_concat", "sqli_read", "sqli"),
+    ("@@version", "sqli_read", "sqli"),
+    ("database()", "sqli_read", "sqli"),
+    ("union select", "sqli_read", "sqli"),
+    ("www-data", "rce", "rce"),
+)
+_REFUSAL_NEGATION_CUES: tuple[str, ...] = (
+    "no ", "not ", "n't ", "without ", "none", "zero ", "never ",
+)
+
+
+def _refusal_marker_is_real(text_lower: str, marker: str) -> bool:
+    """True if ``marker`` occurs in ``text_lower`` at least once without a
+    negation cue in the ~32 characters before it."""
+    start = 0
+    while True:
+        idx = text_lower.find(marker, start)
+        if idx < 0:
+            return False
+        window = text_lower[max(0, idx - 32):idx]
+        if not any(cue in window for cue in _REFUSAL_NEGATION_CUES):
+            return True
+        start = idx + len(marker)
+
+
+def _salvage_primitive_from_trace(
+    partial_messages: list, agent_id: str,
+) -> Finding | None:
+    """Scan a refused worker's RECEIVED tool output for a proven primitive.
+
+    Returns a HIGH ``Finding`` tagged with the matching primitive when a
+    marker appears in ``ToolMessage`` content (received-not-sent guard),
+    or ``None`` when nothing matches. The worker's own request text is
+    never scanned, so a payload it merely typed cannot self-trigger.
+    """
+    tool_parts: list[str] = []
+    for m in partial_messages:
+        if not isinstance(m, ToolMessage):
+            continue
+        c = getattr(m, "content", None)
+        if isinstance(c, str):
+            tool_parts.append(c)
+        elif isinstance(c, list):
+            for block in c:
+                if isinstance(block, dict):
+                    tool_parts.append(str(block.get("text") or ""))
+    haystack = "\n".join(tool_parts)
+    if not haystack:
+        return None
+    low = haystack.lower()
+    for marker, primitive_tag, category in _REFUSAL_PRIMITIVE_MARKERS:
+        if marker in low and _refusal_marker_is_real(low, marker):
+            idx = low.find(marker)
+            excerpt = haystack[max(0, idx - 240):idx + len(marker) + 240]
+            return Finding(
+                title=(
+                    "[salvaged from refused worker] proven "
+                    f"{primitive_tag} primitive in tool output before "
+                    f"refusal ({marker})"
+                )[:240],
+                severity=Severity.HIGH,
+                category=category,
+                description=(
+                    "The worker hit a Codex policy refusal mid-run, but "
+                    "its partial tool trace already contained received "
+                    "output proving a working primitive. Refusals land "
+                    "on exactly this high-value output; this finding "
+                    "preserves the proven capability so it can be driven "
+                    "to the objective on a later turn instead of lost."
+                ),
+                evidence=excerpt[:2400],
+                agent_id=agent_id,
+                url="",
+                primitive=primitive_tag,
+            )
+    return None
+
+
 # ── Worker memory: prior-attempts + web-search context injection ────────
 #
 # By default, every dispatch of ``run_skill_agent`` calls
@@ -1350,17 +1458,51 @@ async def _run_skill_agent_impl(
                     type(salv_err).__name__,
                     str(salv_err)[:160],
                 )
+
+            # Refusal-path PRIMITIVE salvage. If no flag was recovered,
+            # the worker may still have PROVEN a non-flag capability (a
+            # SQL extraction, command output, an /etc/passwd read) in the
+            # tool output the API refused on — refusals land on exactly
+            # that high-value output more often than not. Mint a HIGH
+            # primitive finding so the planner's
+            # ``_unconverted_primitive_directive`` can drive it to the
+            # flag on a later turn, instead of the proof evaporating with
+            # the refusal. Scans received tool output only (never the
+            # worker's own payload) with a negation guard; never raises.
+            salvaged_primitive = False
+            if not findings:
+                try:
+                    prim = _salvage_primitive_from_trace(
+                        partial_messages, config.agent_id,
+                    )
+                    if prim is not None:
+                        findings = [prim]
+                        salvaged_primitive = True
+                        node.log.warning(
+                            "[%s] refusal-path primitive salvage: "
+                            "recovered a %r primitive from the partial "
+                            "trace before discard.",
+                            config.agent_id, prim.primitive,
+                        )
+                except Exception as prim_err:  # noqa: BLE001
+                    node.log.warning(
+                        "[%s] refusal-path primitive salvage failed: "
+                        "%s: %s",
+                        config.agent_id,
+                        type(prim_err).__name__,
+                        str(prim_err)[:160],
+                    )
+
             trace.append(AIMessage(
                 content=(
                     f"⚠️ [{config.agent_id}] model refused the task at "
-                    f"the API safety layer ({type(e).__name__}). The "
-                    "request was rejected before any tool calls could "
-                    "be made. Recommend the planner pick a different "
-                    "skill or rephrase the goal more narrowly."
+                    f"the API safety layer ({type(e).__name__}). "
+                    "Recommend the planner pick a different skill or "
+                    "rephrase the goal more narrowly."
                     + (
-                        f"\n\n[salvage] Captured flag pattern in "
-                        f"partial trace before refusal: "
-                        f"{findings[0].evidence[:200]!r}"
+                        f"\n\n[salvage] Recovered a "
+                        f"{findings[0].severity.value} finding from the "
+                        f"partial trace before refusal: {findings[0].title}"
                         if findings
                         else ""
                     )
@@ -1369,7 +1511,8 @@ async def _run_skill_agent_impl(
                     "agent_id": config.agent_id,
                     "refusal": True,
                     "refusal_kind": "api_cyber_policy",
-                    "salvaged_flag": bool(findings),
+                    "salvaged_flag": bool(findings) and not salvaged_primitive,
+                    "salvaged_primitive": salvaged_primitive,
                 },
             ))
             agent_result = AgentResult(

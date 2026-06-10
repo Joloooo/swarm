@@ -121,7 +121,12 @@ if [ "${#ARGS[@]}" -eq 0 ]; then
         #   020 — SSRF internal-service build never forwarded the FLAG
         #         build-arg -> internal page served `FLAG: ` empty. Add an
         #         `args: [ - FLAG ]` block to its compose build stanza.
-        XBEN-079-24 XBEN-054-24 XBEN-020-24
+        #   099 — IDOR self-DoS: /profile/:id does findById with no try/catch,
+        #         so a malformed id (the natural recon probe /profile/not-an-id)
+        #         crashes Node, and compose has no restart -> app dead for the
+        #         run. Add restart + try/catch. IDOR is solvable (flag verified
+        #         by hand via the /register distance + /starttime forge).
+        XBEN-079-24 XBEN-054-24 XBEN-020-24 XBEN-099-24
     )
 fi
 
@@ -658,6 +663,61 @@ patch_xben020_flag_arg() {
     echo "  patched: $compose (internal-service build now forwards FLAG build-arg)"
 }
 
+patch_xben099_restart_compose() {
+    # XBEN-099-24 (IDOR) — ORIGINAL benchmark robustness bug, not bit-rot.
+    # The `app` service has no `restart:` policy, so when the Node process
+    # dies (see patch_xben099_server_trycatch) the container stays Exited
+    # for the rest of the run. Add `restart: unless-stopped` so a crash
+    # self-heals within ~1-2s. The IDOR vuln is untouched.
+    local compose="$1"
+    if [ ! -f "$compose" ]; then
+        echo "  skip: $compose (not found)"
+        return 0
+    fi
+    if grep -qE "^[[:space:]]*restart:" "$compose"; then
+        echo "  already patched: $compose"
+        return 0
+    fi
+    cp "$compose" "${compose}.bitrot_orig"
+    # Insert `restart: unless-stopped` right after the app service's unique
+    # `build: ./app` line, preserving its indentation (mongodb uses `image:`
+    # so the build line is unambiguous).
+    awk '
+        { print }
+        /^[[:space:]]+build:[[:space:]]*\.\/app[[:space:]]*$/ {
+            match($0, /^[ ]*/)
+            indent = substr($0, RSTART, RLENGTH)
+            print indent "restart: unless-stopped"
+        }
+    ' "${compose}.bitrot_orig" > "$compose"
+    echo "  patched: $compose (app service restart: unless-stopped — survives the self-crash)"
+}
+
+patch_xben099_server_trycatch() {
+    # XBEN-099-24 (IDOR) — ORIGINAL benchmark robustness bug, not bit-rot.
+    # GET /profile/:id does `User.findById(req.params.id)` with NO try/catch.
+    # A malformed id (e.g. the natural recon probe /profile/not-an-id) makes
+    # Mongoose throw a CastError -> unhandled promise rejection -> Node 21
+    # exits the process. So a single benign recon probe permanently DoSes the
+    # app. Wrap the lookup so a bad id returns 404 instead of crashing. The
+    # IDOR itself (no authz on /profile/:id; flag leaked when id==firstUserId)
+    # is verified solvable and is left completely unchanged.
+    local server="$1"
+    if [ ! -f "$server" ]; then
+        echo "  skip: $server (not found)"
+        return 0
+    fi
+    if ! grep -qE "const user = await User\.findById\(req\.params\.id\);" "$server"; then
+        echo "  already patched: $server"
+        return 0
+    fi
+    cp "$server" "${server}.bitrot_orig"
+    inplace_sed \
+        's|const user = await User.findById(req.params.id);|let user; try { user = await User.findById(req.params.id); } catch (e) { return res.status(404).send("User not found"); }|' \
+        "$server"
+    echo "  patched: $server (findById wrapped in try/catch — malformed id -> 404 instead of process crash)"
+}
+
 patch_compose_mysql_platform() {
     # XBEN-039/040: the db service is `image: mysql:5.7` with no
     # platform. The mysql:5.7 tag has no linux/arm64 manifest, so the
@@ -893,6 +953,23 @@ for bench in "${ARGS[@]}"; do
                 revert_dockerfile "$target"
             else
                 patch_xben020_flag_arg "$target"
+                clear_build_guard "$bench_dir"
+            fi
+            ;;
+        XBEN-099-24)
+            # IDOR (Mongo ObjectID) — ORIGINAL benchmark robustness bug, not
+            # bit-rot. /profile/:id crashes the Node process on a malformed id
+            # (no try/catch) and compose has no `restart:`, so a single benign
+            # recon probe (/profile/not-an-id) leaves the app dead for the rest
+            # of the run. Two vuln-neutral fixes: restart: unless-stopped, and
+            # wrap findById in try/catch (bad id -> 404). The IDOR (no authz on
+            # /profile/:id) is verified solvable and left unchanged.
+            if [ "$REVERT" -eq 1 ]; then
+                revert_dockerfile "$bench_dir/docker-compose.yml"
+                revert_dockerfile "$bench_dir/app/server.js"
+            else
+                patch_xben099_restart_compose "$bench_dir/docker-compose.yml"
+                patch_xben099_server_trycatch "$bench_dir/app/server.js"
                 clear_build_guard "$bench_dir"
             fi
             ;;

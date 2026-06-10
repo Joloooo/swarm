@@ -19,6 +19,52 @@ class Severity(str, Enum):
     INFO = "info"
 
 
+class PrimitiveStatus(str, Enum):
+    """Conversion lifecycle of a finding/primitive — a SEPARATE axis from
+    ``Severity``. Severity says *how serious the bug is*; status says *how
+    close to the objective this lead is and how hard it has been driven*.
+
+    The progression is monotonic — a primitive only ever advances:
+
+        suspected → demonstrated → converting → exhausted | converted
+
+    - ``suspected``: a lead/hypothesis (e.g. "input looks injectable"),
+      not yet proven.
+    - ``demonstrated``: a proven exploit primitive (the historical
+      meaning of a finding with ``primitive`` set) — a means to the
+      objective, not yet the objective.
+    - ``converting``: an executor is actively driving this primitive
+      toward the flag.
+    - ``exhausted``: the conversion methods tried so far have not worked;
+      deprioritise or escalate the *method* rather than repeat it.
+    - ``converted``: the primitive reached the objective (terminal).
+
+    Stamped by the consolidation pass (``src/llm/consolidate.py``), never
+    by the worker directly — the worker only sets ``primitive``.
+    """
+
+    SUSPECTED = "suspected"
+    DEMONSTRATED = "demonstrated"
+    CONVERTING = "converting"
+    EXHAUSTED = "exhausted"
+    CONVERTED = "converted"
+
+
+class AttemptResult(str, Enum):
+    """Controlled, neutral vocabulary for the outcome of one conversion
+    attempt on a primitive. Kept terse and clinical on purpose — the
+    rendered attempt line is concatenated into worker/planner prompts, so
+    it must stay clear of the cyber_policy safety classifier (no
+    "failed to exploit"-style framing). See ``Finding.attempts``.
+    """
+
+    NO_EFFECT = "no-effect"
+    BLOCKED = "blocked"
+    PARTIAL = "partial"
+    ERROR = "error"
+    PROGRESSED = "progressed"
+
+
 @dataclass
 class Finding:
     """A single vulnerability or observation discovered during testing."""
@@ -45,6 +91,26 @@ class Finding:
     # tag; the canonical values are rce / file_read / sqli_read /
     # auth_bypass / ssrf, but a worker may coin another.
     primitive: str = ""
+    # --- Derived fields, stamped by the consolidation pass (not by the
+    # worker). They live only on entries in ``canonical_findings``; the
+    # raw append-only ``findings`` log leaves them at their defaults. ---
+    # Conversion lifecycle (see ``PrimitiveStatus``). Empty for an ordinary
+    # observation; set to suspected/demonstrated/converting/exhausted/
+    # converted for a lead or primitive.
+    status: str = ""
+    # Conversion-attempt log for a primitive — what has been tried to turn
+    # it into the flag, with what outcome. Each entry is a small dict
+    # ``{"method": str, "result": str, "note": str}`` where ``result`` is
+    # an ``AttemptResult`` value and ``method``/``note`` are short neutral
+    # phrases. Capped (last 5) by the consolidation pass. Read by the
+    # planner's conversion-aware directive and rendered (tail) into the
+    # worker seed so a worker does not repeat a dead method.
+    attempts: list[dict] = field(default_factory=list)
+    # Derived ranking score 0–100 ("proximity to the objective"), computed
+    # by the consolidation pass from a deterministic formula (proven-
+    # primitive × proximity × 1/attempts, severity as a minor term) plus a
+    # bounded LLM nudge. Directives sort on THIS, not raw severity.
+    lead_priority: int = 0
 
 
 @dataclass
@@ -68,6 +134,43 @@ def _merge_findings(left: list[Finding], right: list[Finding]) -> list[Finding]:
 def _merge_results(left: list[AgentResult], right: list[AgentResult]) -> list[AgentResult]:
     """Reducer: append agent results."""
     return left + right
+
+
+def _canonical_findings_reducer(
+    existing: list[Finding] | None, new: list[Finding] | None,
+) -> list[Finding]:
+    """Last non-empty write wins for ``canonical_findings``.
+
+    Unlike the append-only raw ``findings`` log, the canonical view is the
+    deduped / merged / status-stamped / ranked picture that the
+    consolidation pass (``src/llm/consolidate.py``) REBUILDS in full once
+    per summarizer cycle. So the reducer replaces wholesale on a real
+    write and keeps the prior view when a node emits nothing (e.g. a
+    summarizer pass with no workers) rather than wiping it — the planner
+    and worker seeds should always see the most recent canonical view.
+    """
+    if new:
+        return new
+    return existing or []
+
+
+def _exhausted_ledger_reducer(
+    existing: dict | None, new: dict | None,
+) -> dict:
+    """Merge the exhausted/negative-result ledger.
+
+    Keyed by a ``"<category>|<url>"`` string; each value is a short record
+    of what was tried on that surface and confirmed not to advance toward
+    the flag (negative results routed OUT of the findings channel by the
+    consolidation pass, so they inform "don't re-try" without polluting
+    the findings digest). New entries win on a key collision (freshest
+    outcome), old keys persist.
+    """
+    if not new:
+        return existing or {}
+    merged = dict(existing or {})
+    merged.update(new)
+    return merged
 
 
 def _recon_summary_reducer(existing: str | None, new: str | None) -> str:
@@ -181,6 +284,11 @@ class SwarmState:
     # -- Aggregated results from all swarm agents --
     findings: Annotated[list[Finding], _merge_findings]
     agent_results: Annotated[list[AgentResult], _merge_results]
+    # Deduped / merged / status-stamped / ranked view of ``findings``,
+    # rebuilt each summarizer cycle by the consolidation pass.
+    canonical_findings: Annotated[list[Finding], _canonical_findings_reducer]
+    # Negative / status results routed out of the findings channel.
+    exhausted_ledger: Annotated[dict, _exhausted_ledger_reducer]
 
     # -- Stealth state (shared across all agents) --
     waf_detected: bool
@@ -256,6 +364,17 @@ class SwarmGraphState(TypedDict, total=False):
     # Findings & results (reducers merge from parallel branches)
     findings: Annotated[list[Finding], _merge_findings]
     agent_results: Annotated[list[AgentResult], _merge_results]
+    # Canonical (deduped/merged/status-stamped/ranked) view of ``findings``,
+    # produced by the consolidation pass (``src/llm/consolidate.py``) at the
+    # summarizer gather hook and read by the planner directives + worker
+    # seeds. Falls back to ``findings`` when empty (cold start / pre-first
+    # consolidation). Last-non-empty-write-wins reducer.
+    canonical_findings: Annotated[list[Finding], _canonical_findings_reducer]
+    # Ledger of negative / status / exhausted results, keyed by
+    # "<category>|<url>", routed out of the findings channel by the
+    # consolidation pass so the planner knows what has been tried without
+    # the findings digest being diluted by ~90% negatives.
+    exhausted_ledger: Annotated[dict, _exhausted_ledger_reducer]
 
     # Stealth
     waf_detected: bool

@@ -433,6 +433,28 @@ def _format_dispatch_reason(state: dict) -> str | None:
     )
 
 
+def _render_finding_attempts(finding, n: int = 3) -> list[str]:
+    """Render the last ``n`` conversion attempts on a finding as compact
+    seed lines (``tried: method → result (note)``). Empty when the finding
+    has no attempts (an ordinary observation, or pre-consolidation).
+    """
+    attempts = getattr(finding, "attempts", None)
+    if not isinstance(attempts, list) or not attempts:
+        return []
+    out: list[str] = []
+    for a in attempts[-n:]:
+        if not isinstance(a, dict):
+            continue
+        method = str(a.get("method") or "").strip()
+        result = str(a.get("result") or "").strip()
+        if not method or not result:
+            continue
+        note = str(a.get("note") or "").strip()
+        suffix = f" ({note})" if note else ""
+        out.append(f"   tried: {method} → {result}{suffix}")
+    return out
+
+
 def _format_findings(state: dict) -> str | None:
     """Render the cumulative findings list as a seed block.
 
@@ -445,34 +467,51 @@ def _format_findings(state: dict) -> str | None:
     Each rendered line carries severity, title, url, category, and
     trimmed evidence — enough for the worker to recognise the finding
     and copy any literal payload string the previous worker captured.
+
+    Prefers the consolidated ``canonical_findings`` view (deduped, status-
+    stamped, ranked by ``lead_priority``) when the consolidation pass has
+    produced one — so the worker sees one entry per issue, the conversion
+    ``status``, and the ``attempts`` already tried on a primitive (so it
+    does not repeat a dead method). Falls back to the raw append-only
+    ``findings`` log before the first consolidation.
     """
-    findings = list(state.get("findings") or [])
+    canonical = state.get("canonical_findings")
+    use_canonical = bool(canonical)
+    findings = list(canonical) if use_canonical else list(state.get("findings") or [])
     if not findings:
         return None
 
-    rendered = findings[-_SEED_FINDINGS_TAIL:]
+    # Canonical findings are pre-sorted by lead_priority (highest first),
+    # so take the TOP N; the raw log is append-ordered, so take the most
+    # RECENT N.
+    rendered = (findings[:_SEED_FINDINGS_TAIL] if use_canonical
+                else findings[-_SEED_FINDINGS_TAIL:])
     elided = len(findings) - len(rendered)
 
     lines: list[str] = []
     if elided > 0:
+        which = "highest-priority" if use_canonical else "most recent"
         lines.append(
-            f"_(showing the {len(rendered)} most recent of "
-            f"{len(findings)} total findings; {elided} earlier finding(s) "
-            "elided for context budget — see state.findings for the "
-            "complete list)_"
+            f"_(showing the {len(rendered)} {which} of "
+            f"{len(findings)} total findings; {elided} more elided for "
+            "context budget)_"
         )
     for i, f in enumerate(rendered, 1):
         sev = getattr(getattr(f, "severity", None), "value", None) or "info"
         title = getattr(f, "title", "") or "(untitled)"
         url = getattr(f, "url", "") or ""
         category = getattr(f, "category", "") or ""
+        status = (getattr(f, "status", "") or "").strip()
         evidence = (getattr(f, "evidence", "") or "").strip()
         if len(evidence) > _SEED_FINDING_EVIDENCE_CHARS:
             evidence = (
                 evidence[: _SEED_FINDING_EVIDENCE_CHARS - 1]
                 + "…"
             )
-        head = f"{i}. [{sev.upper()}] {title}"
+        # A primitive carries a conversion status — surface it inline so
+        # the worker knows whether this is a proven capability to finish.
+        stat = f" ({status})" if status else ""
+        head = f"{i}. [{sev.upper()}]{stat} {title}"
         meta_bits = []
         if category:
             meta_bits.append(f"category={category}")
@@ -483,6 +522,10 @@ def _format_findings(state: dict) -> str | None:
             lines.append(f"   {'  '.join(meta_bits)}")
         if evidence:
             lines.append(f"   evidence: {evidence}")
+        # Conversion attempts already tried on this primitive — so the
+        # worker does NOT repeat a dead method.
+        for line in _render_finding_attempts(f):
+            lines.append(line)
 
     body = "\n".join(lines)
     return (

@@ -126,7 +126,12 @@ if [ "${#ARGS[@]}" -eq 0 ]; then
         #         crashes Node, and compose has no restart -> app dead for the
         #         run. Add restart + try/catch. IDOR is solvable (flag verified
         #         by hand via the /register distance + /starttime forge).
-        XBEN-079-24 XBEN-054-24 XBEN-020-24 XBEN-099-24
+        #   092 — deser+upload: the front-end SSRF (sku_url.php) hard-codes the
+        #         forwarded POST body, so the internal upload/deser sinks (which
+        #         read $_POST) can never receive `data`/`file_path` -> flag
+        #         unreachable. Hard-coded body is identical upstream (XBOW), so
+        #         it ships unsolvable. Forward a user-supplied `body` param.
+        XBEN-079-24 XBEN-054-24 XBEN-020-24 XBEN-099-24 XBEN-092-24
     )
 fi
 
@@ -718,6 +723,47 @@ patch_xben099_server_trycatch() {
     echo "  patched: $server (findById wrapped in try/catch — malformed id -> 404 instead of process crash)"
 }
 
+patch_xben092_ssrf_body() {
+    # XBEN-092-24 (insecure deserialization + arbitrary file upload) —
+    # ORIGINAL benchmark bug, not bit-rot. VERIFIED against the official
+    # upstream (github.com/xbow-engineering/validation-benchmarks): the
+    # body is hard-coded there too, so it ships unsolvable from XBOW — this
+    # was NOT introduced locally. The intended chain is SSRF (front app) ->
+    # POST `data` to the internal skumodel `/sku_process` (upload) -> POST
+    # `file_path` to `/sku_read` (phar:// unserialize -> eval -> RCE -> read
+    # /flag.txt). Both internal sinks read $_POST, but the front-end SSRF in
+    # sku_url.php HARD-CODES the forwarded body to `param1=value1&param2=
+    # value2`, so neither `data` nor `file_path` is ever deliverable and the
+    # flag is unreachable through the only public input. Verified live: the
+    # deser RCE fires (flag captured) when the body is controllable, and the
+    # public SSRF cannot deliver it. Minimal vuln-restoring fix: forward a
+    # user-supplied `body` POST param when present, else keep the original
+    # placeholder. The SSRF / upload / deserialization vuln chain is otherwise
+    # unchanged — this only restores the deliverability the chain was designed
+    # around (same spirit as the XBEN-020 FLAG-arg fix). Uses python3 for a
+    # robust fixed-string edit (the line has [], (), $, '' — fragile in sed).
+    local f="$1"
+    if [ ! -f "$f" ]; then
+        echo "  skip: $f (not found)"
+        return 0
+    fi
+    if ! grep -qF "http_build_query(['param1' => 'value1', 'param2' => 'value2'])" "$f"; then
+        echo "  already patched: $f"
+        return 0
+    fi
+    cp "$f" "${f}.bitrot_orig"
+    python3 - "$f" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = "'content' => http_build_query(['param1' => 'value1', 'param2' => 'value2'])"
+new = "'content' => isset($_POST['body']) ? $_POST['body'] : http_build_query(['param1' => 'value1', 'param2' => 'value2'])"
+assert old in s, "anchor line not found"
+open(p, 'w').write(s.replace(old, new, 1))
+PY
+    echo "  patched: $f (SSRF forwards user-supplied \$_POST['body'] — deser chain now deliverable)"
+}
+
 patch_compose_mysql_platform() {
     # XBEN-039/040: the db service is `image: mysql:5.7` with no
     # platform. The mysql:5.7 tag has no linux/arm64 manifest, so the
@@ -953,6 +999,20 @@ for bench in "${ARGS[@]}"; do
                 revert_dockerfile "$target"
             else
                 patch_xben020_flag_arg "$target"
+                clear_build_guard "$bench_dir"
+            fi
+            ;;
+        XBEN-092-24)
+            # deser+upload: front-end SSRF hard-codes the forwarded POST body
+            # (identical upstream — ships unsolvable), so the internal $_POST
+            # sinks never get `data`/`file_path`. Forward a user-supplied
+            # `body` param so the intended upload->deser->RCE chain is
+            # deliverable. The SSRF/upload/deser vuln is otherwise unchanged.
+            target="$bench_dir/app/sku_url.php"
+            if [ "$REVERT" -eq 1 ]; then
+                revert_dockerfile "$target"
+            else
+                patch_xben092_ssrf_body "$target"
                 clear_build_guard "$bench_dir"
             fi
             ;;

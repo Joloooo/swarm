@@ -1382,6 +1382,41 @@ def _researchable_lead(finding) -> bool:
     return True
 
 
+def _active_findings(state: SwarmGraphState) -> list:
+    """The findings view the directives reason over.
+
+    Prefers ``canonical_findings`` — the deduped / merged / status-stamped
+    / ranked view the consolidation pass (``src/llm/consolidate.py``)
+    rebuilds each summarizer cycle — and falls back to the raw append-only
+    ``findings`` log when no canonical view exists yet (cold start /
+    before the first consolidation). Raw findings carry the new fields at
+    their defaults (``status=""``, ``lead_priority=0``), so every consumer
+    below degrades gracefully on the fallback path.
+    """
+    canon = state.get("canonical_findings")
+    if canon:
+        return list(canon)
+    return list(state.get("findings") or [])
+
+
+def _lead_priority_val(finding) -> int:
+    """Derived ranking score for a finding (0 on the raw fallback path)."""
+    try:
+        return int(_finding_attr(finding, "lead_priority") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+# Coarse severity order for tie-breaking a lead_priority sort (lower is
+# more severe → sorts first under ascending order).
+_SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def _lead_sort_key(finding):
+    """Sort key: highest ``lead_priority`` first, severity as the tiebreak."""
+    return (-_lead_priority_val(finding), _SEV_ORDER.get(_severity_str(finding), 5))
+
+
 def _unexploited_lead_directive(state: SwarmGraphState) -> str | None:
     """Nudge the planner to research a confirmed-but-unexploited finding.
 
@@ -1399,7 +1434,7 @@ def _unexploited_lead_directive(state: SwarmGraphState) -> str | None:
     """
     if (state.get("captured_flag") or "").strip():
         return None
-    findings = list(state.get("findings") or [])
+    findings = _active_findings(state)
     if not findings:
         return None
     leads = [f for f in findings if _researchable_lead(f)]
@@ -1419,15 +1454,15 @@ def _unexploited_lead_directive(state: SwarmGraphState) -> str | None:
     def _researched(cat: str) -> bool:
         return any(cat in blob for blob in searched_blobs)
 
-    # Keep one lead per un-researched class — the highest-severity, and on
-    # ties the most recently filed (findings is append-ordered).
-    _SEV_RANK = {"critical": 0, "high": 1, "medium": 2}
-    pending: dict[str, tuple[int, Any]] = {}
+    # Keep one lead per un-researched class — the highest ``lead_priority``
+    # (proximity to the objective), severity as the tiebreak, and on a full
+    # tie the most recently filed (findings is append-ordered).
+    pending: dict[str, tuple[tuple, Any]] = {}
     for f in leads:
         cat = (_finding_attr(f, "category") or "").lower()
         if _researched(cat):
             continue
-        rank = _SEV_RANK.get(_severity_str(f), 3)
+        rank = _lead_sort_key(f)
         prev = pending.get(cat)
         if prev is None or rank <= prev[0]:
             pending[cat] = (rank, f)
@@ -1527,6 +1562,85 @@ _PRIMITIVE_FINISH_HINT = {
 }
 
 
+# Per-primitive ESCALATION — what to do when the standard finish move has
+# been tried and stalled (the ``attempts`` log shows ≥2 conversions with
+# no progress). The lesson of the 06-10 sweep: a stalled primitive needs a
+# different conversion METHOD, not another repeat of the same one. Neutral
+# test-task vocabulary; domain technique names kept intact.
+_PRIMITIVE_ESCALATION = {
+    "sqli_read": "the data-read channel has not produced the objective — "
+                 "switch the SAME injection to an AUTH-BYPASS instead of "
+                 "dumping more data. If it sits on a login, make the "
+                 "injection RETURN a row/value that satisfies the login "
+                 "check (e.g. a UNION that returns a username which breaks "
+                 "out of the next query's quote) to obtain a privileged "
+                 "session, then reach the protected route directly.",
+    "ssrf": "the current request shape has not delivered impact — change "
+            "the REQUEST itself: try POST vs GET, a different internal "
+            "port/path WITH a trailing slash, or a gopher/dict scheme, and "
+            "fetch internal source/config to map the next hop.",
+    "file_read": "reading guessed paths has not landed the objective — read "
+                 "the APP SOURCE that names the objective path or a "
+                 "credential/config first, then use that to reach it.",
+    "rce": "the command channel is proven — run the single most direct "
+           "objective read NOW (e.g. `cat /flag* /FLAG* 2>/dev/null; "
+           "grep -rIl 'flag{' / 2>/dev/null`) and stop refining delivery.",
+    "auth_bypass": "the privileged session is held — USE it to reach the "
+                   "objective action/endpoint directly; stop re-proving "
+                   "the bypass.",
+}
+
+
+def _finding_attempts(finding) -> list:
+    """The raw ``attempts`` list off a finding (dataclass or dict).
+
+    NOTE: do NOT use :func:`_finding_attr` here — that helper coerces every
+    value to ``str``, which would turn the attempts list into its string
+    repr. Attempts are structured records, so we read the object directly.
+    """
+    if hasattr(finding, "attempts"):
+        val = getattr(finding, "attempts", None)
+    elif isinstance(finding, dict):
+        val = finding.get("attempts")
+    else:
+        val = None
+    return val if isinstance(val, list) else []
+
+
+def _attempts_stalled(finding) -> bool:
+    """True when a primitive has been driven (≥2 recorded conversion
+    attempts) without any recent progress — the signal to escalate the
+    conversion METHOD rather than repeat it. Conservative: needs at least
+    two attempts and no ``progressed`` result in the last two.
+    """
+    attempts = _finding_attempts(finding)
+    if len(attempts) < 2:
+        return False
+    recent = attempts[-2:]
+    return not any(
+        isinstance(a, dict) and str(a.get("result")) == "progressed"
+        for a in recent
+    )
+
+
+def _render_attempts_tail(finding, n: int = 3) -> list[str]:
+    """Render the last ``n`` conversion attempts as compact one-line strings
+    (``method → result (note)``) for inclusion in a directive."""
+    attempts = _finding_attempts(finding)
+    out: list[str] = []
+    for a in attempts[-n:]:
+        if not isinstance(a, dict):
+            continue
+        method = str(a.get("method") or "").strip()
+        result = str(a.get("result") or "").strip()
+        note = str(a.get("note") or "").strip()
+        if not method or not result:
+            continue
+        suffix = f" ({note})" if note else ""
+        out.append(f"      · tried: {method} → {result}{suffix}")
+    return out
+
+
 def _unconverted_primitive_directive(state: SwarmGraphState) -> str | None:
     """Force the planner to drive a CONFIRMED primitive to the objective
     before opening any new, lower-probability surface.
@@ -1553,19 +1667,26 @@ def _unconverted_primitive_directive(state: SwarmGraphState) -> str | None:
     """
     if (state.get("captured_flag") or "").strip():
         return None
-    findings = list(state.get("findings") or [])
+    findings = _active_findings(state)
     if not findings:
         return None
-    primitives = [f for f in findings if _is_exploit_primitive(f)]
+    # Drive only primitives that are still live: a ``converted`` one ended
+    # the run, and an ``exhausted`` one has had its conversion methods tried
+    # and failed — releasing it lets ``_diversify_when_stuck`` open breadth
+    # instead of re-issuing a dead finish move. (Raw-fallback findings carry
+    # status="" so they are never excluded before the first consolidation.)
+    primitives = [
+        f for f in findings
+        if _is_exploit_primitive(f)
+        and str(_finding_attr(f, "status") or "") not in ("exhausted", "converted")
+    ]
     if not primitives:
         return None
 
-    # Keep the freshest few (findings is append-ordered); the most recent
-    # primitive is usually the one a worker just proved and is mid-exploit.
-    _SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    primitives.sort(
-        key=lambda f: _SEV_RANK.get(_severity_str(f), 5),
-    )
+    # Rank by lead_priority (proximity to the objective), severity as the
+    # tiebreak — NOT raw severity, so the primitive closest to the flag is
+    # driven first rather than whichever has the highest CVSS-style label.
+    primitives.sort(key=_lead_sort_key)
 
     lines = [
         "[SYSTEM NOTE] One or more CONFIRMED exploit primitives are not yet "
@@ -1579,27 +1700,69 @@ def _unconverted_primitive_directive(state: SwarmGraphState) -> str | None:
         title = (_finding_attr(f, "title") or "").strip()[:90]
         url = (_finding_attr(f, "url") or "").strip()
         prim = (_finding_attr(f, "primitive") or "").strip().lower()
+        status = str(_finding_attr(f, "status") or "").strip()
         key = (title, url)
         if key in seen:
             continue
         seen.add(key)
-        hint = _PRIMITIVE_FINISH_HINT.get(prim)
         loc = f" — {url}" if url else ""
         tag = f" [{prim}]" if prim else ""
-        lines.append(f"  • {title}{tag}{loc}")
-        if hint:
-            lines.append(f"      → finish move: {hint}")
+        stat = f" ({status})" if status else ""
+        lines.append(f"  • {title}{tag}{stat}{loc}")
+        # Show what conversions have already been tried so the next worker
+        # does not repeat a dead method.
+        lines.extend(_render_attempts_tail(f))
+        # If the primitive has been driven and stalled, escalate the
+        # conversion METHOD; otherwise give the standard cheapest-read hint.
+        if _attempts_stalled(f) and prim in _PRIMITIVE_ESCALATION:
+            lines.append(f"      → ESCALATE: {_PRIMITIVE_ESCALATION[prim]}")
+        else:
+            hint = _PRIMITIVE_FINISH_HINT.get(prim)
+            if hint:
+                lines.append(f"      → finish move: {hint}")
         if len(seen) >= 3:
             break
     lines.append(
         "  • Rule: on this turn KEEP an executor driving the primitive to "
-        "the objective — carry the exact working payload/oracle forward in "
-        "its dispatch reason, and instruct the cheapest reliable read "
-        "FIRST. Do NOT open a new, lower-probability surface until this "
-        "primitive captures the flag or is genuinely exhausted. If a "
-        "previous worker proved it but ran out of steps, re-dispatch the "
-        "same line of attack rather than a fresh idea."
+        "the objective — carry the exact working oracle forward in its "
+        "dispatch reason, and instruct the cheapest reliable read FIRST. Do "
+        "NOT open a new, lower-probability surface until this primitive "
+        "captures the flag or is genuinely exhausted. If a previous worker "
+        "proved it but ran out of steps, re-dispatch the SAME line — but if "
+        "the tried-attempts above show the current method stalled, switch "
+        "the conversion METHOD per the ESCALATE note rather than repeating it."
     )
+    return "\n".join(lines)
+
+
+def _exhausted_ledger_note(state: SwarmGraphState) -> str | None:
+    """Surface the surfaces/methods already CONFIRMED not to advance toward
+    the flag, so the planner does not re-dispatch them.
+
+    The consolidation pass routes negative / status results out of the
+    findings channel into ``state["exhausted_ledger"]`` (keyed by
+    ``"<category>|<url>"``). This renders a compact tail of them as a
+    low-priority informational note. Returns ``None`` when the ledger is
+    empty.
+    """
+    ledger = state.get("exhausted_ledger") or {}
+    if not ledger:
+        return None
+    lines = [
+        "[SYSTEM NOTE] Already tried and confirmed NOT to advance toward the "
+        "flag — do not re-dispatch these surfaces/methods:"
+    ]
+    for v in list(ledger.values())[-8:]:
+        if not isinstance(v, dict):
+            continue
+        summary = str(v.get("summary") or "").strip()[:100]
+        if not summary:
+            continue
+        url = str(v.get("url") or "").strip()
+        loc = f" — {url}" if url else ""
+        lines.append(f"  • {summary}{loc}")
+    if len(lines) == 1:
+        return None
     return "\n".join(lines)
 
 
@@ -1631,10 +1794,18 @@ def _diversify_when_stuck_directive(state: SwarmGraphState) -> str | None:
     """
     if (state.get("captured_flag") or "").strip():
         return None
-    # Precedence: a loaded primitive owns the turn — let the last-mile
-    # directive drive, don't dilute it with breadth.
-    findings = list(state.get("findings") or [])
-    if any(_is_exploit_primitive(f) for f in findings):
+    # Precedence: a LIVE loaded primitive owns the turn — let the last-mile
+    # directive drive, don't dilute it with breadth. An ``exhausted``
+    # primitive no longer owns the turn (its conversion methods are spent),
+    # so it does NOT suppress diversification — that is exactly when added
+    # breadth is wanted. (Raw-fallback findings carry status="" → still
+    # suppress, preserving pre-consolidation behaviour.)
+    findings = _active_findings(state)
+    if any(
+        _is_exploit_primitive(f)
+        and str(_finding_attr(f, "status") or "") not in ("exhausted", "converted")
+        for f in findings
+    ):
         return None
 
     counts = crawl_policy._class_dispatch_counts(state)
@@ -2294,6 +2465,19 @@ class PlannerNode(BaseNode):
                 diversify_note.replace("\n", " | ")[:300],
             )
             prior_messages.append(HumanMessage(content=diversify_note))
+
+        # Exhausted-ledger note. The consolidation pass routes negative /
+        # status results (tried-and-did-not-work) out of the findings
+        # channel into ``exhausted_ledger``; surface a compact tail so the
+        # planner does not re-dispatch a dead surface. Informational, lowest
+        # priority — appended last.
+        exhausted_note = _exhausted_ledger_note(state)
+        if exhausted_note:
+            self.log.info(
+                "exhausted-ledger note: %s",
+                exhausted_note.replace("\n", " | ")[:300],
+            )
+            prior_messages.append(HumanMessage(content=exhausted_note))
 
         # Surface the prior turn's relevant_summary so the planner can
         # see its own previous notes and rewrite them on this turn. The

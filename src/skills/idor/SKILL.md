@@ -40,9 +40,9 @@ bound to the caller.
 headers, cookies; JWT claims, GraphQL arguments, WebSocket messages,
 gRPC messages.
 
-**Identifier forms**: integers, UUID / ULID / CUID, Snowflake, slugs;
-composite keys (`{orgId}:{userId}`); opaque tokens, base64- or
-hex-encoded blobs.
+**Identifier forms**: integers, UUID / ULID / CUID, Snowflake,
+MongoDB ObjectID (24-hex), slugs; composite keys (`{orgId}:{userId}`);
+opaque tokens, base64- or hex-encoded blobs.
 
 **Relationship references**: `parentId`, `ownerId`, `accountId`,
 `tenantId`, `organization`, `teamId`, `projectId`, `subscriptionId`.
@@ -92,6 +92,26 @@ or serializers): `fields`, `include`, `expand`, `projection`, `with`,
 - File-extension appendage: `/resource/123` vs `/resource/123.json` vs
   `.xml` vs `.config` — Rails/Ruby and ASP.NET pipelines often diverge
   on serializer auth.
+
+**Predicting structured identifiers** (when IDs look random but encode
+structure, compute the target instead of brute-forcing):
+- Recover the layout from one or two IDs you legitimately hold, then
+  derive the target. Confirm the layout by minting two objects and
+  diffing their IDs before computing.
+- **MongoDB ObjectID** (24 hex = 12 bytes): `[4B unix timestamp][5B
+  machine+process][3B incrementing counter]`. All IDs minted by one
+  process share the middle 5 bytes; the counter increments per insert,
+  so the OLDEST object has the LOWEST counter. To reach the first/Nth
+  object: keep your own ObjectID's middle 5 bytes (chars 8–18), set the
+  timestamp (chars 0–8) to the target's creation time if the app leaks
+  it (a "first created at" banner / `/starttime`), and set the counter
+  (chars 18–24) to `your_counter − delta`. If the app hands you a
+  `distance`/delta to a target, the target counter is `your_counter −
+  delta` — **SUBTRACT**: more recent inserts have HIGHER counters, so
+  registering more moves you AWAY from the first object, not toward it.
+- Same idea for any structured token: Snowflake (timestamp + worker +
+  sequence), ULID (timestamp prefix), or an auto-increment exposed via a
+  replayable hash. A time/counter-structured ID is computed, not sprayed.
 
 **Hidden-parameter discovery**:
 - Add IDs the request didn't originally carry (`?user_id=<victim>`).

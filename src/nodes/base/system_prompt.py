@@ -142,6 +142,20 @@ move keep the simple two-sentence reasoning. The point is to surface
 counterfactual reasoning at strategic forks (which skill, which payload
 category, which endpoint to attack first) so debug analysis can see
 why this path was taken and not the others.
+
+## When the result contradicts your prediction
+Your reasoning field already names what a positive vs. negative result
+would change. When the result you actually observe differs from that
+prediction, that gap is the most useful signal you have — do not move
+on to the next probe yet. This matters most for a result that is *close
+to your goal but not it*: a different success state than the one you
+expected (for example, an input you meant to log you in instead only
+advances to a later step, or a request you expected to be rejected
+returns a new error state). Stop and state, in one or two sentences,
+what the server must be doing internally to produce exactly THAT result
+rather than the one you predicted, and let that explanation choose your
+next probe. A surprise you cannot yet explain is a clue about hidden
+server-side logic, not noise to skip past.
 """
 
 
@@ -398,6 +412,36 @@ TRANSFORMATION_HYPOTHESIS = """\
   Test both — it generalizes to every vulnerability class (SQL, XSS,
   command injection, path traversal, SSRF, file upload, header
   injection, deserialization, template injection).
+"""
+
+
+BEHAVIOR_MODEL_RULES = """\
+## Model the server, not just the sink
+- The previous section models what happens to a single input on its way
+  to one sink. This block is the step above that: when the responses
+  imply the endpoint runs MORE THAN ONE operation (e.g. it first checks
+  whether a record exists and only then checks something else, or it
+  returns different machine-readable states for different stages),
+  reconstruct the most likely SEQUENCE of server-side steps that
+  produces exactly the outputs you have observed. Base your next probes
+  on that reconstructed flow, not on a generic checklist for the class.
+- Do NOT assume the code is written the safe, modern way. For the
+  behaviour you see, write down at least TWO plausible implementations:
+  the careful version, AND the least careful version a junior developer
+  might ship — raw string-built queries; a value returned by step 1
+  reused unescaped in step 2; a check performed in one place but trusted
+  in another; a filter applied to the typed input but not to a value
+  read back from storage. Assume the least careful version is the real
+  one until a probe rules it out, and design the single probe that best
+  distinguishes the two.
+- Drive every confirmed capability up the impact ladder before moving
+  on: read data → modify data → bypass authentication or authorization
+  → run a command. For each thing you have proven, say how far up that
+  ladder it can be pushed and what the next rung would require. A
+  capability that only reads data, when the same flaw could be driven to
+  a session or a command, is not finished — re-aim it, do not just
+  re-confirm it. Reading more of the same data is rarely the rung that
+  reaches the objective.
 """
 
 
@@ -719,6 +763,7 @@ def get_executor_prompt(stealth_level: int = 0) -> str:
         DIVERSITY_RULES,
         ENUMERATION_DISCIPLINE,
         TRANSFORMATION_HYPOTHESIS,
+        BEHAVIOR_MODEL_RULES,
         SEVERITY_RULES,
         FINDING_CATEGORY_GUIDANCE,
     ]
@@ -765,6 +810,7 @@ PENTESTING_RULES = "\n\n".join([
     EXHAUSTION_DISCIPLINE,
     DIVERSITY_RULES,
     TRANSFORMATION_HYPOTHESIS,
+    BEHAVIOR_MODEL_RULES,
     SEVERITY_RULES,
     TOOL_USAGE_RULES,
 ])

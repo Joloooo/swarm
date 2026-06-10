@@ -1507,9 +1507,18 @@ _PRIMITIVE_FINISH_HINT = {
     "file_read": "read the most likely objective files FIRST "
                  "(/flag, /flag.txt, /FLAG.txt, app source that names the "
                  "flag path), then widen.",
-    "sqli_read": "extract toward the objective now — enumerate tables, then "
-                 "dump the row/column that would hold the flag or a "
-                 "credential that unlocks it.",
+    "sqli_read": "decide the conversion target FIRST. If the injection sits "
+                 "on a login/auth endpoint (a username/password form, or an "
+                 "oracle that distinguishes 'no such user' from 'wrong "
+                 "password'), convert it into an authenticated session and "
+                 "reach the protected route — reconstruct the login's "
+                 "server-side logic, since the value the first query returns "
+                 "may flow unescaped into a second query — rather than "
+                 "dumping tables. Only when the objective is plain data that "
+                 "lives in the database should you enumerate tables and dump "
+                 "the row/column that holds the flag or a credential that "
+                 "unlocks it. Do NOT keep cracking a salted/compound password "
+                 "hash once one wordlist pass has failed.",
     "auth_bypass": "use the privileged session/identity to reach the "
                    "objective action or data directly.",
     "ssrf": "point the confirmed server-side request at the objective "

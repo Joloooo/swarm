@@ -172,6 +172,43 @@ class SummarizerNode(BaseNode):
             "pending_summary_inputs": None,
         }
 
+        # Consolidation pass — dedup/merge the raw findings into a
+        # canonical view, stamp conversion ``status`` + an ``attempts``
+        # log on primitives, score ``lead_priority``, and route negative /
+        # status results out into ``exhausted_ledger``. One extra LLM call
+        # per cycle; ``consolidate_findings`` falls back to a deterministic
+        # consolidation on any LLM failure, so it never blocks the run.
+        # The planner directives and worker seeds read ``canonical_findings``
+        # (with a ``findings`` fallback) — see src/llm/consolidate.py.
+        try:
+            from src.llm.consolidate import consolidate_findings
+            consolidation = await consolidate_findings(
+                raw_findings=all_findings,
+                prior_canonical=list(state.get("canonical_findings") or []),
+                prior_ledger=dict(state.get("exhausted_ledger") or {}),
+                worker_digests=[
+                    str(getattr(m, "content", "") or "") for m in report_messages
+                ],
+                model=model,
+                run_id=run_id,
+                node_name=self.name,
+            )
+        except Exception as e:  # noqa: BLE001 — never let consolidation break the run
+            self.log.warning("summarizer: consolidation failed (%s) — skipping", e)
+            consolidation = {}
+        if consolidation.get("canonical_findings"):
+            update["canonical_findings"] = consolidation["canonical_findings"]
+        if consolidation.get("exhausted_ledger"):
+            update["exhausted_ledger"] = consolidation["exhausted_ledger"]
+        if consolidation.get("canonical_findings") is not None:
+            self.log.info(
+                "summarizer: consolidated %d raw -> %d canonical finding(s), "
+                "%d exhausted-ledger entr(ies)",
+                len(all_findings),
+                len(consolidation.get("canonical_findings") or []),
+                len(consolidation.get("exhausted_ledger") or {}),
+            )
+
         # Capture the recon worker's summary once, into
         # ``state["recon_summary"]``. The seed builder in
         # ``src/nodes/base/skill_runner.py:_format_recon_summary``

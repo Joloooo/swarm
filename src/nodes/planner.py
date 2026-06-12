@@ -106,32 +106,8 @@ _FORCE_RECOVERY_ENABLED = os.environ.get("SWARM_FORCE_RECOVERY", "1") != "0"
 # its keywords never took effect. Removed 2026-06-09; add new impact keywords
 # to the canonical tuple only.
 
-# High-value routing markers that frequently live PAST the first sentence of
-# a SKILL.md description — which is all the menu hint shows. Each skill's
-# description is ~2 KB of progressive-disclosure text; we cannot inline the
-# whole thing for ~30 skills without bloating the supervisor prompt, so we
-# trim to the headline sentence. The cost was silent: e.g. race-conditions
-# carries its auth-race "(TOCTOU)" signal at char ~795, so an auth-race
-# benchmark (XBEN-088) never matched the menu line and the skill was never
-# dispatched. Fix: scan the FULL description for these markers and surface any
-# present as a compact suffix. Only ever ADDS routing signal; never hides the
-# headline. Matched case-insensitively; keep this list to terms that (a) route
-# decisively to one skill and (b) tend to hide past the first sentence.
-# Kept to TECHNIQUE-specific signals only — NOT class names that already have
-# their own dedicated menu line (ssti, ssrf, xxe, deserialization, …). Those
-# appear as cross-references in many descriptions, so surfacing them here would
-# create misleading cross-talk (e.g. "crypto · Routing signals: SSTI"). A term
-# belongs here only if it routes decisively to ONE skill AND tends to hide past
-# that skill's headline sentence.
-_MENU_ROUTING_SIGNALS: tuple[str, ...] = (
-    "TOCTOU", "time-of-check", "race window", "second-order", "out-of-band",
-    "prototype pollution", "type juggling", "magic hash", "padding oracle",
-    "alg:none", "PHAR", "CRLF", "host header", "cache poisoning",
-)
-
-
 def _build_skills_menu() -> str:
-    """Render the dispatchable-skills list as a bulleted menu.
+    """Render the dispatchable-skills list as a full-description menu.
 
     Read at module import time and inlined into ``SUPERVISOR_SYSTEM_PROMPT``
     via f-string. The menu reflects whatever SKILL.md files exist under
@@ -141,35 +117,10 @@ def _build_skills_menu() -> str:
     entries = list_dispatchable_skills()
     if not entries:
         return "  (no skills loaded — check src/skills/)"
-    # Cross-references in descriptions take the form
-    # ``also dispatch ``other-skill```` — surface them as a "Pair with"
-    # suffix so the planner sees them without us having to inline a
-    # static "complementary pairs" block in the supervisor prompt.
-    pair_re = re.compile(r"also dispatch ``([a-z0-9-]+)``")
     lines = []
     for name, desc in entries:
-        # Each SKILL.md description is a long sentence designed for
-        # progressive disclosure; trim to a short menu hint here.
-        short = desc.split(". ")[0].strip().rstrip(".")
-        if len(short) > 220:
-            short = short[:220].rstrip() + "..."
-        # Surface high-value routing markers that live past the headline
-        # sentence so the planner can route on them (see _MENU_ROUTING_SIGNALS).
-        desc_low = desc.lower()
-        shown_low = short.lower()
-        signals = sorted(
-            {
-                s for s in _MENU_ROUTING_SIGNALS
-                if s.lower() in desc_low and s.lower() not in shown_low
-            },
-            key=str.lower,
-        )
-        signal_suffix = (
-            f" Routing signals: {', '.join(signals)}." if signals else ""
-        )
-        pairs = sorted({p for p in pair_re.findall(desc) if p != name})
-        suffix = f" Pair with: {', '.join(pairs)}." if pairs else ""
-        lines.append(f"- {name}: {short}.{signal_suffix}{suffix}")
+        full = " ".join(str(desc).split())
+        lines.append(f"- {name}: {full}")
     return "\n".join(lines)
 
 
@@ -265,8 +216,8 @@ Rules:
 
 # Available attack skills (for action="attack")
 
-Pick any subset by name in "configs". Use the one-line descriptions
-below to judge which skills apply to the recon output you have. You
+Pick any subset by name in "configs". Use the full descriptions below
+to judge which skills apply to the recon output you have. You
 are NOT required to include any particular skill — decide based on
 the target. If recon shows the target has no inputs, picking xss is
 pointless; if it's a pure static site, most of these don't fit.
@@ -1735,6 +1686,105 @@ def _unconverted_primitive_directive(state: SwarmGraphState) -> str | None:
     return "\n".join(lines)
 
 
+def _has_live_primitive(state: SwarmGraphState) -> bool:
+    """True when a CONFIRMED, still-unconverted exploit primitive exists —
+    i.e. ``_unconverted_primitive_directive`` owns the turn. The hypothesis
+    directive yields to it: a proven primitive outranks a merely-believed
+    one (confirmed > committed on the belief axis)."""
+    for f in _active_findings(state):
+        if (
+            _is_exploit_primitive(f)
+            and str(_finding_attr(f, "status") or "") not in ("exhausted", "converted")
+        ):
+            return True
+    return False
+
+
+def _hypothesis_directive(state: SwarmGraphState) -> str | None:
+    """Lock the planner onto a COMMITTED hypothesis before it opens a new,
+    lower-belief surface — the belief-stage analogue of
+    :func:`_unconverted_primitive_directive`.
+
+    The synthesis pass (``src/llm/hypotheses.py``) fuses scattered signals
+    into ranked hypotheses with belief (``confidence``) and a deciding
+    ``required`` next action. When belief crosses the commit threshold but
+    the vuln is not yet demonstrated, this surfaces that hypothesis and
+    forbids pivoting away until its deciding probe has been tried. This is
+    the direct fix for the broad-scan-drift failure: five fragments of one
+    template-injection picture that used to scatter now fuse into one
+    committed theory the planner cannot wander off of.
+
+    Yields entirely to :func:`_unconverted_primitive_directive` when a
+    proven primitive is live (confirmed beats committed), and self-
+    suppresses on flag capture. Returns ``None`` when there is no committed
+    or supported hypothesis to act on.
+    """
+    if (state.get("captured_flag") or "").strip():
+        return None
+    if _has_live_primitive(state):
+        return None
+    hyps = list(state.get("hypotheses") or [])
+    if not hyps:
+        return None
+
+    committed = [
+        h for h in hyps
+        if getattr(h, "state", "") == "committed"
+        and not getattr(h, "action_tried", False)
+    ]
+    supported = [h for h in hyps if getattr(h, "state", "") == "supported"]
+    if not committed and not supported:
+        return None
+
+    def _act(h: Any) -> str:
+        technique = (getattr(h, "required_technique", "") or "").strip()
+        skill = (getattr(h, "required_skill", "") or "").strip()
+        tail = f" (skill={skill})" if skill else ""
+        return f"{technique}{tail}" if technique else (f"dispatch {skill}" if skill else "")
+
+    lines: list[str] = []
+    if committed:
+        lines.append(
+            "[SYSTEM NOTE] Evidence has fused into one or more COMMITTED "
+            "hypotheses — belief crossed the commit threshold, but the "
+            "deciding probe has not yet been run. Run that probe before "
+            "opening any new surface:"
+        )
+        for h in committed[:3]:
+            surf = f" on {h.surface}" if getattr(h, "surface", "") else ""
+            lines.append(
+                f"  • {h.vuln_class}{surf} — confidence "
+                f"{getattr(h, 'confidence', 0.0):.0%}, "
+                f"{len(getattr(h, 'supporting', []) or [])} signals agree"
+            )
+            action = _act(h)
+            if action:
+                lines.append(f"      → required next action: {action}")
+        lines.append(
+            "  • Rule: a committed hypothesis OWNS the turn. Dispatch its "
+            "required action above. Do NOT pivot to a different, lower-belief "
+            "surface until that probe has been tried and either confirms the "
+            "issue or drives belief back below threshold. \"More interesting "
+            "elsewhere\" is not a reason to pivot — only \"tried, disproven, "
+            "or a higher-confidence hypothesis\" is."
+        )
+    else:
+        lines.append(
+            "[SYSTEM NOTE] Signals are converging on these hypotheses "
+            "(supported, not yet committed). Prefer the probe that pushes the "
+            "top one over the line before broadening the search:"
+        )
+        for h in supported[:3]:
+            surf = f" on {h.surface}" if getattr(h, "surface", "") else ""
+            action = _act(h)
+            nxt = f"; next: {action}" if action else ""
+            lines.append(
+                f"  • {h.vuln_class}{surf} — confidence "
+                f"{getattr(h, 'confidence', 0.0):.0%}{nxt}"
+            )
+    return "\n".join(lines)
+
+
 def _exhausted_ledger_note(state: SwarmGraphState) -> str | None:
     """Surface the surfaces/methods already CONFIRMED not to advance toward
     the flag, so the planner does not re-dispatch them.
@@ -1849,6 +1899,535 @@ def _diversify_when_stuck_directive(state: SwarmGraphState) -> str | None:
             "angle now (a different class/parameter/surface), add it to "
             "untried, and dispatch it alongside the current line."
         )
+    return "\n".join(lines)
+
+
+def _split_suggested_skills(value: str) -> list[str]:
+    """Parse a relevant_summary suggested_skill field into skill names."""
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    parts = re.split(r"\s*(?:,|/|\bor\b|\band\b)\s*", raw)
+    return [p.strip().lower().replace(" ", "-") for p in parts if p.strip()]
+
+
+def _active_skill_names(
+    state: SwarmGraphState,
+    dispatchable: set[str] | None = None,
+) -> set[str]:
+    """Normalize active agent ids like ``sqli-0`` back to skill names."""
+    skills = dispatchable or {name for name, _ in list_dispatchable_skills()}
+    ordered = sorted(skills, key=len, reverse=True)
+    out: set[str] = set()
+    for raw in state.get("active_agents") or []:
+        name = str(raw).strip().lower()
+        if not name:
+            continue
+        if name in skills:
+            out.add(name)
+            continue
+        for skill in ordered:
+            if name.startswith(f"{skill}-"):
+                out.add(skill)
+                break
+    return out
+
+
+def _untried_suggested_skill_candidates(
+    summary: dict | None,
+    state: SwarmGraphState,
+) -> list[dict[str, str]]:
+    """Return ranked suggested items whose skill has never run."""
+    dispatchable = {name for name, _ in list_dispatchable_skills()}
+    already_run = _active_skill_names(state, dispatchable)
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    items: list[dict] = []
+    if isinstance(summary, dict):
+        for item in summary.get("untried") or []:
+            if isinstance(item, dict):
+                items.append({
+                    "where": item.get("where"),
+                    "technique": item.get("technique"),
+                    "suggested_skill": item.get("suggested_skill"),
+                    # Existing planner-authored untried items predate the
+                    # confidence field. Preserve their prior floor behavior.
+                    "confidence": "high",
+                })
+    for item in state.get("suggested_next_moves") or []:
+        if not isinstance(item, dict):
+            continue
+        confidence = str(item.get("confidence") or "").strip().lower()
+        if confidence != "high":
+            continue
+        items.append({
+            "where": item.get("where"),
+            "technique": item.get("next_move") or item.get("technique"),
+            "suggested_skill": item.get("skill") or item.get("suggested_skill"),
+            "confidence": confidence,
+            "signal": item.get("signal"),
+            "reason": item.get("reason"),
+            "source": item.get("source"),
+        })
+
+    for item in items:
+        where = str(item.get("where") or "").strip()
+        technique = str(item.get("technique") or "").strip()
+        for skill in _split_suggested_skills(str(item.get("suggested_skill") or "")):
+            if skill in seen or skill not in dispatchable or skill in already_run:
+                continue
+            seen.add(skill)
+            out.append({
+                "skill": skill,
+                "where": where,
+                "technique": technique,
+                "signal": str(item.get("signal") or "").strip(),
+                "reason": str(item.get("reason") or "").strip(),
+                "source": str(item.get("source") or "").strip(),
+            })
+    return out
+
+
+def _untried_skill_floor_directive(state: SwarmGraphState) -> str | None:
+    """Nudge the planner to try never-run skills from structured leads.
+
+    This is a minimum coverage floor, not a ceiling: one attempt satisfies the
+    floor for that skill, but it does not make the skill "resolved" and never
+    suppresses future retries when the planner has evidence for them.
+    """
+    candidates = _untried_suggested_skill_candidates(
+        state.get("relevant_summary"), state
+    )
+    if not candidates:
+        return None
+    lines = [
+        "[SYSTEM NOTE] Your untried list or worker next-skill suggestions "
+        "name skills that have never been dispatched in this run. Treat this "
+        "as a minimum coverage floor, not a retry limit: try at least the top "
+        "never-run skill once, but do NOT mark the class resolved after one "
+        "attempt and do NOT block future retries if later evidence points "
+        "back to it.",
+        "  • Top never-run suggested skills:",
+    ]
+    for c in candidates[:4]:
+        detail = c["technique"] or c["where"]
+        where = f" at {c['where']}" if c["where"] and c["technique"] else ""
+        tail = f" — {detail}{where}" if detail else ""
+        lines.append(f"      - {c['skill']}{tail}")
+        if c.get("signal"):
+            lines.append(f"        signal: {c['signal']}")
+        if c.get("reason"):
+            lines.append(f"        reason: {c['reason']}")
+    return "\n".join(lines)
+
+
+def _high_confidence_next_moves_note(state: SwarmGraphState) -> str | None:
+    """Surface detector/worker hints even when the skill already ran once."""
+    moves = [
+        item for item in (state.get("suggested_next_moves") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("confidence") or "").strip().lower() == "high"
+        )
+    ]
+    if not moves:
+        return None
+    dispatchable = {name for name, _ in list_dispatchable_skills()}
+    already_run = _active_skill_names(state, dispatchable)
+    lines = [
+        "[SYSTEM NOTE] High-confidence evidence-derived next moves. These are "
+        "mechanism-level hints from worker traces and deterministic detectors. "
+        "Use them as concrete follow-ups; if the skill already ran, treat the "
+        "entry as a narrowed re-dispatch target rather than generic repetition.",
+    ]
+    seen: set[tuple[str, str, str]] = set()
+    for item in moves[:6]:
+        skill = str(item.get("skill") or item.get("suggested_skill") or "").strip()
+        if skill not in dispatchable:
+            continue
+        where = str(item.get("where") or "").strip()
+        move = str(item.get("next_move") or item.get("technique") or "").strip()
+        key = (skill, where, move)
+        if key in seen:
+            continue
+        seen.add(key)
+        signal = str(item.get("signal") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        source = str(item.get("source") or "summarizer").strip()
+        state_label = "already-run follow-up" if skill in already_run else "never-run"
+        detail = move or where or signal
+        loc = f" at {where}" if where and move else ""
+        lines.append(f"  • {skill} ({state_label}, source={source}) — {detail}{loc}")
+        if signal:
+            lines.append(f"      signal: {signal}")
+        if reason:
+            lines.append(f"      reason: {reason}")
+    if len(lines) == 1:
+        return None
+    return "\n".join(lines)
+
+
+_HANDOFF_CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
+_HANDOFF_PATH_RE = re.compile(r"/[A-Za-z0-9._~!$&'()*+,;=:@%/-]+")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+_HANDOFF_OVERFLOW_LIMIT = max(0, _env_int("SWARM_HANDOFF_OVERFLOW_LIMIT", 2))
+_HANDOFF_MAX_CONFIGS = max(1, _env_int("SWARM_HANDOFF_MAX_CONFIGS", 6))
+
+_HANDOFF_TECHNIQUE_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("sqli", ("sql", "union", "boolean", "time-based", "database", "query")),
+    ("ssti", ("ssti", "template", "jinja", "twig", "freemarker", "velocity")),
+    ("ssrf", ("ssrf", "internal", "localhost", "127.0.0.1", "gopher")),
+    ("race", ("race", "toctou", "concurrent", "parallel", "session state")),
+    ("deserialization", ("deserialize", "deserialise", "phar", "pickle", "marshal")),
+    ("file-read", ("lfi", "file read", "path traversal", "../", "/etc/passwd")),
+    ("xss", ("xss", "script", "html", "dom", "onerror", "onload")),
+    ("csrf", ("csrf", "anti-csrf", "token", "same-site", "samesite")),
+    ("idor", ("idor", "object", "user_id", "tenant", "authorization bypass")),
+    ("component-enum", ("plugin", "theme", "component", "slug", "wp-content")),
+    ("request-shape", ("multipart", "body", "method", "header", "raw request")),
+    ("auth-session", ("cookie", "jwt", "session", "login", "role")),
+)
+
+
+def _compact_handoff_field(value: Any, *, limit: int = 240) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) > limit:
+        text = text[: limit - 3].rstrip() + "..."
+    return text
+
+
+def _normalized_handoff_component(value: str, *, technique: bool = False) -> str:
+    """Coarse key component for deduping equivalent handoff wording."""
+    text = _compact_handoff_field(value, limit=240).lower()
+    if not text:
+        return ""
+    paths = _HANDOFF_PATH_RE.findall(text)
+    if paths:
+        text = " ".join(paths[:2])
+    text = re.sub(r"\b[0-9a-f]{8,}\b", "<hex>", text)
+    text = re.sub(r"\b\d+\b", "<n>", text)
+    text = re.sub(r"[^a-z0-9_./%-]+", " ", text)
+    text = " ".join(text.split())
+    if technique:
+        for family, needles in _HANDOFF_TECHNIQUE_FAMILIES:
+            if any(needle in text for needle in needles):
+                return family
+    return text[:160]
+
+
+def _canonical_handoff_skill(
+    raw_skill: Any,
+    dispatchable: set[str],
+) -> str:
+    raw = _compact_handoff_field(raw_skill, limit=120)
+    if not raw:
+        return ""
+    aliases: dict[str, str] = {}
+    for skill in dispatchable:
+        aliases[skill] = skill
+        aliases[skill.lower()] = skill
+        aliases[skill.replace("_", "-")] = skill
+        aliases[skill.replace(" ", "-")] = skill
+        aliases[skill.lower().replace("_", "-").replace(" ", "-")] = skill
+    key = raw.lower().replace("_", "-").replace(" ", "-")
+    return aliases.get(raw) or aliases.get(key) or ""
+
+
+def _handoff_key_for_parts(skill: str, surface: str, technique: str) -> str:
+    return "|".join((
+        _normalized_handoff_component(skill),
+        _normalized_handoff_component(surface),
+        _normalized_handoff_component(technique, technique=True),
+    ))
+
+
+def _normalize_handoff_candidate(
+    raw: Any,
+    *,
+    dispatchable: set[str],
+) -> dict[str, str] | None:
+    if not isinstance(raw, dict):
+        return None
+    skill = _canonical_handoff_skill(
+        raw.get("suggested_skill") or raw.get("skill"),
+        dispatchable,
+    )
+    if not skill:
+        return None
+    surface = _compact_handoff_field(
+        raw.get("surface") or raw.get("where") or raw.get("target")
+    )
+    technique = _compact_handoff_field(
+        raw.get("technique") or raw.get("next_move") or raw.get("move")
+    )
+    if not (surface or technique):
+        return None
+    confidence = _compact_handoff_field(raw.get("confidence")).lower()
+    if confidence not in _HANDOFF_CONFIDENCE_RANK:
+        confidence = "medium"
+    item = {
+        "suggested_skill": skill,
+        "surface": surface,
+        "technique": technique,
+        "confidence": confidence,
+        "handoff_key": _handoff_key_for_parts(skill, surface, technique),
+    }
+    for field in (
+        "signal",
+        "reason",
+        "evidence_excerpt",
+        "reproduction",
+        "source_agent",
+        "source",
+        "possible_vuln_class",
+    ):
+        value = _compact_handoff_field(raw.get(field))
+        if value:
+            item[field] = value
+    return item
+
+
+def _pending_skill_handoff_candidates(
+    state: SwarmGraphState,
+    *,
+    min_confidence: str = "medium",
+) -> list[dict[str, str]]:
+    """Return unrouted handoffs, deduped by skill/surface/technique."""
+    dispatchable = {name for name, _ in list_dispatchable_skills()}
+    min_rank = _HANDOFF_CONFIDENCE_RANK.get(min_confidence, 2)
+    routed = {
+        str(key or "").strip().lower()
+        for key in (state.get("routed_skill_handoffs") or [])
+    }
+    merged: dict[str, dict[str, str]] = {}
+    for raw in state.get("skill_handoffs") or []:
+        item = _normalize_handoff_candidate(raw, dispatchable=dispatchable)
+        if not item:
+            continue
+        if _HANDOFF_CONFIDENCE_RANK[item["confidence"]] < min_rank:
+            continue
+        key = item["handoff_key"]
+        if key in routed:
+            continue
+        prior = merged.get(key)
+        if (
+            prior is None
+            or _HANDOFF_CONFIDENCE_RANK[item["confidence"]]
+            > _HANDOFF_CONFIDENCE_RANK[prior["confidence"]]
+        ):
+            merged[key] = item
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            -_HANDOFF_CONFIDENCE_RANK[item["confidence"]],
+            item["suggested_skill"],
+            item["surface"],
+            item["technique"],
+        ),
+    )
+
+
+def _skill_handoff_note(state: SwarmGraphState) -> str | None:
+    """Render pending worker handoffs for the planner."""
+    candidates = _pending_skill_handoff_candidates(state, min_confidence="medium")
+    if not candidates:
+        return None
+    lines = [
+        "[SYSTEM NOTE] Pending cross-skill handoffs from workers. Workers "
+        "cannot spawn other agents; these records are their structured "
+        "request for the supervisor to continue a specific surface/mechanism "
+        "with a different skill. Dispatch only when the exact "
+        "skill + surface + technique key has not already been routed.",
+    ]
+    for item in candidates[:6]:
+        skill = item["suggested_skill"]
+        surface = item["surface"]
+        technique = item["technique"]
+        confidence = item["confidence"]
+        source_agent = item.get("source_agent") or "unknown-worker"
+        lines.append(
+            f"  • {skill} ({confidence}, from {source_agent}) — "
+            f"{technique or surface}"
+            + (f" at {surface}" if surface and technique else "")
+        )
+        if item.get("signal"):
+            lines.append(f"      signal: {item['signal']}")
+        if item.get("reason"):
+            lines.append(f"      reason: {item['reason']}")
+        if item.get("evidence_excerpt"):
+            lines.append(f"      evidence: {item['evidence_excerpt']}")
+        if item.get("reproduction"):
+            lines.append(f"      repro: {item['reproduction']}")
+    return "\n".join(lines)
+
+
+def _ensure_skill_handoff_floor(
+    decision: dict,
+    state: SwarmGraphState,
+) -> list[dict[str, str]]:
+    """Ensure high-confidence unrouted handoffs are represented this turn.
+
+    Planner-authored choices remain the normal fan-out. Worker handoffs get a
+    small overflow lane because they come from raw-trace evidence that would
+    otherwise be easy to lose in summarization. The overflow is deliberately
+    bounded so noisy duplicate handoffs cannot explode one turn into dozens of
+    workers.
+    """
+    if decision.get("action") != "attack":
+        return []
+    candidates = _pending_skill_handoff_candidates(state, min_confidence="high")
+    if not candidates:
+        return []
+
+    raw_configs = decision.get("configs") or []
+    if not isinstance(raw_configs, list):
+        raw_configs = []
+    configs = [str(c).strip() for c in raw_configs if str(c).strip()]
+    selected = set(configs)
+
+    dispatchable = {name for name, _ in list_dispatchable_skills()}
+    already_run = _active_skill_names(state, dispatchable)
+    ranked = sorted(
+        candidates,
+        key=lambda item: (
+            item["suggested_skill"] in already_run,
+            item["suggested_skill"] not in selected,
+            -_HANDOFF_CONFIDENCE_RANK[item["confidence"]],
+            item["suggested_skill"],
+            item["surface"],
+            item["technique"],
+        ),
+    )
+
+    represented: list[dict[str, str]] = []
+    represented_skills: set[str] = set()
+
+    # If the planner already chose a handoff skill, attach the best matching
+    # handoff context to that worker. This must not suppress unrelated strong
+    # handoffs below.
+    for candidate in ranked:
+        skill = candidate["suggested_skill"]
+        if skill not in selected or skill in represented_skills:
+            continue
+        represented.append(candidate)
+        represented_skills.add(skill)
+
+    added = 0
+    for candidate in ranked:
+        skill = candidate["suggested_skill"]
+        if skill in selected or skill in represented_skills:
+            continue
+        if added >= _HANDOFF_OVERFLOW_LIMIT:
+            break
+        if len(configs) >= _HANDOFF_MAX_CONFIGS:
+            break
+        configs.append(skill)
+        selected.add(skill)
+        represented.append(candidate)
+        represented_skills.add(skill)
+        added += 1
+
+    decision["configs"] = configs
+    return represented
+
+
+def _attach_skill_handoff_context(
+    pending: list[dict],
+    handoffs: list[dict[str, str]],
+) -> list[str]:
+    """Append handoff details to matching pending dispatch reasons."""
+    if not pending or not handoffs:
+        return []
+    routed_keys: list[str] = []
+    by_skill: dict[str, list[dict[str, str]]] = {}
+    for handoff in handoffs:
+        by_skill.setdefault(handoff["suggested_skill"], []).append(handoff)
+
+    for item in pending:
+        skill = str(item.get("config_name") or "").strip()
+        matches = by_skill.get(skill) or []
+        if not matches:
+            continue
+        blocks: list[str] = []
+        for handoff in matches[:2]:
+            routed_keys.append(handoff["handoff_key"])
+            lines = [
+                "Cross-skill handoff routed by supervisor:",
+                f"- source_agent: {handoff.get('source_agent') or 'unknown-worker'}",
+                f"- surface: {handoff.get('surface') or '(unspecified)'}",
+                f"- technique: {handoff.get('technique') or '(unspecified)'}",
+                f"- confidence: {handoff.get('confidence') or 'medium'}",
+            ]
+            for label, key in (
+                ("signal", "signal"),
+                ("reason", "reason"),
+                ("evidence", "evidence_excerpt"),
+                ("reproduction", "reproduction"),
+            ):
+                value = handoff.get(key)
+                if value:
+                    lines.append(f"- {label}: {value}")
+            blocks.append("\n".join(lines))
+        prior = str(item.get("dispatch_reason") or "").strip()
+        item["dispatch_reason"] = (
+            prior + "\n\n" + "\n\n".join(blocks)
+            if prior else "\n\n".join(blocks)
+        )
+    return routed_keys
+
+
+def _tool_coverage_note(state: SwarmGraphState) -> str | None:
+    """Render failed/partial high-level tools so they are not counted covered."""
+    attempts = [
+        a for a in (state.get("tool_attempts") or [])
+        if isinstance(a, dict)
+    ]
+    if not attempts:
+        return None
+    open_items = [
+        a for a in attempts
+        if a.get("fallback_needed") or not bool(a.get("covered"))
+    ][-8:]
+    covered_items = [
+        a for a in attempts
+        if bool(a.get("covered")) and not a.get("fallback_needed")
+    ][-4:]
+    if not open_items and not covered_items:
+        return None
+    lines = [
+        "[SYSTEM NOTE] Tool/surface coverage ledger. A failed or partial tool "
+        "run is NOT a negative test of the surface; it means the planner should "
+        "retry with corrected flags or use a fallback. Fully covered successes "
+        "should not be repeated unless new evidence changes the target.",
+    ]
+    if open_items:
+        lines.append("  • Not covered / fallback needed:")
+        for a in open_items:
+            surface = str(a.get("surface") or "surface").strip()
+            tool = str(a.get("tool") or "tool").strip()
+            status = str(a.get("status") or "").strip()
+            coverage = str(a.get("coverage") or "").strip()
+            err = str(a.get("error_type") or "").strip()
+            cmd = str(a.get("command") or "").strip()
+            suffix = ", ".join(p for p in (status, f"coverage={coverage}" if coverage else "", err) if p)
+            lines.append(f"      - {surface} via {tool}" + (f" ({suffix})" if suffix else ""))
+            if cmd:
+                lines.append(f"        command: {cmd}")
+    if covered_items:
+        lines.append("  • Covered successfully:")
+        for a in covered_items:
+            surface = str(a.get("surface") or "surface").strip()
+            tool = str(a.get("tool") or "tool").strip()
+            lines.append(f"      - {surface} via {tool}")
     return "\n".join(lines)
 
 
@@ -2007,6 +2586,39 @@ def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
             "dispatch_reason": dispatch_reason,
         })
     return pending
+
+
+def _ensure_untried_skill_floor(
+    decision: dict,
+    state: SwarmGraphState,
+    summary: dict | None,
+) -> list[str]:
+    """Add one never-run suggested skill from structured next-move leads.
+
+    This enforces a floor, not a cap: it only adds a skill that has never run
+    in this run, and it does not change any future dispatch scoring once the
+    skill has been tried at least once.
+    """
+    if decision.get("action") != "attack":
+        return []
+    candidates = _untried_suggested_skill_candidates(summary, state)
+    if not candidates:
+        return []
+
+    raw_configs = decision.get("configs") or []
+    if not isinstance(raw_configs, list):
+        raw_configs = []
+    configs = [str(c).strip() for c in raw_configs if str(c).strip()]
+    already_selected = set(configs)
+
+    for candidate in candidates:
+        skill = candidate["skill"]
+        if skill in already_selected:
+            return []
+        configs.append(skill)
+        decision["configs"] = configs
+        return [skill]
+    return []
 
 
 class PlannerNode(BaseNode):
@@ -2252,6 +2864,9 @@ class PlannerNode(BaseNode):
                 result, _attempts, _tier = await astream_with_refusal_retry(
                     agent_factory=_primary_factory,
                     fallback_agent_factory=fallback_factory,
+                    fallback_model_label=(
+                        str(_fb_model) if fallback_factory is not None else None
+                    ),
                     system_msg=SUPERVISOR_SYSTEM_PROMPT,
                     seed_msgs=payload["messages"],
                     call_config=call_config,
@@ -2409,6 +3024,19 @@ class PlannerNode(BaseNode):
             )
             prior_messages.append(HumanMessage(content=primitive_note))
 
+        # Hypothesis budget-lock. When scattered signals have fused into a
+        # COMMITTED hypothesis (belief over threshold, not yet proven),
+        # surface its deciding probe and forbid pivoting away from it.
+        # Yields to the primitive directive above (confirmed beats
+        # committed), so it only fires when no proven primitive is live.
+        hypothesis_note = _hypothesis_directive(state)
+        if hypothesis_note:
+            self.log.info(
+                "hypothesis directive: %s",
+                hypothesis_note.replace("\n", " | ")[:300],
+            )
+            prior_messages.append(HumanMessage(content=hypothesis_note))
+
         service_note = _colocated_service_directive(state)
         if service_note:
             self.log.info(
@@ -2451,6 +3079,42 @@ class PlannerNode(BaseNode):
             prior_messages.append(
                 HumanMessage(content=crawl_policy.web_search_when_to_use_note())
             )
+
+        handoff_note = _skill_handoff_note(state)
+        if handoff_note:
+            self.log.info(
+                "cross-skill handoff note: %s",
+                handoff_note.replace("\n", " | ")[:300],
+            )
+            prior_messages.append(HumanMessage(content=handoff_note))
+
+        evidence_note = _high_confidence_next_moves_note(state)
+        if evidence_note:
+            self.log.info(
+                "evidence-derived next-move note: %s",
+                evidence_note.replace("\n", " | ")[:300],
+            )
+            prior_messages.append(HumanMessage(content=evidence_note))
+
+        tool_note = _tool_coverage_note(state)
+        if tool_note:
+            self.log.info(
+                "tool-coverage note: %s",
+                tool_note.replace("\n", " | ")[:300],
+            )
+            prior_messages.append(HumanMessage(content=tool_note))
+
+        # Minimum coverage floor for the planner's own structured untried list.
+        # If the planner previously wrote a concrete next move with a
+        # ``suggested_skill`` that has never run, surface it explicitly. This is
+        # additive and never suppresses persistence on the current line.
+        floor_note = _untried_skill_floor_directive(state)
+        if floor_note:
+            self.log.info(
+                "untried-skill floor directive: %s",
+                floor_note.replace("\n", " | ")[:300],
+            )
+            prior_messages.append(HumanMessage(content=floor_note))
 
         # Diversify-when-stuck directive. When a vuln class has been
         # dispatched repeatedly with no flag, add a parallel DIFFERENT angle
@@ -2751,7 +3415,32 @@ class PlannerNode(BaseNode):
             )
 
         if action == "attack":
+            floor_summary = (
+                validated_summary
+                if validated_summary is not None
+                else state.get("relevant_summary")
+            )
+            handoff_claims = _ensure_skill_handoff_floor(decision, state)
+            if handoff_claims:
+                self.log.info(
+                    "cross-skill handoff floor represented: %s",
+                    ", ".join(
+                        f"{h['suggested_skill']}@{h['surface'] or h['technique']}"
+                        for h in handoff_claims
+                    ),
+                )
+            floor_added = _ensure_untried_skill_floor(
+                decision, state, floor_summary
+            )
+            if floor_added:
+                self.log.info(
+                    "untried-skill floor added config(s): %s",
+                    ", ".join(floor_added),
+                )
             pending = _stage_attack(decision, state)
+            routed_handoff_keys = _attach_skill_handoff_context(
+                pending, handoff_claims
+            )
             if not pending:
                 self.log.warning(
                     "planner: action=attack but no runnable configs after "
@@ -2762,6 +3451,8 @@ class PlannerNode(BaseNode):
                 mode = decision.get("mode") or state.get("mode") or "analyze"
                 update["mode"] = mode
                 update["pending_dispatch"] = pending
+                if routed_handoff_keys:
+                    update["routed_skill_handoffs"] = routed_handoff_keys
                 # Optional concurrent research: when the planner attaches a
                 # "research_query" to an attack, the routing edge fans out a
                 # web_search branch ALONGSIDE the executors (it joins the same

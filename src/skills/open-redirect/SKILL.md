@@ -1,7 +1,33 @@
 ---
 name: open-redirect
 description: >-
-  Use open-redirect when recon surfaces a request parameter whose value is or contains a URL, host, or path — names like next, return, returnUrl, returnTo, redirect, redir, url, dest, destination, continue, goto, target, back, to, out, callback, forward, service, or an OAuth/OIDC/SAML redirect_uri, post_logout_redirect_uri, or RelayState — especially when its value already holds a /path, a //host, or a full scheme://host. Also dispatch when a 3xx response carries a Location header, when the flow is a login, logout, password-reset, SSO, or any "where to go after" handler that bounces the browser to a stored destination, when the path itself looks like a generic redirector (/out, /r, /redirect, /link, /away, /go, a share or unsubscribe or tracking link), or when the stated objective is phrased around steering a user to an external destination or chaining a phishing pivot from a trusted origin. The marker is a destination the server hands back for the browser to follow, not a value the server itself consumes. Covers allowlist bypass through URL-parser differentials (userinfo, backslash, whitespace, fragment, IDN/punycode, double encoding, IP numeric forms) and multi-hop redirect chains where only the first hop is validated. Disambiguate from look-alikes: a url/path parameter the server itself FETCHES and acts on (no 3xx aimed at the user) is SSRF; one whose value returns local file contents is LFI or path traversal; one reflected and rendered into the page body is XSS; and CR/LF that splits the response to inject headers is HTTP response splitting — open-redirect is specifically about the browser being sent to a user-controlled external destination. Pair it with SSRF only when a server-side fetcher follows the redirect.
+  Use: Use open-redirect when recon surfaces a request parameter whose value is or contains a URL,
+  host, or path — names like next, return, returnUrl, returnTo, redirect, redir, url, dest,
+  destination, continue, goto, target, back, to, out, callback, forward, service, or an
+  OAuth/OIDC/SAML redirect_uri, post_logout_redirect_uri, or RelayState — especially when its value
+  already holds a /path, a //host, or a full scheme://host.
+  Signals: Also dispatch when a 3xx response carries a Location header, when the flow is a login,
+  logout, password-reset, SSO, or any "where to go after" handler that bounces the browser to a
+  stored destination, when the path itself looks like a generic redirector (/out, /r, /redirect,
+  /link, /away, /go, a share or unsubscribe or tracking link), or when the stated objective is
+  phrased around steering a user to an external destination or chaining a phishing pivot from a
+  trusted origin. The marker is a destination the server hands back for the browser to follow, not a
+  value the server itself consumes.
+  Pair with: Also dispatch ssrf or auth-testing in parallel when the same evidence shows server-side
+  fetching or login/OIDC/session-token handling; dispatch csrf only when the redirect sits inside a
+  state-changing cookie-auth flow or token/state weakness; co-dispatch means separate focused
+  workers sharing the same investigation state, not merging skill prompts.
+  Coverage: Covers allowlist bypass through URL-parser differentials (userinfo, backslash,
+  whitespace, fragment, IDN/punycode, double encoding, IP numeric forms) and multi-hop redirect
+  chains where only the first hop is validated.
+  Do not use: Disambiguate from look-alikes: a url/path parameter the server itself FETCHES and acts
+  on (no 3xx aimed at the user) is SSRF; one whose value returns local file contents is LFI or path
+  traversal; one reflected and rendered into the page body is XSS; and CR/LF that splits the
+  response to inject headers is HTTP response splitting — open-redirect is specifically about the
+  browser being sent to a user-controlled external destination. Pair it with SSRF only when a
+  server-side fetcher follows the redirect. Do not dispatch when the described input surface is
+  absent, when the value is only stored or echoed without reaching this skill's mechanism, or when
+  another specialist's sink explains the evidence more directly.
 metadata:
   dispatchable: true
 ---
@@ -106,6 +132,23 @@ matched against an exact allowlist per scheme, host, and path.
 - Domain-suffix concatenation (no separator):
   `https://trustedevil.com`, `https://trustedcom.evil.com` — flags
   validators using bare substring `contains("trusted.com")`.
+- **Trusted host appended AFTER the real host** (inverse of userinfo) —
+  the real host comes first, the trusted name is pushed into path,
+  query, fragment, or a junk separator so a validator that only checks
+  "does `trusted.com` appear?" passes: `http://evil.com#@trusted.com`,
+  `http://evil.com?@trusted.com`, `http://evil.com\trusted.com`,
+  `http://evil.com&trusted.com`, `//evil.com\@trusted.com`,
+  `http://evil.com/trusted.com`.
+- **Whole-URL percent/escape encoding** to defeat any keyword denylist
+  that scans the raw string: hex-encode the entire value
+  (`%68%74%74%70%3a%2f%2f%65%76%69%6c%2e%63%6f%6d` = `http://evil.com`),
+  or partial (`/http://%65%76%69%6c%2e%63%6f%6d`).
+- **Path-suffix permutation grid** — when the validator inspects the
+  trailing path, append `%2f..`, `%2e%2e`, `%2f%2e%2e`, `%2e%2e%2f`, or
+  a trailing `/` `//` to forms like `//evil.com/%2f..` and
+  `//trusted.com@evil.com/%2e%2e`, cycling slash counts `/` `//` `///`
+  `////` and a leading `https:`. The full pre-built grid is in
+  `references/payloads-and-discovery.md`.
 - Data and inline-payload schemes for XSS chain:
   `data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==`.
 

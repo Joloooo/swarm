@@ -215,6 +215,98 @@ def _summarize_output(tail: str, exit_code: int | None) -> str:
     return first + suffix
 
 
+# ─────────── Worker-report card helpers (compact summary view) ────────
+#
+# The summarizer emits one structured digest per worker (## Status, ##
+# Inputs tried, … ## Next skill suggestions). Dumped verbatim that digest
+# is ~100 lines of planner-facing detail. These helpers let the live view
+# render a tight card instead — the full digest stays on disk in
+# ``full_logs.jsonl`` so nothing is lost. Everything the card prints goes
+# through ``_emit``, so the ``displayed_terminal_logs.log`` mirror stays
+# byte-identical to the screen (minus ANSI).
+
+
+# Status verb → (color, decorations) for the worker-report card headline.
+_REPORT_STATUS_COLOR: dict[str, tuple[str, tuple[str, ...]]] = {
+    "success":      (_GREEN, (_BOLD,)),
+    "inconclusive": (_WHITE, (_DIM,)),
+    "blocked":      (_YELLOW, ()),
+    "refused":      (_BR_RED, (_BOLD,)),
+    "crashed":      (_RED, (_BOLD,)),
+}
+
+
+def _parse_md_sections(content: str) -> dict[str, str]:
+    """Split a ``## Section`` markdown report into ``{lower_title: body}``."""
+    sections: dict[str, str] = {}
+    current: str | None = None
+    buf: list[str] = []
+    for line in (content or "").splitlines():
+        m = re.match(r"^\s{0,3}##\s+(.+?)\s*$", line)
+        if m:
+            if current is not None:
+                sections[current] = "\n".join(buf).strip()
+            current = m.group(1).strip().lower()
+            buf = []
+        elif current is not None:
+            buf.append(line)
+    if current is not None:
+        sections[current] = "\n".join(buf).strip()
+    return sections
+
+
+def _one_line(text: str, *, join: str = " ", cap_items: int = 0) -> str:
+    """Collapse a multi-line / bulleted section body into one tidy line.
+
+    Strips leading markdown bullets and joins non-empty lines with
+    ``join``. ``cap_items`` is a STRUCTURAL cap (renders ``(+N more)``)
+    like the ``+N more lines`` synopsis hint — not a raw character
+    truncation (the project removed those by user request).
+    """
+    items: list[str] = []
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        while s[:1] in ("-", "*", "•"):
+            s = s[1:].strip()
+        if s:
+            items.append(s)
+    if cap_items and len(items) > cap_items:
+        extra = len(items) - cap_items
+        items = items[:cap_items] + [f"(+{extra} more)"]
+    return join.join(items)
+
+
+def _lax_json_array(text: str) -> list[Any]:
+    """Best-effort parse of a JSON array embedded in a report section.
+
+    Tolerates ```` ```json ```` fences and trailing commas; returns
+    ``[]`` on any failure so a malformed array degrades to "no bullets"
+    rather than crashing or dumping raw JSON.
+    """
+    if not text:
+        return []
+    start = text.find("[")
+    end = text.rfind("]")
+    if start < 0 or end <= start:
+        return []
+    blob = re.sub(r",\s*([\]}])", r"\1", text[start : end + 1])  # trailing commas
+    try:
+        arr = json.loads(blob)
+    except Exception:  # noqa: BLE001
+        return []
+    return arr if isinstance(arr, list) else []
+
+
+def _fmt_clock(seconds: float) -> str:
+    """``seconds`` → compact clock string: ``"12m03s"`` or ``"1h04m"``."""
+    s = int(max(0, seconds))
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}h{m:02d}m"
+    return f"{m}m{s:02d}s"
+
+
 # ───────────────── Planner JSON → one-line decision ──────────────────
 #
 # Live rendering uses the LAX parser — it'd rather show a partially-
@@ -545,6 +637,56 @@ def _pad_clear() -> None:
     _PAD_LINES_DRAWN = 0
 
 
+# Per-run wall clock for the live countdown footer. ``started`` is a
+# ``perf_counter`` stamp set by ``bench_start``; ``budget_s`` is the run
+# timeout (config ``budgets.run_timeout_s``), read once lazily. The clock
+# renders as the pad's last row — TTY-only, never teed to disk — so it
+# ticks live without bloating the log; the per-line ``HH:MM:SS`` gutter
+# already records absolute time in the saved file.
+_RUN_CLOCK: dict[str, Any] = {"started": None, "budget_s": None}
+
+
+def _run_clock_row() -> str | None:
+    """Render ``⏱ run +MM:SS / BUDGET · NN% · ~MM:SS left`` for the pad.
+
+    Returns ``None`` before the first ``bench_start``. Reads the budget
+    from config once and caches it; degrades to a bare elapsed string
+    when no budget is configured. Colour escalates dim → yellow (≥70%)
+    → bold-red (≥90%) so a run about to hit the wall is obvious.
+    """
+    started = _RUN_CLOCK.get("started")
+    if started is None:
+        return None
+    elapsed = time.perf_counter() - started
+    budget = _RUN_CLOCK.get("budget_s")
+    if budget is None:
+        try:
+            from src.graph import config
+            budget = getattr(config, "run_timeout_s", None)
+            if budget is None:
+                budget = getattr(
+                    getattr(config, "budgets", None), "run_timeout_s", None
+                )
+        except Exception:  # noqa: BLE001
+            budget = None
+        _RUN_CLOCK["budget_s"] = budget or 0  # cache; 0 ⇒ "no budget known"
+
+    el = _fmt_clock(elapsed)
+    if budget and budget > 0:
+        remaining = max(0.0, budget - elapsed)
+        pct = min(100, int(elapsed / budget * 100))
+        body = (
+            f"⏱ run +{el} / {_fmt_clock(budget)} · {pct}% · "
+            f"~{_fmt_clock(remaining)} left"
+        )
+        if pct >= 90:
+            return _paint(body, _BOLD, _RED)
+        if pct >= 70:
+            return _paint(body, _YELLOW)
+        return _paint(body, _DIM)
+    return _paint(f"⏱ run +{el}", _DIM)
+
+
 def _pad_draw() -> None:
     """Render the pad below the current cursor position.
 
@@ -640,6 +782,14 @@ def _pad_draw() -> None:
             # ever overflows is very-long model names on narrow terminals.
             line = visible[: cols - 1] + "…"
         rows.append(line)
+
+    # Live run countdown as the pad's final row — visible whenever any
+    # call is in flight (≈the whole run; the only gaps are sub-second
+    # node hand-offs). Pad rows are TTY-only, so this never touches the
+    # disk mirror.
+    clock = _run_clock_row()
+    if clock is not None:
+        rows.append(clock)
 
     if not rows:
         _PAD_LINES_DRAWN = 0
@@ -801,6 +951,9 @@ class _Live:
         expected_flag: str | None,
     ) -> None:
         self._seen_msg_hashes.clear()
+        # Stamp the per-run wall clock for the live countdown footer (pad).
+        _RUN_CLOCK["started"] = time.perf_counter()
+        _RUN_CLOCK["budget_s"] = None  # re-read budget lazily on first render
         # Drop any stale spinner rows held over from the previous bench.
         # An LLM call in-flight when the previous bench hit its 900s
         # timeout never receives on_llm_end / on_llm_error (the
@@ -1207,9 +1360,137 @@ class _Live:
             ):
                 continue
             agent = kw.get("agent_id") or ""
+            # The summarizer's structured worker digest gets a compact card
+            # (status headline + key rows + highlighted handoff/suggestion
+            # bullets) instead of a ~100-line verbatim dump. Detected by the
+            # ``kind`` tag the summarizer stamps, with a ``## Status`` shape
+            # fallback. The full digest stays in full_logs.jsonl.
+            if kw.get("kind") == "worker_report" or stripped.startswith("## Status"):
+                self._render_worker_report(stripped, agent)
+                continue
             agent_part = f"[{agent}] " if agent else ""
             self._emit_multiline(
                 f"💭 {agent_part}", stripped, color=_BOLD,
+            )
+
+    def _render_worker_report(self, content: str, agent: str) -> None:
+        """Render a summarizer worker digest as a compact card via ``_emit``.
+
+        Surfaces Status (colored headline), Target, a probed-count synopsis,
+        the inferred behaviour, the recommended next move, and the cross-skill
+        handoff / next-skill-suggestion arrays as highlighted bullets. The
+        verbose Inputs-tried / Server-responses / NOT-tried enumerations are
+        planner-facing and dropped here; the full digest is in full_logs.jsonl.
+        Every line goes through ``_emit`` so the disk mirror matches the screen.
+        """
+        sections = _parse_md_sections(content)
+        agent_part = f"[{agent}] " if agent else ""
+        # Degenerate / non-standard report → fall back to the raw block so we
+        # never silently swallow content we failed to parse into a card.
+        if not any(
+            k in sections
+            for k in (
+                "status",
+                "recommended next dispatch",
+                "cross-skill handoffs",
+                "next skill suggestions",
+                "inferred server-side behaviour",
+            )
+        ):
+            self._emit_multiline(f"💭 {agent_part}", content, color=_BOLD)
+            return
+
+        indent = " " * 12
+
+        # Status headline — "success — <why>" → colored verb + bold why.
+        status_raw = _one_line(sections.get("status", ""))
+        verb_word, headline = "", status_raw
+        if status_raw:
+            verb, sep, rest = status_raw.partition("—")
+            verb_word = (verb.strip().split() or [""])[0].lower()
+            headline = rest.strip() if sep else status_raw
+        color, deco = _REPORT_STATUS_COLOR.get(verb_word, (_CYAN, (_BOLD,)))
+        status_label = _paint((verb_word or "report").upper(), color, *deco)
+        head = _paint("💭 ", _DIM, _CYAN)
+        tag = _paint(agent_part, _DIM, _CYAN)
+        body = _paint(headline, _BOLD) if headline else ""
+        _emit(f"{indent}{head}{tag}{status_label}  {body}".rstrip())
+
+        # Key rows — only emitted when non-empty.
+        self._report_row(
+            indent, "target",
+            _one_line(sections.get("target", ""), join=" · ", cap_items=8),
+        )
+        self._report_row(
+            indent, "probed", _first_nonempty(sections.get("inputs tried", "")),
+        )
+        self._report_row(
+            indent, "inferred",
+            _one_line(sections.get("inferred server-side behaviour", "")),
+        )
+        self._report_row(
+            indent, "next",
+            _one_line(sections.get("recommended next dispatch", "")),
+        )
+
+        # Highlighted bullets for the routing arrays.
+        self._render_skill_bullets(
+            sections.get("cross-skill handoffs", ""), kind="handoff", indent=indent,
+        )
+        self._render_skill_bullets(
+            sections.get("next skill suggestions", ""), kind="suggest", indent=indent,
+        )
+
+    def _report_row(self, indent: str, label: str, text: str) -> None:
+        """Emit one ``<label>  <value>`` card row — dim label, hung continuations."""
+        if not text or not text.strip():
+            return
+        width = 9
+        lbl = _paint(f"{label:<{width}}", _DIM)
+        lines = [ln for ln in text.splitlines() if ln.strip()] or [text]
+        _emit(f"{indent}{lbl} {lines[0]}")
+        hang = " " * (width + 1)
+        for cont in lines[1:]:
+            _emit(f"{indent}{hang}{cont}")
+
+    def _render_skill_bullets(
+        self, section_text: str, *, kind: str, indent: str,
+    ) -> None:
+        """Render a handoff / next-skill JSON array as highlighted bullets.
+
+        ``⇢ <skill>`` is bold-cyan (the eye-target), confidence dim, the
+        concrete move plain, the surface dim, and the signal/reason on a
+        dim continuation line. Lax-parsed: a malformed array renders
+        nothing rather than dumping raw JSON. Top 4 shown + ``(+N more)``.
+        """
+        items = [it for it in _lax_json_array(section_text) if isinstance(it, dict)]
+        if not items:
+            return
+        marker_txt = "⇢ handoff " if kind == "handoff" else "⇢ suggest "
+        shown = items[:4]
+        for it in shown:
+            skill = str(it.get("suggested_skill") or it.get("skill") or "?").strip()
+            conf = str(it.get("confidence") or "").strip().lower()
+            move = str(it.get("technique") or it.get("next_move") or "").strip()
+            surface = str(it.get("surface") or it.get("where") or "").strip()
+            why = str(it.get("signal") or it.get("reason") or "").strip()
+            marker = _paint(marker_txt, _DIM, _CYAN)
+            skill_part = _paint(skill, _BOLD, _CYAN)
+            conf_part = f" {_paint(f'[{conf}]', _DIM)}" if conf else ""
+            line = f"{indent}{marker}{skill_part}{conf_part}"
+            if move:
+                line += f"  {move}"
+            if surface:
+                line += _paint(f"  @ {surface}", _DIM)
+            _emit(line)
+            if why:
+                hang = " " * len(marker_txt)
+                _emit(f"{indent}{hang}{_paint('· ' + why, _DIM)}")
+        extra = len(items) - len(shown)
+        if extra > 0:
+            _emit(
+                f"{indent}{_paint(marker_txt, _DIM, _CYAN)}"
+                f"{_paint(f'(+{extra} more)', _DIM)}"
             )
 
     # -------- shell tool ----------
@@ -1353,6 +1634,58 @@ class _Live:
             return
         head = _paint("⚠ ", _BOLD, _YELLOW)
         _emit(f"{_now()}  {head}{_paint(text, _YELLOW)}")
+
+    def refusal_recovery(
+        self,
+        *,
+        agent: str,
+        event: str,
+        fallback_model: str | None = None,
+        primary_attempts: int | None = None,
+        fallback_attempt: int | None = None,
+        continued_from: int | None = None,
+    ) -> None:
+        """Render refusal-retry tier transitions as first-class live events."""
+        if _mode() == "silent":
+            return
+
+        ag = _agent_tag(agent)
+        model = fallback_model or "fallback"
+        continued = ""
+        if continued_from is not None:
+            continued = f" (continued from {continued_from} msg(s))"
+
+        if event == "switch":
+            attempts = (
+                f"{primary_attempts}/{primary_attempts}"
+                if primary_attempts
+                else "all"
+            )
+            head = _paint("⚠ ", _BOLD, _YELLOW)
+            body = (
+                f"{ag} refusal recovery: primary refused {attempts}; "
+                f"switching to fallback model {model}{continued}"
+            )
+            _emit(f"{_now()}  {head}{_paint(body, _YELLOW)}")
+            return
+
+        if event == "rescued":
+            attempt = f" attempt {fallback_attempt}" if fallback_attempt else ""
+            head = _paint("✓ ", _BOLD, _GREEN)
+            body = (
+                f"{ag} recovered on fallback model {model}{attempt}"
+                f"{continued}"
+            )
+            _emit(f"{_now()}  {head}{_paint(body, _GREEN)}")
+            return
+
+        if event == "direct":
+            head = _paint("⚠ ", _BOLD, _YELLOW)
+            body = (
+                f"{ag} starting directly on fallback model {model} "
+                "because primary refused this config earlier"
+            )
+            _emit(f"{_now()}  {head}{_paint(body, _YELLOW)}")
 
     # -------- LLM call observability ----------
 

@@ -945,7 +945,7 @@ class _Live:
         # token chip prints the *delta* since the previous rollup for that
         # same key, so each line reflects that one node-turn's cost rather
         # than a running total. Reset per bench in ``bench_start``.
-        self._chip_prev: dict[Any, tuple[int, int, int]] = {}
+        self._chip_prev: dict[Any, tuple[int, int, int, int]] = {}
 
     # -------- benchmark boundaries (always visible) ----------
 
@@ -1086,6 +1086,56 @@ class _Live:
         if summary_path:
             _emit(f"           {_paint('summary', _DIM)} → {summary_path}")
 
+        # Grand-total token spend for the whole run — the last thing printed
+        # for the bench so it's easy to find at the bottom of the block.
+        self._emit_token_totals()
+
+    def _emit_token_totals(self) -> None:
+        """Emit one whole-run token total line (input / output / thinking /
+        cached) at bench end.
+
+        Sums every agent in ``TOKEN_TOTALS``. That table is reset at each
+        bench's start (``reset_totals()`` in ``benchmarks/xbow_runner.py``),
+        so at bench end it holds exactly THIS run's spend — no cross-bench
+        bleed in a sweep. Routed through ``_emit`` so the line lands in
+        ``displayed_terminal_logs.log`` as well as on screen. Silent when no
+        LLM calls were recorded.
+        """
+        try:
+            from src.llm.callbacks import TOKEN_TOTALS
+        except Exception:  # noqa: BLE001
+            return
+        if not TOKEN_TOTALS:
+            return
+        calls = inp = out = think = cached = 0
+        for t in TOKEN_TOTALS.values():
+            calls += t.calls
+            inp += t.input_tokens
+            out += t.output_tokens
+            think += t.reasoning_tokens
+            cached += t.cached_tokens
+        if not inp and not out:
+            return
+
+        def big(n: int) -> str:
+            # Millions are common for a full run; ``3.47M`` reads better than
+            # ``_fmt_tokens``' ``3472k``. Falls back to k, then the raw int.
+            if n >= 1_000_000:
+                return f"{n / 1_000_000:.2f}M"
+            if n >= 1_000:
+                return f"{n / 1_000:.0f}k"
+            return str(n)
+
+        pct = f" ({round(100 * cached / inp)}% cached)" if inp else ""
+        body = (
+            f"in={big(inp)} · out={big(out)} · think={big(think)} · "
+            f"cached={big(cached)}{pct}"
+        )
+        _emit(
+            f"           {_paint('tokens', _DIM)}    {_paint(body, _BOLD)}"
+            f"  {_paint(f'[{calls} LLM calls]', _DIM)}"
+        )
+
     # -------- runner-side messages ----------
 
     def runner_message(self, text: str, *, level: str = "info") -> None:
@@ -1225,7 +1275,7 @@ class _Live:
             agents = [s.strip() for s in m.group(1).split(",") if s.strip()]
             if not agents:
                 return ""
-            in_sum = out_sum = think_sum = peak = 0
+            in_sum = out_sum = think_sum = cache_sum = peak = 0
             for a in agents:
                 t = TOKEN_TOTALS.get(a)
                 if not t:
@@ -1233,6 +1283,7 @@ class _Live:
                 in_sum += t.input_tokens
                 out_sum += t.output_tokens
                 think_sum += t.reasoning_tokens
+                cache_sum += t.cached_tokens
                 if t.peak_input > peak:
                     peak = t.peak_input
             key: Any = ("agents", tuple(sorted(agents)))
@@ -1242,23 +1293,32 @@ class _Live:
                 # No tracked LLM calls for this node — say nothing rather
                 # than fall back to a run-wide sum.
                 return ""
-            in_sum, out_sum, think_sum, peak = (
-                t.input_tokens, t.output_tokens, t.reasoning_tokens, t.peak_input
+            in_sum, out_sum, think_sum, cache_sum, peak = (
+                t.input_tokens,
+                t.output_tokens,
+                t.reasoning_tokens,
+                t.cached_tokens,
+                t.peak_input,
             )
             key = ("node", node)
 
         # Delta since this scope's previous rollup → this turn's cost.
-        prev = self._chip_prev.get(key, (0, 0, 0))
+        prev = self._chip_prev.get(key, (0, 0, 0, 0))
+        if len(prev) == 3:
+            prev = (prev[0], prev[1], prev[2], 0)
         d_in = in_sum - prev[0]
         d_out = out_sum - prev[1]
         d_think = think_sum - prev[2]
-        self._chip_prev[key] = (in_sum, out_sum, think_sum)
+        d_cache = cache_sum - prev[3]
+        self._chip_prev[key] = (in_sum, out_sum, think_sum, cache_sum)
         if d_in <= 0 and d_out <= 0:
             return ""
+        cache_pct = (d_cache / d_in * 100) if d_in else 0
         return (
             f"in={_fmt_tokens(d_in)} "
             f"out={_fmt_tokens(d_out)} "
             f"think={_fmt_tokens(d_think)} "
+            f"cached={_fmt_tokens(d_cache)}({cache_pct:.0f}%) "
             f"peak={_fmt_tokens(peak)}"
         )
 
@@ -1974,10 +2034,10 @@ class _Live:
             f"out={_fmt_tokens(output_tokens)} "
             f"think={_fmt_tokens(reasoning_tokens)}"
         )
-        # Surface cache hits whenever the provider reports them. Suppress
-        # when zero so non-Codex providers and cold-prefix calls don't
-        # litter every line with ``cached=0``.
-        if cached_tokens > 0:
+        # Print cache status whenever token usage was reported. A zero
+        # cache hit is operationally important: it means the provider
+        # counted a real prompt but did not serve any of it from cache.
+        if input_tokens > 0 or cached_tokens > 0:
             pct = (cached_tokens / input_tokens * 100) if input_tokens else 0
             tokens_part += f" cached={_fmt_tokens(cached_tokens)}({pct:.0f}%)"
         if mode == "verbose":

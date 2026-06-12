@@ -79,7 +79,10 @@ direct subgraph calls bypassing authz.
 - Hit common paths: `/graphql`, `/api/graphql`, `/v1/graphql`,
   `/graphiql`, `/graphql/console`, `/query`, `/playground`.
 - Grep client bundles for path hints (`grep -oE '/[a-z/]*graphql[a-z/]*'`).
-- Run `graphw00f -t $URL -d` to fingerprint the server implementation.
+- Run `graphw00f -t $URL -d` to fingerprint the server implementation,
+  then cross-reference the engine against `graphql-threat-matrix` to
+  pull that engine's known security gaps and default behaviours (which
+  introspection/suggestion/batch controls it ships on vs. off).
 
 ### Introspection (on)
 Quick endpoint confirmation (works even with introspection off):
@@ -115,6 +118,16 @@ Grep the schema for:
   `impersonate*`, `reset*`.
 - Directives: `@auth` / `@hasRole` presence — absence on a sensitive
   field is a finding.
+
+### Path enumeration to a target type
+A sensitive type (`User`, `Admin`, `Payment`, `ApiKey`) is rarely a
+root field — it's reached through nested relationships, and one path
+may enforce auth while another does not. Feed the introspection JSON
+to `graphql-path-enum -i schema.json -t User` to list every way the
+schema lets you reach that type from `Query`. Each distinct path is a
+candidate for the field-level authz test below: a long indirect path
+(`Query → checklist_check → Checklist → team → ... → User`) often
+skips the auth check that the direct `me { ... }` path enforces.
 
 ## Vulnerability classes
 
@@ -165,8 +178,12 @@ Place expensive or sensitive fields under `@defer` to slip past naive
 complexity calculators that only score the initial payload.
 
 ### CSRF on GET-mode endpoints
-If GET is accepted and auth is cookie-based, mutations are CSRF-able:
-`GET /graphql?query=mutation{deleteAccount}`.
+If GET is accepted and auth is cookie-based, queries are CSRF-able:
+`GET /graphql?query={someQuery}`. Most servers refuse mutations over
+GET by spec (graphql-over-http restricts GET to read-only), so the
+high-value CSRF target is a `mutation` that the server wrongly lets
+through GET — test `GET /graphql?query=mutation{deleteAccount}` and
+confirm the write actually happened, not just a 200.
 
 ### Subscription auth gaps
 WebSocket validates the JWT once at `connection_init`. Test: token
@@ -274,6 +291,10 @@ A finding is real only when:
     (introspection, batching, GET, field suggestions).
   - `clairvoyance -u $URL -w graphql-words.txt` — schema reconstruction
     when introspection is off.
+  - `graphql-path-enum -i schema.json -t User` — lists every path from
+    `Query` to a target type; feed it the introspection JSON.
+  - `GQLSpection` — parses introspection output and auto-generates the
+    full set of valid queries/mutations to test.
   - `inql` / `GraphQLmap` — schema fetch, query generation, fuzzing,
     interactive NoSQLi/SQLi modules.
   - `BatchQL` / `CrackQL` — batching DoS, brute-force, JWT extraction.

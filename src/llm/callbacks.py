@@ -41,6 +41,7 @@ to grep the log file mid-run.
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
 import logging
 import re
@@ -128,6 +129,16 @@ class _AgentTokenTotals:
 _TOTALS_LOCK = threading.Lock()
 TOKEN_TOTALS: dict[str, _AgentTokenTotals] = {}
 
+# Same running totals, but keyed by graph *node* (``planner``, ``recon``,
+# ``executor``, ``summarizer``, ``web_search``, …) instead of by agent.
+# A node's turn often spans several agents (the summarizer runs one
+# ``*__summary`` call per worker plus a ``__consolidate``); the live
+# renderer reads this to print a ``▸ node`` rollup that reflects *that
+# node's* cost rather than a sum across every agent in the run. Without
+# it the no-``active``-marker rollup lines (summarizer, web_search) used
+# to fall back to summing all agents and printed run-to-date totals.
+NODE_TOTALS: dict[str, _AgentTokenTotals] = {}
+
 
 def get_running_total(agent_id: str) -> _AgentTokenTotals:
     """Return (a copy of) the running totals for ``agent_id``.
@@ -159,6 +170,7 @@ def reset_totals() -> None:
     """
     with _TOTALS_LOCK:
         TOKEN_TOTALS.clear()
+        NODE_TOTALS.clear()
 
 
 # ── Disk path resolution ────────────────────────────────────────────────
@@ -311,6 +323,66 @@ def _serialize_tools_for_request_log(serialized: dict | None) -> list[dict]:
     return out
 
 
+def _short_hash(value: Any) -> str:
+    if isinstance(value, str):
+        raw = value
+    else:
+        raw = json.dumps(value, default=str, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _serialized_kwargs(serialized: dict | None) -> dict:
+    if not isinstance(serialized, dict):
+        return {}
+    kwargs = serialized.get("kwargs")
+    return kwargs if isinstance(kwargs, dict) else {}
+
+
+def _build_callback_cache_shape(
+    *,
+    serialized: dict | None,
+    serialized_msgs: list[dict],
+    system_prompt: str,
+    tools: list[dict],
+) -> dict[str, Any]:
+    """Compact request-shape fingerprint for prompt-cache diagnostics.
+
+    The full prompt and full tools are already logged next to this block.
+    This object gives quick comparable fields for grep/jq without reading
+    megabytes of prompt content.
+    """
+    kwargs = _serialized_kwargs(serialized)
+    message_roles: dict[str, int] = {}
+    for msg in serialized_msgs:
+        role = str(msg.get("role") or "?")
+        message_roles[role] = message_roles.get(role, 0) + 1
+    message_chars = sum(int(m.get("chars") or 0) for m in serialized_msgs)
+    return {
+        "serialized_id": (
+            serialized.get("id") if isinstance(serialized, dict) else None
+        ),
+        "serialized_name": (
+            serialized.get("name") if isinstance(serialized, dict) else None
+        ),
+        "bound_kwargs": sorted(kwargs.keys()),
+        "model": kwargs.get("model") or kwargs.get("model_name"),
+        "tool_choice": kwargs.get("tool_choice"),
+        "reasoning_effort": kwargs.get("reasoning_effort"),
+        "reasoning_summary": kwargs.get("reasoning_summary"),
+        "prompt_cache_key": kwargs.get("prompt_cache_key"),
+        "prompt_cache_retention": kwargs.get("prompt_cache_retention"),
+        "message_count": len(serialized_msgs),
+        "message_roles": message_roles,
+        "message_chars": message_chars,
+        "message_sha256": _short_hash(serialized_msgs),
+        "system_chars": len(system_prompt or ""),
+        "system_sha256": _short_hash(system_prompt or ""),
+        "tools_count": len(tools),
+        "tool_names": [str(t.get("name") or "?") for t in tools[:80]],
+        "tools_sha256": _short_hash(tools),
+    }
+
+
 def _build_request_event(
     *,
     lc_run_id: UUID,
@@ -369,6 +441,7 @@ def _build_request_event(
             char_breakdown.setdefault("other", 0)
             char_breakdown["other"] += chars
     total_chars = sum(char_breakdown.values())
+    tools = _serialize_tools_for_request_log(serialized)
 
     return {
         "ts":         time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -383,10 +456,16 @@ def _build_request_event(
         "request": {
             "system_prompt":  system_prompt,
             "messages":       serialized_msgs,
-            "tools":          _serialize_tools_for_request_log(serialized),
+            "tools":          tools,
             "n_messages":     len(serialized_msgs),
             "total_chars":    total_chars,
             "char_breakdown": char_breakdown,
+            "cache_shape":    _build_callback_cache_shape(
+                serialized=serialized,
+                serialized_msgs=serialized_msgs,
+                system_prompt=system_prompt,
+                tools=tools,
+            ),
             # Char/4 is the standard cheap pre-tokenizer heuristic.
             # Real input_tokens lands later in llm_calls.jsonl from
             # the provider's usage_metadata; the join key
@@ -585,6 +664,7 @@ class TokenLoggingCallback(AsyncCallbackHandler):
             output_tokens=usage["output_tokens"],
             reasoning_tokens=usage["reasoning_tokens"],
             cached_tokens=usage.get("cached_tokens", 0),
+            node=node or None,
         )
 
         # Tell the renderer to close the streaming line / cancel the
@@ -902,9 +982,9 @@ class TokenLoggingCallback(AsyncCallbackHandler):
         output_tokens: int,
         reasoning_tokens: int,
         cached_tokens: int = 0,
+        node: str | None = None,
     ) -> _AgentTokenTotals:
-        with _TOTALS_LOCK:
-            t = TOKEN_TOTALS.setdefault(agent_id, _AgentTokenTotals())
+        def _add(t: _AgentTokenTotals) -> None:
             t.calls += 1
             t.input_tokens += input_tokens
             t.output_tokens += output_tokens
@@ -912,6 +992,15 @@ class TokenLoggingCallback(AsyncCallbackHandler):
             t.cached_tokens += cached_tokens
             if input_tokens > t.peak_input:
                 t.peak_input = input_tokens
+
+        with _TOTALS_LOCK:
+            t = TOKEN_TOTALS.setdefault(agent_id, _AgentTokenTotals())
+            _add(t)
+            # Mirror the same call into the per-node rollup so the live
+            # renderer can attribute a ``▸ node`` line to that node's own
+            # turn instead of summing every agent in the run.
+            if node:
+                _add(NODE_TOTALS.setdefault(node, _AgentTokenTotals()))
             return _AgentTokenTotals(
                 calls=t.calls,
                 input_tokens=t.input_tokens,

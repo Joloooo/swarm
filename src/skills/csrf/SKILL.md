@@ -1,7 +1,34 @@
 ---
 name: csrf
 description: >-
-  Use csrf when recon shows an authenticated web application that relies on ambient browser credentials and exposes state-changing actions a malicious off-site page might trigger without the user's intent. The clearest routing signal is cookie-based sessions: a Set-Cookie for the auth/session cookie whose SameSite attribute is None or absent, rather than a bearer token carried in an Authorization header that JavaScript must attach by hand. Pair that with any state-changing endpoint or form — POST/PUT/PATCH/DELETE, or a GET that mutates state such as account-delete, logout, transfer, or key-generation links — especially the high-value account-security and money-movement flows (email/password change, MFA toggle, API-key or PAT creation, payment, OAuth connect/disconnect, account deletion, admin actions). Also dispatch when recon reveals login/logout endpoints with no token field, a GraphQL endpoint, a WebSocket handshake behind cookie auth, honored method-override fields like _method, or a JSON API on a cookie session where a simple content-type could skip the CORS preflight. Technique coverage includes anti-CSRF token bypass (missing, predictable, replay-able, scope-confused) and SameSite cookie analysis across Strict, Lax, None, and missing states. Disambiguate from look-alikes sharing this surface: if a same-origin script injects and fires requests carrying the real token, that is XSS, not CSRF; if the missing control is X-Frame-Options/frame-ancestors and the action needs the victim to click, that is clickjacking; if the goal is reading cross-origin authenticated data through a reflected Origin with Allow-Credentials, that is a CORS misconfiguration; if the server itself fetches a user-chosen URL, that is SSRF. CSRF is specifically the cross-origin, ambient-credential, no-valid-token write.
+  Use: Use csrf when recon shows an authenticated web application that relies on ambient browser
+  credentials and exposes state-changing actions a malicious off-site page might trigger without the
+  user's intent.
+  Signals: The clearest routing signal is cookie-based sessions: a Set-Cookie for the auth/session
+  cookie whose SameSite attribute is None or absent; SameSite=Lax is still relevant for mutating GET
+  or top-level-navigation flows, unlike a bearer token carried in an Authorization header that
+  JavaScript must attach by hand. Pair that with any state-changing endpoint or form —
+  POST/PUT/PATCH/DELETE, or a GET that mutates state such as account-delete, logout, transfer, or
+  key-generation links — especially the high-value account-security and money-movement flows
+  (email/password change, MFA toggle, API-key or PAT creation, payment, OAuth connect/disconnect,
+  account deletion, admin actions). Also dispatch when recon reveals login/logout endpoints with no
+  token field, a GraphQL mutation endpoint or WebSocket action behind cookie auth that changes
+  state, honored method-override fields like _method, or a JSON API on a cookie session where a
+  simple content-type could skip the CORS preflight. Technique coverage includes anti-CSRF token
+  bypass (missing, predictable, replay-able, scope-confused) and SameSite cookie analysis across
+  Strict, Lax, None, and missing states. Disambiguate from look-alikes sharing this surface: if a
+  same-origin script injects and fires requests carrying the real token, that is XSS, not CSRF; if
+  the missing control is X-Frame-Options/frame-ancestors and the action needs the victim to click,
+  that is clickjacking; if the goal is reading cross-origin authenticated data through a reflected
+  Origin with Allow-Credentials, that is a CORS misconfiguration; if the server itself fetches a
+  user-chosen URL, that is SSRF. CSRF is specifically the cross-origin, ambient-credential,
+  no-valid-token write.
+  Pair with: Also dispatch auth-testing, session-mgmt, business-logic in parallel when the same
+  evidence shows those mechanisms too; co-dispatch means separate focused workers sharing the same
+  investigation state, not merging skill prompts.
+  Do not use: Do not dispatch when the described input surface is absent, when the value is only
+  stored or echoed without reaching this skill's mechanism, or when another specialist's sink
+  explains the evidence more directly.
 metadata:
   dispatchable: true
 ---
@@ -143,17 +170,50 @@ toggles.
   incorrectly accept null.
 - `about:blank` / `data:` URLs alter `Referer`.
 - The server must require explicit `Origin` / `Referer` match.
+- **Referer check conditioned on presence** — server only validates when a
+  `Referer` exists. Suppress it entirely (`<meta name="referrer"
+  content="never">` or navigate from a `data:`/`about:blank` origin) so the
+  check is skipped.
+- **Broken Referer substring/regex check** — server only looks for the
+  trusted host *somewhere* in the value. Use a lookalike host or carry the
+  trusted domain in your own URL's query (`content="unsafe-url"` keeps the
+  query in the Referer). See the Referer tricks in `references/poc-payloads.md`.
 
 ### Method override
 - Backends honoring `_method` or `X-HTTP-Method-Override` may allow
   destructive actions through a simple POST.
 
-### Token weaknesses
-- Accepting missing / empty tokens.
-- Tokens not tied to session, user, or path.
-- Tokens reused indefinitely; tokens passed in GET.
-- Double-submit cookie without `Secure` / `HttpOnly`, or with
-  predictable token sources.
+### Token-bypass ladder
+
+Run these conditions in order — each is a distinct, real bypass class
+(maps to the standard PortSwigger CSRF labs). Stop at the first that the
+server accepts; one accepted condition is a finding.
+
+1. **No token at all** — endpoint never validates a token. Submit with no
+   token field.
+2. **Validation conditioned on method** — token checked on POST but not on
+   GET (or PUT/PATCH). Downgrade the verb; resend the same params.
+3. **Validation conditioned on presence** — token only checked when the
+   field exists. **Delete the field entirely** (different from sending an
+   empty value — try both).
+4. **Token not tied to the session** — a token minted for any account is
+   accepted for the victim. Mint a token in your own session, replay it in
+   the victim's request.
+5. **Token tied to a non-session cookie** — token bound to a separate
+   cookie you can plant (not the session cookie). Set that cookie
+   cross-site (CRLF / header-injection / a sibling-domain Set-Cookie), then
+   submit the matching token value.
+6. **Double-submit cookie** — server only checks token-field == token-cookie
+   and never binds either to the session. Set both to the same arbitrary
+   value (cookie plant + matching body field). Especially weak when the
+   cookie lacks `HttpOnly`/`Secure` or the source is predictable.
+7. **Stale / reusable token** — one token works indefinitely or across
+   requests; capture once, replay later.
+8. **Token in the URL / GET** — token leaks via Referer or logs; reuse it.
+
+See `references/poc-payloads.md` for ready PoCs of each (empty token, CRLF
+cookie plant, cross-session replay, double-submit) and the curl probe
+matrix to test the whole ladder quickly.
 
 ### Content-type switching
 - Switch between form, multipart, and `text/plain` to reach different
@@ -165,6 +225,44 @@ toggles.
 - Test null `Origin` acceptance.
 - Leverage misconfigured CORS to add custom headers that servers
   mistakenly treat as CSRF tokens.
+
+## Clickjacking (UI redress) — the one-click sibling
+
+When a sensitive action sits behind a button protected by a valid CSRF
+token, token-less CSRF fails — but framing the real page does not.
+The framed page carries the user's session AND the real token, so one
+tricked click submits a fully-valid request. Cover this here because the
+routing signal (missing frame controls + a click-gated state change)
+overlaps CSRF.
+
+**Detection oracle** — test the exact action URL, not just the home page:
+```bash
+curl -sI -b "session=$C" "https://victim.example/account/delete" \
+  | grep -iE 'x-frame-options|content-security-policy'
+```
+Framable when BOTH are missing, when `X-Frame-Options` has an unrecognised
+value (browsers ignore it), when CSP exists but has **no** `frame-ancestors`
+directive, when `frame-ancestors` is broad (`*`, `https:`) or lists an
+origin you control, or when the header is present on `/` but absent on the
+deep action route. `nuclei -t http/misconfiguration/ -u <url>` flags
+missing XFO quickly; always confirm with a real frame.
+
+**Techniques** (details + PoCs in `references/clickjacking-poc.md`):
+- **UI redressing** — transparent victim iframe (`opacity:0`, high
+  `z-index`) stacked over a decoy; align the real control under the decoy.
+- **Invisible frame** — zero-size iframe; only the decoy shows.
+- **Button / form hijack** — visible decoy submits a hidden cross-origin
+  form (plain token-less CSRF dressed as a click).
+- **Multi-click / drag** — stack decoys and reposition the frame between
+  clicks for two-step confirm flows.
+- **Frame-buster evasion** — `sandbox` without `allow-top-navigation`,
+  or an `onbeforeunload` + 204-response loop, defeats JS `top.location`
+  busters. A real `X-Frame-Options: DENY/SAMEORIGIN` or
+  `frame-ancestors 'self'` is a hard stop — report the control as present.
+
+A clickjacking finding requires: the action page frames, a single decoy
+click reaches a state-changing control, and before/after state proves it
+fired.
 
 ## Special contexts
 
@@ -181,8 +279,9 @@ toggles.
 ## Chaining
 - CSRF + IDOR — force actions on other users' resources once
   references are known.
-- CSRF + Clickjacking — guide user interactions to bypass UI
-  confirmations.
+- CSRF + Clickjacking — when the action needs a valid token, frame the
+  real (token-bearing) page and trick one click instead. See the
+  Clickjacking section and `references/clickjacking-poc.md`.
 - CSRF + OAuth mix-up — bind victim sessions to unintended clients.
 
 ## Workflow
@@ -223,7 +322,19 @@ A finding is real only when:
 
 ## Tools to use
 - `bash` — `curl` for crafting cross-origin POSTs, swapping
-  `Origin` / `Referer` headers, varying Content-Type, replaying tokens.
+  `Origin` / `Referer` headers, varying Content-Type, replaying tokens,
+  and reading response headers (`curl -sI`) to check
+  `X-Frame-Options` / CSP `frame-ancestors` on the exact action route.
+- `nuclei` — quick sweep for missing frame controls
+  (`-t http/misconfiguration/`); always confirm a hit with a real frame.
+
+## References
+- `references/poc-payloads.md` — copy-paste CSRF PoCs (auto-submit forms,
+  JSON via text/plain, multipart, method override, token theft, CRLF cookie
+  plant, login CSRF) plus the curl probe matrix for the token-bypass ladder.
+- `references/clickjacking-poc.md` — framing PoCs (UI redress, invisible
+  frame, button hijack) and JS frame-buster evasion, for when a token-gated
+  action needs one tricked click.
 
 ## Rules
 - Always test BOTH the cookie and the token mechanism. Many apps check

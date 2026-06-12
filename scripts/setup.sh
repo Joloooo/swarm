@@ -2,23 +2,24 @@
 # SwarmAttacker setup script.
 #
 # Installs the external pentesting tools that SwarmAttacker's agents call.
+# ALL are required: SwarmAttacker guarantees its performance only when the
+# full toolset is present, so any tool that fails to install aborts setup.
 #
-# Required (setup fails if these can't be installed):
-#   - tmux      (used for agent session isolation)
-#   - nmap      (port scanning, service detection)
-#   - gobuster  (directory/endpoint brute-forcing)
-#   - sqlmap    (SQL injection testing)
-#   - nikto     (web-server vulnerability sweep)
-#   - curl      (HTTP requests — usually pre-installed)
-#
-# Recommended (best-effort — the agent runs without them but loses
-# capability; each needs a non-uniform installer, hence the separate path):
+#   - tmux         (agent session isolation)
+#   - nmap         (port scanning, service detection)
+#   - gobuster     (directory/endpoint brute-forcing)
+#   - sqlmap       (SQL injection testing)
+#   - nikto        (web-server vulnerability sweep)
+#   - curl         (HTTP requests — usually pre-installed)
 #   - php          (build/run PHP exploit payloads, e.g. PHAR deserialization)
 #   - nuclei       (template-based CVE / known-vuln scanner)
 #   - ffuf         (fast content & parameter fuzzing)
 #   - feroxbuster  (recursive content discovery)
 #   - wpscan       (WordPress plugin/theme enumeration + version->CVE; Ruby gem)
 #   - wafw00f      (WAF / input-filter fingerprinting; Python package)
+#
+# Tools install via the right method per OS (package manager / gem / pip / Go),
+# routed by install_tool().
 #
 # Plus the Playwright Chromium browser binary (~150 MB, used by
 # src/tools/crawler.py when raw HTTP fails). The Playwright Python
@@ -62,24 +63,19 @@ error()   { printf "%s[✗]%s %s\n" "$RED" "$RESET" "$1"; }
 # and to look up their executables under .venv/bin.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Required tools. Format: "command_name:description". These install with the
-# command name == package name on every supported package manager, so they go
-# through the uniform bulk-install path. Missing one aborts setup.
+# Every tool SwarmAttacker's agents call. ALL are required — SwarmAttacker
+# guarantees its performance only when the full toolset is present, so a tool
+# that fails to install aborts setup rather than silently degrading the agent.
+# Format: "command_name:description". install_tool() routes each to the right
+# installer (package manager / Ruby gem / pip / Go), so the list can mix tools
+# whose install method or package name differs from the command name.
 REQUIRED_TOOLS=(
-    "tmux:agent session isolation (CRITICAL)"
+    "tmux:agent session isolation"
     "nmap:port scanning and service detection"
     "gobuster:directory and endpoint brute-forcing"
     "sqlmap:SQL injection testing"
     "nikto:web-server vulnerability sweep"
     "curl:HTTP requests"
-)
-
-# Recommended tools — higher capability, but the agent degrades gracefully
-# without them, so install is BEST-EFFORT (a failure never aborts setup).
-# They live here, not in REQUIRED_TOOLS, because each needs a non-uniform
-# installer (Ruby gem / pip / Go) or a package name that differs from the
-# command, which the bulk path cannot express.
-RECOMMENDED_TOOLS=(
     "php:build/run PHP exploit payloads (e.g. PHAR for deserialization)"
     "nuclei:template-based CVE / known-vuln scanner"
     "ffuf:fast content & parameter fuzzing"
@@ -130,10 +126,10 @@ check_tools() {
     for entry in "${REQUIRED_TOOLS[@]}"; do
         local tool="${entry%%:*}"
         local desc="${entry#*:}"
-        if command -v "$tool" >/dev/null 2>&1; then
-            success "$(printf "%-10s %s" "$tool" "$desc")"
+        if tool_present "$tool"; then
+            success "$(printf "%-12s %s" "$tool" "$desc")"
         else
-            error "$(printf "%-10s %s" "$tool" "$desc  [MISSING]")"
+            error "$(printf "%-12s %s" "$tool" "$desc  [MISSING]")"
             missing+=("$tool")
         fi
     done
@@ -145,39 +141,16 @@ check_tools() {
     done
 }
 
-# --- Package manager installers ---
+# --- Package-name remap + per-tool installers ---
 
-install_macos() {
-    local tools=("$@")
-    if ! command -v brew >/dev/null 2>&1; then
-        error "Homebrew is not installed."
-        warn "Install it from https://brew.sh, then re-run this script."
-        exit 1
-    fi
-    info "Installing via Homebrew: ${tools[*]}"
-    brew install "${tools[@]}"
+# Echo the package name for a command under the given package manager,
+# defaulting to the command name when they match.
+pkg_name() {
+    case "$2:$1" in
+        linux-apt:php|linux-dnf:php) echo "php-cli" ;;
+        *) echo "$1" ;;
+    esac
 }
-
-install_apt() {
-    local tools=("$@")
-    info "Installing via apt: ${tools[*]}"
-    sudo apt-get update
-    sudo apt-get install -y "${tools[@]}"
-}
-
-install_dnf() {
-    local tools=("$@")
-    info "Installing via dnf: ${tools[*]}"
-    sudo dnf install -y "${tools[@]}"
-}
-
-install_pacman() {
-    local tools=("$@")
-    info "Installing via pacman: ${tools[*]}"
-    sudo pacman -S --needed --noconfirm "${tools[@]}"
-}
-
-# --- Recommended-tool presence + per-tool installers ---
 
 # Is a tool available? Most resolve on PATH; wafw00f is a Python package that
 # lives in the project venv (not on the global PATH), so check there too.
@@ -248,8 +221,10 @@ install_wpscan() {
     fi
 }
 
-# Dispatch one recommended tool to its correct installer for this OS.
-install_recommended_tool() {
+# Dispatch one tool to its correct installer for this OS. Special tools
+# (Ruby gem / pip / Go) get their own installer; everything else flows through
+# the OS package manager with a package-name remap.
+install_tool() {
     local tool="$1" os="$2"
     case "$tool" in
         wpscan)  install_wpscan "$os" ;;
@@ -257,42 +232,17 @@ install_recommended_tool() {
         nuclei|ffuf|feroxbuster)
             if [ "$os" = "macos" ]; then brew install "$tool"; else install_go_tool "$tool"; fi
             ;;
-        php)
+        *)
+            local pkg; pkg="$(pkg_name "$tool" "$os")"
             case "$os" in
-                macos)        brew install php ;;
-                linux-apt)    sudo apt-get install -y php-cli ;;
-                linux-dnf)    sudo dnf install -y php-cli ;;
-                linux-pacman) sudo pacman -S --needed --noconfirm php ;;
+                macos)        brew install "$pkg" ;;
+                linux-apt)    sudo apt-get install -y "$pkg" ;;
+                linux-dnf)    sudo dnf install -y "$pkg" ;;
+                linux-pacman) sudo pacman -S --needed --noconfirm "$pkg" ;;
                 *) return 1 ;;
             esac
             ;;
-        *) return 1 ;;
     esac
-}
-
-# Install the RECOMMENDED_TOOLS set. Best-effort: warns on any failure but
-# never aborts setup (these are capability boosters, not hard requirements).
-install_recommended_tools() {
-    local os="$1" check_only="$2"
-    printf "\n%sChecking recommended tools (best-effort):%s\n" "$BOLD" "$RESET"
-    local entry tool desc
-    for entry in "${RECOMMENDED_TOOLS[@]}"; do
-        tool="${entry%%:*}"; desc="${entry#*:}"
-        if tool_present "$tool"; then
-            success "$(printf "%-12s %s" "$tool" "$desc")"
-            continue
-        fi
-        if [ "$check_only" = "true" ]; then
-            warn "$(printf "%-12s %s" "$tool" "$desc  [MISSING]")"
-            continue
-        fi
-        info "Installing $tool ($desc)..."
-        if install_recommended_tool "$tool" "$os" && tool_present "$tool"; then
-            success "$tool installed"
-        else
-            warn "$tool could not be auto-installed — the agent will run without it."
-        fi
-    done
 }
 
 # --- Playwright Chromium ---
@@ -375,27 +325,32 @@ main() {
     if [[ ${#missing[@]} -gt 0 ]]; then
         if $check_only; then
             printf "\n"
-            warn "Missing CLI tools: ${missing[*]}"
+            warn "Missing tools: ${missing[*]}"
             warn "Re-run without --check to install."
         else
+            # Fail early with a helpful message if no usable package manager.
+            if [[ "$os" == "macos" ]] && ! command -v brew >/dev/null 2>&1; then
+                error "Homebrew is not installed."
+                warn "Install it from https://brew.sh, then re-run this script."
+                exit 1
+            fi
+            if [[ "$os" == "unknown" || "$os" == "linux-unknown" ]]; then
+                error "Unsupported OS or package manager. Install these manually: ${missing[*]}"
+                exit 1
+            fi
+
             printf "\n"
-            info "Missing CLI tools: ${missing[*]}"
-            case "$os" in
-                macos)         install_macos "${missing[@]}" ;;
-                linux-apt)     install_apt "${missing[@]}" ;;
-                linux-dnf)     install_dnf "${missing[@]}" ;;
-                linux-pacman)  install_pacman "${missing[@]}" ;;
-                *)
-                    error "Unsupported OS or package manager. Install these manually: ${missing[*]}"
-                    exit 1
-                    ;;
-            esac
+            info "Installing missing tools: ${missing[*]}"
+            for tool in "${missing[@]}"; do
+                info "Installing $tool ..."
+                install_tool "$tool" "$os" || warn "$tool: installer reported an error"
+            done
 
             printf "\n"
             info "Verifying installation..."
             local failed=()
             for tool in "${missing[@]}"; do
-                if command -v "$tool" >/dev/null 2>&1; then
+                if tool_present "$tool"; then
                     success "$tool installed"
                 else
                     error "$tool still missing after install"
@@ -405,14 +360,12 @@ main() {
 
             if [[ ${#failed[@]} -gt 0 ]]; then
                 printf "\n"
-                error "Some tools failed to install: ${failed[*]}"
+                error "Required tools failed to install: ${failed[*]}"
+                error "SwarmAttacker needs the full toolset to perform — resolve these and re-run."
                 exit 1
             fi
         fi
     fi
-
-    # ---- Recommended tools (best-effort) ----
-    install_recommended_tools "$os" "$check_only"
 
     # ---- Playwright Chromium ----
     printf "\n%sChecking Playwright browser:%s\n" "$BOLD" "$RESET"

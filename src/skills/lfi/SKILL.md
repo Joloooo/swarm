@@ -1,7 +1,35 @@
 ---
 name: lfi
 description: >-
-  Use lfi when recon shows a parameter whose value names a file, path, template, or page fragment — names like file, path, page, view, include, template, theme, skin, lang, locale, doc, report, download, export, dir, or log, especially when the value already looks like a filename or carries an extension such as .php, .html, .tpl, .inc, .log, or .pdf, since these suggest the app joins user input into a filesystem path and loads it. Also dispatch when the page is a content router that swaps a body fragment based on a parameter value, when a download, preview, thumbnail, report, or attachment endpoint takes the resource name in the URL, when a document or media conversion pipeline accepts a source path, when nginx, Apache, or a CDN fronts the app behind a static prefix like /static/, /assets/, or /files/ (alias and path-segment normalization escapes), or when an upload-then-extract, import, restore, or backup feature unpacks a user-supplied zip or tar (Zip Slip). Dispatch too when the stated objective is reading a server-side file the UI hides, such as configuration, source, environment, or credential files, on a host of unknown OS. Covers traversal and encoding-bypass tests (%2e%2e%2f, double-encoding, mixed UTF-8, null bytes), Linux and Windows paths, and LFI-to-RCE escalation via log poisoning, PHP wrappers (php://filter, zip://, data://, expect://), or /proc/self/environ. Disambiguate from look-alikes: a value reflected into HTML or markup with no file load is XSS; a value rendered as an expression by a template engine is SSTI (a user-controlled template name is LFI, a user-controlled template body is SSTI); a parameter holding an http or host value that triggers an outbound server-side fetch is SSRF unless that fetched content is then included or executed (RFI); and a numeric or opaque ID that maps to a stored object rather than a path is IDOR, not traversal.
+  Use: Use lfi when recon shows a parameter whose value names a file, path, template, or page
+  fragment — names like file, path, page, view, include, template, theme, skin, lang, locale, doc,
+  report, download, export, dir, or log, especially when the value already looks like a filename or
+  carries an extension such as .php, .html, .tpl, .inc, .log, or .pdf, since these suggest the app
+  joins user input into a filesystem path and loads it.
+  Signals: Also dispatch when the page is a content router that swaps a body fragment based on a
+  parameter value, when a download, preview, thumbnail, report, or attachment endpoint takes the
+  resource name in the URL, when a document or media conversion pipeline accepts a source path, when
+  nginx, Apache, or a CDN fronts the app behind a static prefix like /static/, /assets/, or /files/
+  (alias and path-segment normalization escapes), or when an upload-then-extract, import, restore,
+  or backup feature unpacks a user-supplied zip or tar and the result is later read, included,
+  exposed, or normalized through a server-side path (otherwise start Zip Slip/archive cases in
+  insecure-file-uploads). Dispatch too when the stated objective is reading a server-side file the
+  UI hides, such as configuration, source, environment, or credential files, on a host of unknown
+  OS.
+  Pair with: Also dispatch information-disclosure, rce, insecure-file-uploads, ssti in parallel when
+  the same evidence shows those mechanisms too; co-dispatch means separate focused workers sharing
+  the same investigation state, not merging skill prompts.
+  Coverage: Covers traversal and encoding-bypass tests (%2e%2e%2f, double-encoding, mixed UTF-8,
+  null bytes), Linux and Windows paths, and LFI-to-RCE escalation via log poisoning, PHP wrappers
+  (php://filter, zip://, data://, expect://), or /proc/self/environ.
+  Do not use: Disambiguate from look-alikes: a value reflected into HTML or markup with no file load
+  is XSS; a value rendered as an expression by a template engine is SSTI (a user-controlled template
+  name is LFI, a user-controlled template body is SSTI); a parameter holding an http or host value
+  that triggers an outbound server-side fetch is SSRF unless that fetched content is then included
+  or executed (RFI); and a numeric or opaque ID that maps to a stored object rather than a path is
+  IDOR, not traversal. Do not dispatch when the described input surface is absent, when the value is
+  only stored or echoed without reaching this skill's mechanism, or when another specialist's sink
+  explains the evidence more directly.
 metadata:
   dispatchable: true
 ---
@@ -49,6 +77,10 @@ normalize and bind to an allowlist, or eliminate user control entirely.
   decoding (nginx alias / root, upstream decoders); OS-specific paths
   (Windows separators, device names, UNC, NT paths, alternate data
   streams).
+- **Client-Side Path Traversal (CSPT)** — front-end JS builds a `fetch`
+  URL by joining user input into the *path* (not the host); `../` in that
+  input retargets the in-origin request to a different endpoint, turning it
+  into a CSRF/XSS primitive. See `references/client-side-path-traversal.md`.
 
 **Where these surfaces live in modern apps:**
 - HTTP params named `file`, `path`, `template`, `include`, `page`, `view`,
@@ -158,6 +190,27 @@ upload or log poisoning when remote includes are disabled.
 - Verify symlink handling and path canonicalization before write.
 - Impact: overwrite config/templates, drop webshells into served
   directories.
+
+### Client-Side Path Traversal (CSPT)
+A server-side traversal reads files; CSPT instead bends a request the
+*browser* makes. The front end takes a user-controlled value and joins it
+into the **path** of a same-origin `fetch`/XHR (e.g. `fetch('/api/news/' +
+id)`). Inject `../` into that value to walk the path to another endpoint;
+because the request stays same-origin, the browser auto-attaches cookies
+and any CSRF token the front end adds, so it defeats SameSite and
+anti-CSRF defenses.
+- **CSPT→CSRF** — retarget the in-origin call to a state-changing GET/PUT/
+  DELETE/PATCH sink. Body is not controllable, so look for sinks that act
+  off path + method alone (cache invalidate, cancel, toggle).
+  Example: `?email=foo%40bar.com&inviteCode=123456789/../../../cards/<id>/cancel?a=`.
+- **CSPT→XSS** — walk the fetched URL onto an endpoint whose response is
+  reflected unsafely (e.g. a `.js` with a text-injection param), so the
+  retargeted body executes. Example:
+  `?newsitemid=../pricing/default.js?cb=alert(document.domain)//`.
+- **Find it**: read the JS, find where input concatenates into a fetch
+  path without encoding (`encodeURIComponent` missing); confirm `../`
+  survives the browser's URL normalization and lands on a new path.
+  See `references/client-side-path-traversal.md`.
 
 ## Workflow
 

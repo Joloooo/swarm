@@ -84,6 +84,8 @@ servers, reporting/exporters.
 - **REST API filter objects** — `{"filter": {"name": {"$regex": "admin' OR 1=1--"}}, "sort": "name'; DROP TABLE users--"}`.
 - **NoSQL operator injection** — Mongo: `username[$ne]=admin&password[$ne]=`,
   `username[$regex]=^adm`, `{"$where": "sleep(5000)"}`, `{"username": {"$in": ["admin"]}}`.
+  For the full Mongo/NoSQL operator set, auth bypass, and `$regex` blind extraction,
+  see `references/nosql-payloads.md`.
 - **Cypher / Neo4j** (CVE-2024-34517): `MATCH (u:User) WHERE u.name = 'admin' OR 1=1 //--' RETURN u`.
   Neo4j 5.x <5.18 / <4.4.26 also allowed privilege escalation via IMMUTABLE procedures.
 - **XPATH** — input concatenated into an XPath query over an XML user store. Probe `' or '1'='1`,

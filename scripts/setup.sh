@@ -1,13 +1,24 @@
 #!/usr/bin/env bash
 # SwarmAttacker setup script.
 #
-# Installs the external pentesting tools that SwarmAttacker's agents call:
-#   - tmux      (required — used for agent session isolation)
+# Installs the external pentesting tools that SwarmAttacker's agents call.
+#
+# Required (setup fails if these can't be installed):
+#   - tmux      (used for agent session isolation)
 #   - nmap      (port scanning, service detection)
 #   - gobuster  (directory/endpoint brute-forcing)
 #   - sqlmap    (SQL injection testing)
 #   - nikto     (web-server vulnerability sweep)
 #   - curl      (HTTP requests — usually pre-installed)
+#
+# Recommended (best-effort — the agent runs without them but loses
+# capability; each needs a non-uniform installer, hence the separate path):
+#   - php          (build/run PHP exploit payloads, e.g. PHAR deserialization)
+#   - nuclei       (template-based CVE / known-vuln scanner)
+#   - ffuf         (fast content & parameter fuzzing)
+#   - feroxbuster  (recursive content discovery)
+#   - wpscan       (WordPress plugin/theme enumeration + version->CVE; Ruby gem)
+#   - wafw00f      (WAF / input-filter fingerprinting; Python package)
 #
 # Plus the Playwright Chromium browser binary (~150 MB, used by
 # src/tools/crawler.py when raw HTTP fails). The Playwright Python
@@ -47,7 +58,13 @@ success() { printf "%s[✓]%s %s\n" "$GREEN" "$RESET" "$1"; }
 warn()    { printf "%s[!]%s %s\n" "$YELLOW" "$RESET" "$1"; }
 error()   { printf "%s[✗]%s %s\n" "$RED" "$RESET" "$1"; }
 
-# Tools SwarmAttacker needs. Format: "command_name:description"
+# Repo root — used to install Python-package tools into the project venv
+# and to look up their executables under .venv/bin.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Required tools. Format: "command_name:description". These install with the
+# command name == package name on every supported package manager, so they go
+# through the uniform bulk-install path. Missing one aborts setup.
 REQUIRED_TOOLS=(
     "tmux:agent session isolation (CRITICAL)"
     "nmap:port scanning and service detection"
@@ -55,6 +72,20 @@ REQUIRED_TOOLS=(
     "sqlmap:SQL injection testing"
     "nikto:web-server vulnerability sweep"
     "curl:HTTP requests"
+)
+
+# Recommended tools — higher capability, but the agent degrades gracefully
+# without them, so install is BEST-EFFORT (a failure never aborts setup).
+# They live here, not in REQUIRED_TOOLS, because each needs a non-uniform
+# installer (Ruby gem / pip / Go) or a package name that differs from the
+# command, which the bulk path cannot express.
+RECOMMENDED_TOOLS=(
+    "php:build/run PHP exploit payloads (e.g. PHAR for deserialization)"
+    "nuclei:template-based CVE / known-vuln scanner"
+    "ffuf:fast content & parameter fuzzing"
+    "feroxbuster:recursive content discovery"
+    "wpscan:WordPress plugin/theme enumeration + version->CVE"
+    "wafw00f:WAF / input-filter fingerprinting"
 )
 
 # SecLists clone target — user-home cache, not in the repo. Mirrors how
@@ -144,6 +175,124 @@ install_pacman() {
     local tools=("$@")
     info "Installing via pacman: ${tools[*]}"
     sudo pacman -S --needed --noconfirm "${tools[@]}"
+}
+
+# --- Recommended-tool presence + per-tool installers ---
+
+# Is a tool available? Most resolve on PATH; wafw00f is a Python package that
+# lives in the project venv (not on the global PATH), so check there too.
+tool_present() {
+    local tool="$1"
+    case "$tool" in
+        wafw00f)
+            command -v wafw00f >/dev/null 2>&1 || [ -x "$REPO_ROOT/.venv/bin/wafw00f" ]
+            ;;
+        *)
+            command -v "$tool" >/dev/null 2>&1
+            ;;
+    esac
+}
+
+# wafw00f is a Python package — install it into the project venv via uv.
+install_wafw00f() {
+    ( cd "$REPO_ROOT" && uv pip install wafw00f )
+}
+
+# nuclei / ffuf are Go binaries and feroxbuster is Rust; Homebrew ships all
+# three, but apt/dnf/pacman usually don't. On Linux fall back to the language
+# toolchain (go install / cargo) and symlink the result onto PATH.
+install_go_tool() {
+    local tool="$1" src=""
+    case "$tool" in
+        nuclei) src="github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest" ;;
+        ffuf)   src="github.com/ffuf/ffuf/v2@latest" ;;
+        feroxbuster)
+            if command -v cargo >/dev/null 2>&1; then cargo install feroxbuster; return; fi
+            warn "feroxbuster: install manually (https://github.com/epi052/feroxbuster)"
+            return 1
+            ;;
+    esac
+    if command -v go >/dev/null 2>&1 && [ -n "$src" ]; then
+        go install "$src" || return 1
+        local gobin; gobin="$(go env GOBIN)"; [ -z "$gobin" ] && gobin="$(go env GOPATH)/bin"
+        [ -x "$gobin/$tool" ] && sudo ln -sf "$gobin/$tool" "/usr/local/bin/$tool" 2>/dev/null || true
+    else
+        warn "$tool: needs Go on this platform (or grab the release binary)"
+        return 1
+    fi
+}
+
+# wpscan is a Ruby gem (it was dropped from Homebrew and is not packaged in
+# apt). Current releases need Ruby >= 3, so on macOS use a Homebrew ruby
+# rather than the old system ruby. The gem's executable lands in the keg-only
+# brew-ruby exec dir, so symlink it onto PATH afterward.
+install_wpscan() {
+    local os="$1"
+    local gem_cmd="gem"
+    if [ "$os" = "macos" ]; then
+        command -v brew >/dev/null 2>&1 || { warn "wpscan needs Homebrew"; return 1; }
+        if [ ! -x "$(brew --prefix)/opt/ruby/bin/gem" ]; then
+            info "Installing Homebrew ruby (wpscan needs Ruby >= 3)..."
+            brew install ruby || return 1
+        fi
+        gem_cmd="$(brew --prefix)/opt/ruby/bin/gem"
+    fi
+    "$gem_cmd" install --no-document wpscan || return 1
+    if ! command -v wpscan >/dev/null 2>&1; then
+        local execdir
+        execdir="$("$gem_cmd" environment | awk -F': ' '/EXECUTABLE DIRECTORY/{print $NF}' | tr -d ' ')"
+        if [ -n "$execdir" ] && [ -x "$execdir/wpscan" ]; then
+            ln -sf "$execdir/wpscan" "$(brew --prefix 2>/dev/null || echo /usr/local)/bin/wpscan" 2>/dev/null \
+                || sudo ln -sf "$execdir/wpscan" "/usr/local/bin/wpscan" 2>/dev/null || true
+        fi
+    fi
+}
+
+# Dispatch one recommended tool to its correct installer for this OS.
+install_recommended_tool() {
+    local tool="$1" os="$2"
+    case "$tool" in
+        wpscan)  install_wpscan "$os" ;;
+        wafw00f) install_wafw00f ;;
+        nuclei|ffuf|feroxbuster)
+            if [ "$os" = "macos" ]; then brew install "$tool"; else install_go_tool "$tool"; fi
+            ;;
+        php)
+            case "$os" in
+                macos)        brew install php ;;
+                linux-apt)    sudo apt-get install -y php-cli ;;
+                linux-dnf)    sudo dnf install -y php-cli ;;
+                linux-pacman) sudo pacman -S --needed --noconfirm php ;;
+                *) return 1 ;;
+            esac
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Install the RECOMMENDED_TOOLS set. Best-effort: warns on any failure but
+# never aborts setup (these are capability boosters, not hard requirements).
+install_recommended_tools() {
+    local os="$1" check_only="$2"
+    printf "\n%sChecking recommended tools (best-effort):%s\n" "$BOLD" "$RESET"
+    local entry tool desc
+    for entry in "${RECOMMENDED_TOOLS[@]}"; do
+        tool="${entry%%:*}"; desc="${entry#*:}"
+        if tool_present "$tool"; then
+            success "$(printf "%-12s %s" "$tool" "$desc")"
+            continue
+        fi
+        if [ "$check_only" = "true" ]; then
+            warn "$(printf "%-12s %s" "$tool" "$desc  [MISSING]")"
+            continue
+        fi
+        info "Installing $tool ($desc)..."
+        if install_recommended_tool "$tool" "$os" && tool_present "$tool"; then
+            success "$tool installed"
+        else
+            warn "$tool could not be auto-installed — the agent will run without it."
+        fi
+    done
 }
 
 # --- Playwright Chromium ---
@@ -261,6 +410,9 @@ main() {
             fi
         fi
     fi
+
+    # ---- Recommended tools (best-effort) ----
+    install_recommended_tools "$os" "$check_only"
 
     # ---- Playwright Chromium ----
     printf "\n%sChecking Playwright browser:%s\n" "$BOLD" "$RESET"

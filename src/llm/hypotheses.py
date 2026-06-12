@@ -228,6 +228,40 @@ def signal_weight(confidence: str, *, negative: bool = False) -> float:
     return -w if negative else w
 
 
+def signal_from_routing_dict(item: dict, *, default_source: str = "") -> Signal | None:
+    """Build a :class:`Signal` from a legacy ``suggested_next_moves`` or
+    ``skill_handoffs`` dict.
+
+    Bridges the old fragmented channels onto the unified atom during
+    migration: ``where``/``surface`` → ``surface``, ``signal``/``reason``/
+    ``next_move`` → ``observation``, ``skill``/``suggested_skill`` →
+    ``suggested_skill``, ``possible_vuln_class`` → ``vuln_class``, and the
+    coarse ``confidence`` → a log-odds ``weight``. Returns ``None`` when
+    the item carries no usable observation or surface.
+    """
+    if not isinstance(item, dict):
+        return None
+    surface = str(item.get("surface") or item.get("where") or "").strip()
+    observation = str(
+        item.get("signal") or item.get("reason")
+        or item.get("next_move") or item.get("technique") or ""
+    ).strip()
+    if not observation and not surface:
+        return None
+    return Signal(
+        observation=observation or "(routing hint)",
+        surface=surface,
+        vuln_class=str(item.get("possible_vuln_class") or "").strip().lower(),
+        evidence=str(item.get("evidence_excerpt") or "").strip(),
+        suggested_skill=str(item.get("suggested_skill") or item.get("skill") or "").strip(),
+        technique=str(item.get("technique") or item.get("next_move") or "").strip(),
+        weight=signal_weight(item.get("confidence") or "medium"),
+        kind="routing",
+        source=str(item.get("source") or default_source).strip(),
+        source_agent=str(item.get("source_agent") or "").strip(),
+    )
+
+
 def confidence_from_logodds(logodds: float) -> float:
     """Sigmoid squash of accumulated log-odds into a [0, 1] belief."""
     # Clamp the exponent to avoid overflow on pathological sums.

@@ -1,7 +1,33 @@
 ---
 name: graphql
 description: >-
-  Use graphql when recon shows the target speaks GraphQL — a request path ending in /graphql, /api/graphql, /v1/graphql, /query, /playground, /graphiql, or /graphql/console; a POST whose JSON body carries a top-level "query" string (often with "variables" or "operationName"); a response wrapped in a {"data": ...} and/or {"errors": [...]} envelope; an in-browser IDE page (GraphiQL, Apollo Sandbox, Apollo Studio, Altair, "Playground"); a server fingerprint or x-graphql-*/x-hasura-* header pointing at Apollo, Yoga, Hasura, PostGraphile, Strawberry, graphene, Ariadne, async-graphql, Sangria, or graphql-java; or a client JS bundle referencing gql template literals, useQuery/useMutation, ApolloClient, Relay, urql, or __APOLLO_STATE__. Also dispatch when the stated objective is to read or change data the UI hides and the front end (React/Vue/Angular SPA or a mobile backend) collapses many REST calls into one fat typed POST returning a nested object tree — that single endpoint concentrates the whole read, write, authorization, and resilience input surface, including field-level authorization gaps in nested resolvers, mutation IDOR, Relay node-ID enumeration, batching/aliasing for rate-limit fan-out, and WebSocket subscription auth. Also covers introspection on/off schema discovery via error-based field suggestions, nested-query and recursive-fragment DoS, persisted-query bypass, CSRF-via-GET on cookie-auth endpoints, and GraphQL-specific WAF bypass. Disambiguation: a plain JSON REST response like {"users":[...]} with no "query" body and no data/errors envelope is api-testing or IDOR, not this; gRPC, JSON-RPC, OData, and SOAP also fold many calls into one endpoint but their envelopes differ (protobuf, "jsonrpc", $metadata, SOAP XML) so do not route them here; and when a GraphQL argument (a filter/where string, an id, a url/webhook arg, or a filename) feeds a downstream sink, use this skill only to shape the operation, then hand the actual primitive to sqli, ssrf, cmdi, path-traversal, or file-upload.
+  Use: Use graphql when recon shows the target speaks GraphQL — a request path ending in /graphql,
+  /api/graphql, /v1/graphql, /query, /playground, /graphiql, or /graphql/console; a POST whose JSON
+  body carries a top-level "query" string (often with "variables" or "operationName"); a response
+  wrapped in a {"data": ...} and/or {"errors": [...]} envelope; an in-browser IDE page (GraphiQL,
+  Apollo Sandbox, Apollo Studio, Altair, "Playground"); a server fingerprint or
+  x-graphql-*/x-hasura-* header pointing at Apollo, Yoga, Hasura, PostGraphile, Strawberry,
+  graphene, Ariadne, async-graphql, Sangria, or graphql-java; or a client JS bundle referencing gql
+  template literals, useQuery/useMutation, ApolloClient, Relay, urql, or __APOLLO_STATE__.
+  Signals: Also dispatch when the stated objective is to read or change data the UI hides and the
+  front end (React/Vue/Angular SPA or a mobile backend) uses GraphQL-specific markers such as a
+  top-level query string, operationName, variables, persisted-query hashes, a data/errors envelope,
+  or gql/Apollo/Relay client code — a single typed endpoint can concentrate read, write,
+  authorization, and resilience input surface, including field-level authorization gaps in nested
+  resolvers, mutation IDOR, Relay node-ID enumeration, batching/aliasing for rate-limit fan-out, and
+  WebSocket subscription auth. Also covers introspection on/off schema discovery via error-based
+  field suggestions, nested-query and recursive-fragment DoS, persisted-query bypass, CSRF-via-GET
+  on cookie-auth endpoints, and GraphQL-specific WAF bypass.
+  Pair with: Also dispatch idor, bfla, sqli, ssrf, mass-assignment in parallel when the same
+  evidence shows those mechanisms too; co-dispatch means separate focused workers sharing the same
+  investigation state, not merging skill prompts.
+  Do not use: Disambiguation: a plain JSON REST response like {"users":[...]} with no "query" body
+  and no data/errors envelope is ordinary REST/API surface, often idor when an object id is
+  involved, not this; gRPC, JSON-RPC, OData, and SOAP also fold many calls into one endpoint but
+  their envelopes differ (protobuf, "jsonrpc", $metadata, SOAP XML) so do not route them here; and
+  when a GraphQL argument (a filter/where string, an id, a url/webhook arg, or a filename) feeds a
+  downstream sink, use this skill only to shape the operation, then hand the actual primitive to
+  sqli, ssrf, rce, lfi, or insecure-file-uploads.
 metadata:
   dispatchable: true
 ---

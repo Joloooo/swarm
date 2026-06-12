@@ -65,6 +65,47 @@ class AttemptResult(str, Enum):
     PROGRESSED = "progressed"
 
 
+class HypothesisState(str, Enum):
+    """Belief lifecycle of a :class:`Hypothesis` — a SEPARATE axis from
+    :class:`PrimitiveStatus`.
+
+    ``PrimitiveStatus`` tracks *conversion of a proven primitive toward
+    the flag*. ``HypothesisState`` tracks *how strongly we believe a
+    vulnerability of a given class exists on a given surface*, before
+    anything is proven. The two meet at ``confirmed``: a hypothesis is
+    confirmed exactly when a worker demonstrates the primitive, at which
+    point the conversion axis (``PrimitiveStatus``) takes over.
+
+    The progression is monotonic except that ``supported`` and
+    ``committed`` may oscillate as evidence accrues or a probe comes back
+    empty:
+
+        nascent → supported → committed → confirmed | refuted
+
+    - ``nascent``: one weak signal — a hunch, not yet worth committing
+      budget to.
+    - ``supported``: several signals agree, but belief is still below the
+      commit threshold.
+    - ``committed``: belief crossed the threshold; this hypothesis owns a
+      budget reservation and a required next action. The planner may not
+      pivot away while its required action is untried (see the
+      hypothesis budget-lock directive).
+    - ``confirmed``: a worker demonstrated the primitive — control passes
+      to the conversion axis (``PrimitiveStatus``).
+    - ``refuted``: contradicted by evidence, or its required action was
+      tried and came back empty enough to drive belief below floor.
+
+    Stamped by the synthesis pass (``src/llm/hypotheses.py``), never by a
+    worker directly — a worker only emits :class:`Signal` atoms.
+    """
+
+    NASCENT = "nascent"
+    SUPPORTED = "supported"
+    COMMITTED = "committed"
+    CONFIRMED = "confirmed"
+    REFUTED = "refuted"
+
+
 @dataclass
 class Finding:
     """A single vulnerability or observation discovered during testing."""
@@ -111,6 +152,116 @@ class Finding:
     # primitive × proximity × 1/attempts, severity as a minor term) plus a
     # bounded LLM nudge. Directives sort on THIS, not raw severity.
     lead_priority: int = 0
+
+
+@dataclass
+class Signal:
+    """One atomic observation, or one routing implication, emitted by any
+    producer in the swarm (worker, summarizer, a deterministic detector,
+    the consolidation pass, or a skill's frontmatter prior).
+
+    This is the UNIFIED replacement for the historically fragmented
+    routing channels — ``suggested_next_moves`` items, ``skill_handoffs``
+    items, the summarizer's bespoke detector outputs, and the planner's
+    hardcoded keyword tells all spelled the same atom five different ways
+    (``signal`` / ``possible_vuln_class`` / ``next_move`` / ``technique`` /
+    ``where`` / ``surface`` / ``skill`` / ``suggested_skill`` /
+    ``confidence``). A ``Signal`` is that atom, once.
+
+    The crucial difference from the old channels: ``vuln_class`` and
+    ``suggested_skill`` are OPTIONAL. A signal can be a bare observation
+    ("characters {{ }} . _ [ ] are rejected on /total_loan_payments")
+    that names no skill — the synthesis pass (``src/llm/hypotheses.py``)
+    decides which :class:`Hypothesis` it supports and with what weight.
+    That is the home the old schema lacked: an observation that is
+    evidence for a hypothesis without already naming the answer.
+    """
+
+    # The fact, in one line (was: ``signal`` / ``evidence_excerpt`` /
+    # ``next_move`` text).
+    observation: str
+    # Endpoint / parameter / surface the observation is about (was:
+    # ``url`` / ``where`` / ``surface``). Empty for a target-wide fact.
+    surface: str = ""
+    # Vulnerability class this signal points at, IF known (was:
+    # ``category`` / ``possible_vuln_class``). MAY be empty — the
+    # synthesizer infers it from the observation + routing rules.
+    vuln_class: str = ""
+    # Raw proof excerpt, if any (response snippet, tool output).
+    evidence: str = ""
+    # Routing implication, IF the producer has one (was: ``skill`` /
+    # ``suggested_skill`` and ``technique`` / ``next_move``). Optional.
+    suggested_skill: str = ""
+    technique: str = ""
+    # Signed log-odds contribution this signal makes to the hypothesis it
+    # supports: positive = evidence FOR, negative = evidence AGAINST.
+    # Producers that only know a coarse "high/medium/low" confidence map
+    # it through ``signal_weight()`` rather than setting this directly.
+    weight: float = 0.0
+    # What role this signal plays:
+    #   - "observation": a positive/neutral fact
+    #   - "negative":    a tried-and-did-not-work result (evidence AGAINST,
+    #                    or "this surface is exhausted for this class")
+    #   - "routing":     primarily a next-skill hand-off implication
+    kind: str = "observation"
+    # Who emitted it: worker | summarizer | detector | consolidator |
+    # skill_prior | planner.
+    source: str = ""
+    source_agent: str = ""
+
+
+@dataclass
+class Hypothesis:
+    """A candidate vulnerability theory — the HUB that scattered signals
+    fuse into, and the object the belief/utility scoring attaches to.
+
+    Belief and utility are kept on SEPARATE axes, on purpose:
+
+    - ``logodds`` / ``confidence`` answer *is this true?* — accumulated
+      from the signed weights of supporting/contradicting signals
+      (a naive-Bayes log-odds sum, squashed by a sigmoid). Orthogonal
+      negatives on a different surface do not touch this.
+    - ``priority`` answers *should I work on it next?* — an
+      expected-value number that CONSUMES confidence but also folds in how
+      close the class is to the objective, how informative the untried
+      action is, and its cost. Cost may reorder the work queue; it must
+      never lower ``confidence``.
+
+    See ``src/llm/hypotheses.py`` for the scoring functions and the
+    routing-rule table that turns observations into weighted support.
+    """
+
+    # Vulnerability class (e.g. "ssti", "sqli", "idor").
+    vuln_class: str
+    # Endpoint / parameter the hypothesis is about.
+    surface: str = ""
+    # Belief lifecycle (see :class:`HypothesisState`). Stamped by the
+    # synthesis pass, monotonic except supported↔committed oscillation.
+    state: str = HypothesisState.NASCENT.value
+    # Stable keys of the signals that support / contradict this
+    # hypothesis (``signal_key()`` values), so the score is auditable —
+    # "why do we believe this" is answerable from the signal log.
+    supporting: list[str] = field(default_factory=list)
+    contradicting: list[str] = field(default_factory=list)
+    # Belief. ``logodds`` is the raw naive-Bayes sum; ``confidence`` is
+    # ``sigmoid(logodds)`` in [0, 1].
+    logodds: float = 0.0
+    confidence: float = 0.0
+    # The REQUIRED next action while this hypothesis is committed — the
+    # one probe that would confirm or refute it. The planner may not pivot
+    # away from a committed hypothesis while this action is untried.
+    required_skill: str = ""
+    required_technique: str = ""
+    action_tried: bool = False
+    # Expected-value scheduling score 0–100 (utility, NOT belief). The
+    # planner orders work by this; the commit threshold gates on
+    # ``confidence`` instead.
+    priority: int = 0
+    # Once ``state == confirmed`` this links the hypothesis to the proven
+    # primitive class (mirrors ``Finding.primitive``) and carries the
+    # conversion-attempt log forward onto the conversion axis.
+    primitive: str = ""
+    attempts: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -252,6 +403,184 @@ def _summary_inputs_reducer(
     return list(left or []) + list(right or [])
 
 
+def _tool_attempts_reducer(
+    left: list[dict] | None, right: list[dict] | None,
+) -> list[dict]:
+    """Append bounded structured tool/surface outcomes.
+
+    This is intentionally separate from ``findings`` and the exhausted
+    ledger. A failed scanner or aborted enumeration means the surface is
+    still open, not disproven; preserving the tool outcome lets the planner
+    choose a fallback without treating the method as covered.
+    """
+    merged = list(left or []) + list(right or [])
+    return merged[-80:]
+
+
+# How many raw signal atoms to retain. The synthesis pass folds them into
+# hypotheses each cycle, so the raw log only needs enough history to
+# re-derive belief; older atoms are already reflected in the hypotheses.
+_MAX_SIGNALS = 200
+
+
+def signal_key(s: Any) -> str:
+    """Stable identity for a :class:`Signal`, used to dedup the append-only
+    log and to reference a signal from a hypothesis's supporting /
+    contradicting lists. A given observation about one surface+class is
+    one atom regardless of which worker reworded it.
+    """
+    def _f(name: str) -> str:
+        value = getattr(s, name, None)
+        if value is None and isinstance(s, dict):
+            value = s.get(name)
+        return " ".join(str(value or "").split()).lower()
+
+    return "|".join((_f("vuln_class"), _f("surface"), _f("observation")[:120]))
+
+
+def _signals_reducer(
+    left: list[Signal] | None, right: list[Signal] | None,
+) -> list[Signal]:
+    """Append-only signal log, deduped by :func:`signal_key`, bounded.
+
+    Parallel workers each emit their observations; fan-out accumulates
+    them here. A later emission of the same atom (same surface+class+fact)
+    wins so a refreshed weight or evidence excerpt replaces the stale one,
+    rather than the log carrying both.
+    """
+    merged: dict[str, Signal] = {}
+    for s in list(left or []) + list(right or []):
+        if s is None:
+            continue
+        merged[signal_key(s)] = s
+    return list(merged.values())[-_MAX_SIGNALS:]
+
+
+def _hypotheses_reducer(
+    existing: list[Hypothesis] | None, new: list[Hypothesis] | None,
+) -> list[Hypothesis]:
+    """Last-non-empty-write-wins for ``hypotheses``.
+
+    Like ``canonical_findings``, the hypothesis list is REBUILT in full by
+    the synthesis pass (``src/llm/hypotheses.py``) once per summarizer
+    cycle from the raw signal log + canonical findings. A node that emits
+    nothing (e.g. a summarizer pass with no workers) keeps the prior view
+    rather than wiping it, so the planner and worker seeds always see the
+    most recent ranked hypotheses.
+    """
+    if new:
+        return new
+    return existing or []
+
+
+_HANDOFF_CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
+
+
+def _compact_handoff_field(value: Any, *, limit: int = 240) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) > limit:
+        text = text[: limit - 3].rstrip() + "..."
+    return text
+
+
+def _handoff_key(item: dict) -> str:
+    skill = _compact_handoff_field(
+        item.get("suggested_skill") or item.get("skill")
+    ).lower()
+    surface = _compact_handoff_field(
+        item.get("surface") or item.get("where") or item.get("target")
+    ).lower()
+    technique = _compact_handoff_field(
+        item.get("technique") or item.get("next_move") or item.get("move")
+    ).lower()
+    return "|".join((skill, surface, technique))
+
+
+def _normalize_handoff_state_item(raw: Any) -> dict | None:
+    """Coerce worker/summarizer handoff records into one state shape."""
+    if not isinstance(raw, dict):
+        return None
+    skill = _compact_handoff_field(
+        raw.get("suggested_skill") or raw.get("skill"),
+        limit=120,
+    )
+    surface = _compact_handoff_field(
+        raw.get("surface") or raw.get("where") or raw.get("target")
+    )
+    technique = _compact_handoff_field(
+        raw.get("technique") or raw.get("next_move") or raw.get("move")
+    )
+    if not skill or not (surface or technique):
+        return None
+    confidence = _compact_handoff_field(raw.get("confidence")).lower()
+    if confidence not in _HANDOFF_CONFIDENCE_RANK:
+        confidence = "medium"
+    item = {
+        "suggested_skill": skill,
+        "surface": surface,
+        "technique": technique,
+        "confidence": confidence,
+    }
+    for field in (
+        "signal",
+        "reason",
+        "evidence_excerpt",
+        "reproduction",
+        "source_agent",
+        "source",
+        "possible_vuln_class",
+    ):
+        value = _compact_handoff_field(raw.get(field))
+        if value:
+            item[field] = value
+    return item
+
+
+def _skill_handoffs_reducer(
+    left: list[dict] | None, right: list[dict] | None,
+) -> list[dict]:
+    """Merge worker-emitted cross-skill handoffs by skill/surface/technique."""
+    merged: dict[str, dict] = {}
+    for raw in list(left or []) + list(right or []):
+        item = _normalize_handoff_state_item(raw)
+        if not item:
+            continue
+        key = _handoff_key(item)
+        prior = merged.get(key)
+        if (
+            prior is None
+            or _HANDOFF_CONFIDENCE_RANK[item["confidence"]]
+            > _HANDOFF_CONFIDENCE_RANK[prior["confidence"]]
+        ):
+            merged[key] = item
+
+    ranked = sorted(
+        merged.values(),
+        key=lambda item: (
+            -_HANDOFF_CONFIDENCE_RANK[item["confidence"]],
+            item["suggested_skill"],
+            item["surface"],
+            item["technique"],
+        ),
+    )
+    return ranked[:80]
+
+
+def _routed_skill_handoffs_reducer(
+    left: list[str] | None, right: list[str] | None,
+) -> list[str]:
+    """Append unique handoff keys already routed by the planner."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in list(left or []) + list(right or []):
+        key = str(raw or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out[-120:]
+
+
 def _recon_done_reducer(existing: bool | None, new: bool | None) -> bool:
     """Sticky-True OR for ``recon_done``.
 
@@ -296,6 +625,13 @@ class SwarmState:
 
     # -- Planning / routing metadata --
     active_agents: Annotated[list[str], operator.add]
+    # Raw-trace-derived routing suggestions written by the summarizer.
+    suggested_next_moves: list[dict]
+    # Worker-emitted cross-skill handoffs, routed only by the planner.
+    skill_handoffs: Annotated[list[dict], _skill_handoffs_reducer]
+    routed_skill_handoffs: Annotated[list[str], _routed_skill_handoffs_reducer]
+    # Structured tool/surface outcomes written by workers.
+    tool_attempts: Annotated[list[dict], _tool_attempts_reducer]
 
 
 # LangGraph needs a TypedDict or dict-like schema.
@@ -572,6 +908,87 @@ class SwarmGraphState(TypedDict, total=False):
     # in ``src/nodes/planner.py`` for the size caps.
     relevant_summary: Annotated[dict, _relevant_summary_reducer]
 
+    # Raw-trace-derived next-skill suggestions emitted by per-worker
+    # summarizer reports, extracted by ``SummarizerNode`` and consumed by
+    # the planner's untried-skill floor. Kept separate from
+    # ``relevant_summary`` because the planner owns that field; this list
+    # records what the worker traces themselves imply.
+    #
+    # Item shape:
+    #   {
+    #     "where":        str,
+    #     "next_move":    str,
+    #     "skill":        str,      # exact dispatchable skill name
+    #     "confidence":   "high" | "medium" | "low",
+    #     "source_agent": str,
+    #     "signal":       str,      # optional observed fact
+    #     "possible_vuln_class": str, # optional mechanism label
+    #     "reason":       str,      # optional why this routing follows
+    #     "source":       str,      # optional summarizer | detector
+    #   }
+    suggested_next_moves: list[dict]
+
+    # Worker/summarizer-emitted cross-skill handoffs. These are stronger
+    # than ordinary next-move hints: a worker has evidence that a different
+    # skill should continue a specific surface/mechanism, but workers do not
+    # spawn other agents directly. The planner dedupes and routes them.
+    #
+    # Item shape:
+    #   {
+    #     "suggested_skill": str,   # exact dispatchable skill name
+    #     "surface":         str,   # endpoint/parameter/surface
+    #     "technique":       str,   # concrete next test family
+    #     "confidence":      "high" | "medium" | "low",
+    #     "signal":          str,
+    #     "reason":          str,
+    #     "evidence_excerpt": str,
+    #     "reproduction":    str,
+    #     "source_agent":    str,
+    #   }
+    skill_handoffs: Annotated[list[dict], _skill_handoffs_reducer]
+
+    # Exact handoff keys the planner already routed, formatted as
+    # "skill|surface|technique". This suppresses duplicate dispatch for the
+    # same handoff while still allowing the same skill to run on a different
+    # surface or technique.
+    routed_skill_handoffs: Annotated[list[str], _routed_skill_handoffs_reducer]
+
+    # Structured outcomes from important tools and coverage-style probes.
+    # Workers append records here so the planner can distinguish:
+    #   - tool failed to run -> surface is NOT covered
+    #   - tool succeeded with narrow flags -> surface is PARTIALLY covered
+    #   - tool succeeded with exhaustive flags -> surface is covered
+    #
+    # Item shape:
+    #   {
+    #     "surface":       str,
+    #     "tool":          str,
+    #     "command":       str,
+    #     "status":        "success" | "failed" | "timeout",
+    #     "covered":       bool,
+    #     "coverage":      "full" | "partial" | "none",
+    #     "error_type":    str,
+    #     "fallback_needed": bool,
+    #     "source_agent":  str,
+    #     "config_name":   str,
+    #   }
+    tool_attempts: Annotated[list[dict], _tool_attempts_reducer]
+
+    # ── Unified signal / hypothesis channel (the signal-unification fix) ──
+    # ``signals`` is the append-only log of :class:`Signal` atoms — the
+    # single shape that replaces the historically fragmented
+    # ``suggested_next_moves`` / ``skill_handoffs`` / detector-output
+    # channels. Any producer (worker, summarizer, detector, consolidator,
+    # skill prior) writes atoms here; the reducer dedups by
+    # :func:`signal_key` and bounds the log.
+    signals: Annotated[list[Signal], _signals_reducer]
+    # ``hypotheses`` is the ranked list of :class:`Hypothesis` hubs the raw
+    # signals fuse into, rebuilt each summarizer cycle by the synthesis
+    # pass (``src/llm/hypotheses.py``) with belief (confidence) and utility
+    # (priority) on separate axes. Last-non-empty-write-wins, like
+    # ``canonical_findings``.
+    hypotheses: Annotated[list[Hypothesis], _hypotheses_reducer]
+
     # ── Worker → Summarizer hand-off (the context-window fix) ──
     # Each worker (executor, recon, salvage) writes a SINGLE-ITEM list
     # here describing its run; LangGraph fan-out accumulates writes via
@@ -601,6 +1018,12 @@ class SwarmGraphState(TypedDict, total=False):
     #     "error":            str | None,
     #     "refused":          bool,
     #     "findings_count":   int,
+    #     "tool_attempts":    list[dict],
+    #     "summary_tools":    list[BaseTool],  # same tool schema as worker
+    #     "precomputed_report": AIMessage | None,
+    #                         # optional worker-exit digest used to avoid
+    #                         # post-barrier prompt-cache TTL misses
+    #     "skip_digest_reason": str | None,
     #   }
     pending_summary_inputs: Annotated[list[dict], _summary_inputs_reducer]
 

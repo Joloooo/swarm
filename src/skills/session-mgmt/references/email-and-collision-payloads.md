@@ -39,7 +39,7 @@ them as distinct on registration.
 - **Unicode normalization.** Register a look-alike that case-maps or normalises
   to the victim's. Victim `demo@gmail.com`, you register `demⓞ@gmail.com`
   (circled o). After normalisation the two collide and the reset hits the victim.
-  Tools: `unisub` to suggest convertible code points; the Unicode pentester
+  Tools: `unisub` to suggest convertible code points; the Unicode security-testing
   cheatsheet for a per-platform character list.
 
 ## Probing for the right vector

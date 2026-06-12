@@ -4,7 +4,7 @@ description: >-
   Use: Use web-cache when recon shows a caching layer sitting in front of the application — a CDN or
   reverse proxy (Cloudflare, Akamai, Fastly, Varnish, CloudFront, nginx proxy_cache) — and the goal
   is either to make the cache store a private authenticated response and serve it to anyone (web
-  cache deception) or to make it store an attacker-shaped response and serve it to other users (web
+  cache deception) or to make it store a crafted response and serve it to other users (web
   cache poisoning). The core signal is a response that is both dynamic/private AND cacheable, so the
   shared cache keeps a copy that crosses user boundaries.
   Signals: The decisive tells are caching headers and metadata — X-Cache / CF-Cache-Status / X-Cache-Hits /

@@ -941,6 +941,12 @@ class _Live:
         # Startup banner runs once per process even if the runner
         # invokes the renderer multiple times (e.g. langgraph dev).
         self._banner_emitted: bool = False
+        # Last (input, output, reasoning) cumulative snapshot rendered on a
+        # ``▸ node`` rollup, keyed by the agent-set or node it summed. The
+        # token chip prints the *delta* since the previous rollup for that
+        # same key, so each line reflects that one node-turn's cost rather
+        # than a running total. Reset per bench in ``bench_start``.
+        self._chip_prev: dict[Any, tuple[int, int, int]] = {}
 
     # -------- benchmark boundaries (always visible) ----------
 
@@ -951,6 +957,7 @@ class _Live:
         expected_flag: str | None,
     ) -> None:
         self._seen_msg_hashes.clear()
+        self._chip_prev.clear()
         # Stamp the per-run wall clock for the live countdown footer (pad).
         _RUN_CLOCK["started"] = time.perf_counter()
         _RUN_CLOCK["budget_s"] = None  # re-read budget lazily on first render
@@ -1172,7 +1179,7 @@ class _Live:
         # across every active_agents entry mentioned in the summary
         # — at worker exit there's typically one, sometimes more
         # for fan-out skills like custom-attack.
-        tokens_chip = self._aggregate_token_chip(summary)
+        tokens_chip = self._aggregate_token_chip(name, summary)
         tail = f"  ({_fmt_ms(duration_ms)})"
         if tokens_chip:
             tail = f"  ({_fmt_ms(duration_ms)}, {tokens_chip})"
@@ -1182,48 +1189,77 @@ class _Live:
         # only sees commands, not reasoning between them.
         self._emit_worker_thoughts(new_messages)
 
-    def _aggregate_token_chip(self, summary: str) -> str:
-        """Pull running token totals for whichever agent_ids appear in
-        ``summary`` (the ``active: foo,bar`` part) and render a chip
-        like ``in=187k peak=22k think=8.5k``.
+    def _aggregate_token_chip(self, node: str, summary: str) -> str:
+        """Render a ``in=… out=… think=… peak=…`` chip for one ``▸ node``
+        rollup line, scoped to *that node-turn's own cost*.
 
-        Empty string when no totals are recorded yet (e.g. a node that
-        does no LLM calls). Uses lazy import so live.py doesn't have a
-        compile-time dependency on llm/callbacks.py — that module
-        imports observability which re-exports this one.
+        Two cases:
+
+        - The node summary carries an ``active: a,b`` marker (worker
+          nodes like ``executor``/``recon`` name the worker that ran).
+          We sum those agents' running totals — but report the **delta**
+          since this same agent-set was last rendered, so a worker that
+          runs again in a later wave shows only the new wave's cost, not
+          its lifetime total.
+        - No marker (``summarizer``, ``web_search``, ``wrapup``). We read
+          the per-node total from ``NODE_TOTALS`` and, again, print the
+          delta since this node's previous rollup. A node that made no
+          tracked LLM calls (e.g. ``web_search``, whose Codex hosted
+          search bypasses the callback) has no ``NODE_TOTALS`` entry and
+          gets **no chip** rather than a misleading run-wide sum.
+
+        ``peak`` is the largest single call seen for the scope so far
+        (a max, not a sum) — kept cumulative because it is the
+        context-rot signal and is meaningful regardless of turn.
+
+        Empty string when nothing is attributable. Lazy import so live.py
+        keeps no compile-time dependency on llm/callbacks.py (that module
+        imports observability, which re-exports this one).
         """
         try:
-            from src.llm.callbacks import TOKEN_TOTALS
+            from src.llm.callbacks import TOKEN_TOTALS, NODE_TOTALS
         except Exception:
             return ""
-        # Pull active-agent ids out of the summary string. Format:
-        # ``... active: a,b,c ...``. If absent, fall back to all agents.
+        # ``active: a,b,c`` marker → sum those agents; else scope to the node.
         m = re.search(r"active:\s*([^\s]+)", summary or "")
         if m:
             agents = [s.strip() for s in m.group(1).split(",") if s.strip()]
+            if not agents:
+                return ""
+            in_sum = out_sum = think_sum = peak = 0
+            for a in agents:
+                t = TOKEN_TOTALS.get(a)
+                if not t:
+                    continue
+                in_sum += t.input_tokens
+                out_sum += t.output_tokens
+                think_sum += t.reasoning_tokens
+                if t.peak_input > peak:
+                    peak = t.peak_input
+            key: Any = ("agents", tuple(sorted(agents)))
         else:
-            agents = list(TOKEN_TOTALS.keys())
-        if not agents:
-            return ""
-        in_sum = 0
-        out_sum = 0
-        think_sum = 0
-        peak = 0
-        for a in agents:
-            t = TOKEN_TOTALS.get(a)
-            if not t:
-                continue
-            in_sum += t.input_tokens
-            out_sum += t.output_tokens
-            think_sum += t.reasoning_tokens
-            if t.peak_input > peak:
-                peak = t.peak_input
-        if not in_sum and not out_sum:
+            t = NODE_TOTALS.get(node)
+            if t is None:
+                # No tracked LLM calls for this node — say nothing rather
+                # than fall back to a run-wide sum.
+                return ""
+            in_sum, out_sum, think_sum, peak = (
+                t.input_tokens, t.output_tokens, t.reasoning_tokens, t.peak_input
+            )
+            key = ("node", node)
+
+        # Delta since this scope's previous rollup → this turn's cost.
+        prev = self._chip_prev.get(key, (0, 0, 0))
+        d_in = in_sum - prev[0]
+        d_out = out_sum - prev[1]
+        d_think = think_sum - prev[2]
+        self._chip_prev[key] = (in_sum, out_sum, think_sum)
+        if d_in <= 0 and d_out <= 0:
             return ""
         return (
-            f"in={_fmt_tokens(in_sum)} "
-            f"out={_fmt_tokens(out_sum)} "
-            f"think={_fmt_tokens(think_sum)} "
+            f"in={_fmt_tokens(d_in)} "
+            f"out={_fmt_tokens(d_out)} "
+            f"think={_fmt_tokens(d_think)} "
             f"peak={_fmt_tokens(peak)}"
         )
 

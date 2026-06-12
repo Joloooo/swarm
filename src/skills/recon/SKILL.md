@@ -155,26 +155,36 @@ in the homepage HTML, so a passive read or a short guess-list misses it
 — you have to ask the server for each candidate directly, against a
 comprehensive component list.
 
-- **WordPress**: `wpscan --url <target> --enumerate ap,at,u
-  --plugins-detection aggressive` — `ap`/`at` request every known plugin
-  and theme slug (~100k) directory-by-directory, surfacing components
-  that passive detection and a small wordlist never reach, then read each
-  component's version from its `readme.txt` / style header. Plugin
-  enumeration needs no API token; the WPVulnDB token only adds wpscan's
-  own CVE annotations, which the planner can also resolve via `web_search`
-  / `nuclei`.
-- If WPScan aborts, says its database is missing/stale, exits non-zero, or
-  was run without the all-plugin/all-theme forms (`ap`, `at`), treat
-  WordPress component enumeration as **not covered**. Immediately run a
-  fallback path enumeration against `/wp-content/plugins/FUZZ/` and
-  `/wp-content/themes/FUZZ/` with a component slug list, then request
-  `readme.txt`, plugin headers, and theme `style.css` on hits to recover
-  versions.
+- **WordPress — try `wpscan` but do not trust a clean result.**
+  `wpscan --url <target> --enumerate ap,at,u --plugins-detection aggressive`
+  — run it **without `--no-update`** (that flag makes wpscan *abort* with
+  "database file is missing" instead of bootstrapping its DB on first use).
+  Know its real limit: **without a WPScan API token the free DB only knows a
+  subset of plugin slugs**, so aggressive enumeration can miss an
+  installed-but-unlisted plugin completely — on a target whose only plugin
+  was the vulnerable `backup-backup`, free wpscan reported just the default
+  `akismet`. So a "clean" wpscan run is **not** proof the site has no
+  plugins; always also do the direct enumeration below.
+- **The reliable path — direct slug enumeration (do this regardless of
+  wpscan).** Fuzz `/wp-content/plugins/FUZZ/` against the bundled
+  **`wp-plugins`** wordlist preset: `gobuster_dir(url,
+  wordlist="wp-plugins")` (themes: fuzz `/wp-content/themes/FUZZ/style.css`).
+  That list leads with known-vulnerable / modern slugs the dated public
+  lists omit (e.g. `backup-backup`, `elementor`, `woocommerce`). A `200`/`403`
+  on a plugin dir means it is installed — then read its version from
+  `/wp-content/plugins/<slug>/readme.txt` (`Stable tag:`) or the plugin
+  header (`Version:`). If wpscan aborts, is DB-less, exits non-zero, or was
+  not run with `ap,at`, treat component enumeration as **not covered** and
+  rely on this path.
+- **Then look it up.** Once you have a component **+ version**,
+  `web_search "<plugin> <version> vulnerability CVE"` to confirm whether
+  that exact version is affected and by what — that is the lead the run
+  hands to the right specialist.
 - **Any stack (incl. non-WordPress CMS)**: run `nuclei` technology and
   CVE templates against the target, and request the known component path
   (`/wp-content/plugins/<slug>/`, `/modules/<slug>/`,
   `/sites/all/modules/<slug>/`, …) with `gobuster` / `ffuf` against a
-  component wordlist.
+  component wordlist (for WordPress, the `wp-plugins` preset).
 
 Then file the exact component + version as a finding: a known-vulnerable
 component version is the lead that routes the run to the right specialist
@@ -185,7 +195,8 @@ on it.
 - `fetch_page(url)` — **first call on any HTTP target.** Returns the
   homepage HTML, with HTTP-then-Playwright fallback so SPAs render too.
 - `gobuster_dir(url, wordlist="common")` for directory enumeration.
-  Use `wordlist="medium"` for slower-but-deeper sweeps.
+  Use `wordlist="medium"` for slower-but-deeper sweeps, or
+  `wordlist="wp-plugins"` to enumerate WordPress plugin slugs directly.
 - `nikto_scan(url)` for a known-issue web-misconfig sweep — louder,
   slower, run after the cheaper tools.
 - `bash` for anything else: `curl -sI` for header probes that pin

@@ -36,10 +36,13 @@ async def gobuster_dir(
             (admin panel, backup files, API endpoints) and how a hit
             would change the next attack step.
         url: Web root, e.g. ``http://target/``.
-        wordlist: One of "common" / "small" / "medium" / "big" (resolved
-            via ``src.tools.wordlists.resolve_wordlist``) or an absolute
-            path to a custom wordlist file. ``common`` always works because
-            a real list ships in the repo's ``wordlists/`` dir.
+        wordlist: One of "common" / "small" / "medium" / "big" /
+            "wp-plugins" (resolved via ``src.tools.wordlists.resolve_wordlist``)
+            or an absolute path to a custom wordlist file. ``common`` and
+            ``wp-plugins`` always work because a real list ships in the repo's
+            ``wordlists/`` dir (``wp-plugins`` enumerates WordPress plugin
+            slugs, including known-vulnerable ones, against
+            ``/wp-content/plugins/FUZZ/``).
             ``small`` / ``medium`` / ``big`` require SecLists or a Kali
             wordlists install; if neither is present the call raises
             ``FileNotFoundError`` with a hint to run

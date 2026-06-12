@@ -159,6 +159,14 @@ class CodexWebSearchResult:
     num_searches: int = 0
     hard_refused: bool = False
     error: str | None = None
+    # Token usage the backend reported on the terminal ``response.completed``
+    # event (None when the plan returns ``usage_not_included``). Keys mirror
+    # the standard Codex path: input_tokens / output_tokens / reasoning_tokens
+    # / cached_tokens. The caller hands this to ``record_external_usage`` so
+    # the web_search node's cost lands in TOKEN_TOTALS / NODE_TOTALS / the log.
+    usage: dict[str, int] | None = None
+    # Model slug that actually served the call, for accurate log attribution.
+    model: str = ""
 
 
 def _collect_annotation(ev_obj: dict, seen: set[str], out: list[tuple[str, str]]) -> None:
@@ -277,6 +285,7 @@ async def _stream_once(
     citations: list[tuple[str, str]] = []
     seen_urls: set[str] = set()
     num_searches = 0
+    usage: dict[str, int] | None = None
 
     try:
         async for ev in codex.astream_codex(
@@ -328,6 +337,24 @@ async def _stream_once(
                     if isinstance(part, dict):
                         for ann in (part.get("annotations") or []):
                             _collect_annotation(ann, seen_urls, citations)
+            elif t in ("response.completed", "response.done"):
+                # Terminal event carries the token usage. Same field paths as
+                # the standard Codex parser in ``src/llm/codex.py``.
+                resp = ev.get("response") or {}
+                u = resp.get("usage")
+                if isinstance(u, dict):
+                    out_details = u.get("output_tokens_details") or {}
+                    in_details = u.get("input_tokens_details") or {}
+                    usage = {
+                        "input_tokens": int(u.get("input_tokens", 0) or 0),
+                        "output_tokens": int(u.get("output_tokens", 0) or 0),
+                        "reasoning_tokens": int(
+                            out_details.get("reasoning_tokens", 0) or 0
+                        ),
+                        "cached_tokens": int(
+                            in_details.get("cached_tokens", 0) or 0
+                        ),
+                    }
     except codex.CodexCyberPolicyError as e:
         return CodexWebSearchResult(
             "", citations, num_searches, hard_refused=True, error=str(e)[:200]
@@ -368,4 +395,6 @@ async def _stream_once(
             if len(citations) >= 10:
                 break
 
-    return CodexWebSearchResult(answer, citations, num_searches)
+    return CodexWebSearchResult(
+        answer, citations, num_searches, usage=usage, model=model
+    )

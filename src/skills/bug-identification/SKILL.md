@@ -1,7 +1,30 @@
 ---
 name: bug-identification
 description: >-
-  Use bug-identification when recon has surfaced something that looks off but the vulnerability class is not yet obvious, so the planner cannot decide which specialist skill to dispatch first; it is the triage router that converts one raw anomaly into a named hypothesis and a hand-off, not an exploiter. Dispatch it when ordinary responses already carry a hint of a problem — an error string or stack trace in the page body that does not yet clearly name a SQL layer, a template engine, an XML parser, or a deserializer; a 500 or unusual status on an endpoint whose cause is unattributed; a parameter that takes user input flowing into some parser, a value that gets reflected back into the page in an unknown context, a numeric or guessable identifier in the URL, a serialized-looking blob in a cookie or hidden field, a URL or fetch parameter, a JWT or permissive CORS header, or a Content-Length/Transfer-Encoding oddity — and the right specialist is still ambiguous. It works by symptom-to-class mapping, response-shape diagnostics, error-message fingerprinting, and side-channel analysis (timing / size / status). Also dispatch it as the default low-cost first move when recon yields many parameters and forms but no confirmed class, since triaging is cheaper than firing a heavy specialist blind. Disambiguation: prefer the concrete specialist over triage once recon alone already pins the class — a plainly swappable record identifier with no parser hint points straight to idor, a value echoed verbatim into HTML points to xss, a file or path parameter points to path-traversal, and an outbound-fetch URL parameter points to ssrf; reach for bug-identification only when those surface signals overlap and the class genuinely remains undecided, and skip it entirely when a prior probe has already confirmed the class.
+  Use: Use bug-identification when recon has surfaced something that looks off but the vulnerability
+  class is not yet obvious, so the planner cannot decide which specialist skill to dispatch first;
+  it is the triage router that converts one raw anomaly into a named hypothesis and a hand-off, not
+  an exploiter.
+  Signals: Dispatch it when ordinary responses already carry a hint of a problem — an error string
+  or stack trace in the page body that does not yet clearly name a SQL layer, a template engine, an
+  XML parser, or a deserializer; a 500 or unusual status on an endpoint whose cause is unattributed;
+  a parameter that takes user input flowing into some parser, a value that gets reflected back into
+  the page in an unknown context, a numeric or guessable identifier in the URL, a serialized-looking
+  blob in a cookie or hidden field, a URL or fetch parameter, a JWT or permissive CORS header, or a
+  Content-Length/Transfer-Encoding oddity — and the right specialist is still ambiguous. It works by
+  symptom-to-class mapping, response-shape diagnostics, error-message fingerprinting, and
+  side-channel analysis (timing / size / status). Also dispatch it as the default low-cost first
+  move when recon yields many parameters and forms but no confirmed class, since triaging is cheaper
+  than firing a heavy specialist blind.
+  Pair with: Also dispatch request-builder or the most likely concrete specialist only when recon
+  already gives enough evidence for that specialist; otherwise use this skill alone to produce the
+  class hypothesis before opening specialist workers.
+  Do not use: Disambiguation: prefer the concrete specialist over triage once recon alone already
+  pins the class — a plainly swappable record identifier with no parser hint points straight to
+  idor, a value echoed verbatim into HTML points to xss, a file or path parameter points to lfi, and
+  an outbound-fetch URL parameter points to ssrf; reach for bug-identification only when those
+  surface signals overlap and the class genuinely remains undecided, and skip it entirely when a
+  prior probe has already confirmed the class.
 metadata:
   dispatchable: true
 ---
@@ -70,10 +93,25 @@ column, the right column is your candidate-class shortlist.
 | GraphQL introspection enabled, or verbose errors                | graphql-misconfig, graphql-injection                                |
 | `*` in `Access-Control-Allow-Origin` with credentials           | cors-misconfig                                                      |
 | CSRF token absent or not validated                              | csrf                                                                |
+| `param[$ne]=x` / `{"param":{"$gt":""}}` changes result set       | nosql-injection (MongoDB operator injection)                        |
+| Login bypassed by `user[$ne]=x&pass[$ne]=x` or `{"$ne":null}`   | nosql-injection (auth bypass)                                       |
+| JSON body with `__proto__`/`constructor.prototype` alters output | prototype-pollution                                                 |
+| Injected `%0d%0a` reflects into a response header / new `Set-Cookie` | crlf-injection, response-splitting, header-injection            |
+| Same page served under a fake `.css`/`.js` suffix, now cached    | web-cache-deception                                                 |
+| `Cache-Control`/`X-Cache` reflects an unkeyed input back to all  | web-cache-poisoning                                                 |
+| `<!--#echo var=...-->` or `<!--#exec cmd=...-->` is evaluated     | ssi-injection, esi-injection                                        |
+| Auth/HMAC compares with `==`; a `0e…`-digit value passes         | type-juggling (PHP loose comparison)                                |
+| Exported CSV/XLSX renders a cell starting `=`,`+`,`-`,`@`        | csv-injection (formula injection, low severity, log only)           |
+| Changing `Host:`/`X-Forwarded-Host` alters links or reset URLs   | host-header-injection, password-reset-poisoning                     |
 
 If the symptom does not match any row, write a new one in the agent
 log and continue with the closest match. The catalogue grows with
 the engagement.
+
+For the bulky per-class probe catalogues (full NoSQL operator and
+`$regex` extraction lists, prototype-pollution detection gadgets,
+the CRLF UTF-8 filter-bypass table, and the PHP magic-hash table),
+see `references/signal-to-class.md`.
 
 ## Per-symptom decision tree
 
@@ -149,6 +187,63 @@ or no, then stop.
 2. If `49` appears in the response, SSTI confirmed. The exact
    syntax that triggered tells you the engine. Hand off to `ssti`.
 
+### NoSQL injection suspicion
+
+Suspect when the backend looks like MongoDB/Node (JSON APIs, `$`
+operators leaking in errors) rather than a SQL stack.
+
+1. In a URL-encoded parameter, send `param[$ne]=x`; in a JSON body,
+   send `{"param":{"$ne":null}}`. A changed result set, a bypassed
+   login, or a returned record set means operator injection.
+2. Confirm boolean control with `param[$gt]=` (matches everything)
+   vs `param[$eq]=<junk>` (matches nothing): different result sizes
+   = injectable.
+3. Hand off to the SQL-injection / NoSQL test skill. See
+   `references/signal-to-class.md` for `$regex` length/value
+   extraction probes.
+
+### Prototype pollution suspicion
+
+Suspect on Node/Express JSON endpoints, especially when a later
+response field changes for no logical reason.
+
+1. Add `{"__proto__":{"json spaces":10}}` to a JSON body that the
+   app parses, then send a normal `{"foo":"bar"}` request: if the
+   echoed JSON is now indented, the prototype was polluted.
+2. Other low-risk oracles: `{"__proto__":{"status":510}}` (response
+   status flips), `{"__proto__":{"exposedHeaders":["x"]}}` (a new
+   `Access-Control-Expose-Headers` appears). Try `constructor.
+   prototype.<key>` if `__proto__` is filtered.
+3. Hand off to the deserialisation / injection specialist. Gadget
+   list in `references/signal-to-class.md`.
+
+### CRLF / response-splitting suspicion
+
+Suspect when an input is reflected into a response header
+(`Location`, `Set-Cookie`) rather than the body.
+
+1. Send `%0d%0aX-Probe:%201` in the parameter. If a literal
+   `X-Probe: 1` header appears in the response, CRLF injection is
+   confirmed.
+2. If raw `%0d%0a` is stripped, try the UTF-8 overlong bypass
+   (`%E5%98%8A`/`%E5%98%8D`) — see `references/signal-to-class.md`.
+3. Hand off to the header-injection / open-redirect specialist
+   (CRLF often chains into open-redirect or reflected-XSS).
+
+### Type-juggling suspicion (PHP)
+
+Suspect when a PHP app compares a user value (token, HMAC,
+password hash) and uses loose `==`.
+
+1. Where a value is compared to a hashed/expected string, submit
+   `0` (integer-like) or a known `0e…`-digit "magic hash". If the
+   check passes, loose comparison is in play.
+2. For JSON/array-aware params, send `param[]=` (array) where a
+   string is expected — `md5([])`/`strcmp([])` return `NULL` and
+   can satisfy a comparison.
+3. Hand off to the auth-bypass / business-logic specialist. Magic
+   hash table in `references/signal-to-class.md`.
+
 ### Auth / access-control suspicion
 
 1. Compare responses for the same path as anonymous, low-priv
@@ -202,6 +297,27 @@ Status codes lie less than bodies do. Watch for:
 - `200` → `302` to user-supplied URL: open redirect.
 - `200` → `401` after one extra request: rate-limit triggered or
   session invalidated (race-condition signal).
+
+### Encoding as a parser fingerprint
+
+Which encoding of the *same* character slips past a filter tells
+you which layer actually parses the input — a strong
+class-discriminator:
+
+- A raw metacharacter is blocked but its URL-, double-URL-, or
+  Unicode-overlong form works → a front filter normalises before a
+  back-end re-decodes. The decoder that wins names the sink (e.g.
+  `..%252f` reaching the filesystem points to path-traversal, not
+  the web server).
+- `%00` (null) truncating a value, or `%0d%0a` surviving into a
+  header, points to CRLF / header-injection.
+- Operator-style bracket params (`x[$ne]=`) or `__proto__` keys
+  changing behaviour points to NoSQL / prototype-pollution rather
+  than classic SQLi.
+
+When a probe is blocked, re-encode it before concluding the class
+is absent. The encoding ladder lives in
+`references/signal-to-class.md`.
 
 ## Workflow
 

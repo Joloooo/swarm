@@ -1,7 +1,39 @@
 ---
 name: request-smuggling
 description: >-
-  Use request-smuggling when recon shows the target is served through more than one HTTP processing layer, so two parsers sit on the wire and may disagree about where one request ends and the next begins. The clearest routing signal is an edge or intermediary fingerprint in the response headers — a CDN or WAF banner (Cloudflare with a CF-Ray header, Akamai, Fastly with X-Served-By, AWS CloudFront with X-Amz-Cf-Id, Azure Front Door, Imperva), a reverse-proxy banner (Server: nginx, Via with Varnish, HAProxy, Traefik, Envoy), a load-balancer or gateway cookie (an ALB or awselb cookie, F5 BIG-IP, NetScaler, Kong), or any sign that the front-end banner and 404/500 error-page style differ from the back-end app it fronts. Other openers: the connection stays alive and is reused (HTTP/1.1 keep-alive to a distinct origin), the edge negotiates HTTP/2 to the client while the origin still behaves like HTTP/1.1, an h2c upgrade is reachable, or the objective is to reach an internal-only path the edge blocks on the first request (/admin, /metrics, /actuator). A body-accepting POST endpoint that does not auto-redirect (/login, /search, /api/*, /graphql) gives the input surface to probe. Covers the CL.TE, TE.CL, TE.TE, CL.0, HTTP/2 downgrade and h2c upgrade variants plus header-normalization differentials, with timing and differential detection oracles and tool dispatch (Smuggler, h2csmuggler, Burp Turbo Intruder, raw socket scripting). Dispatch only on these recon facts, never on a probe result — a hang, a method or path response appearing on a request you did not send, or a TE/CL obfuscation flipping behaviour are confirmation tells that exist only after this skill runs, so they live in the skill body, not here. Disambiguation: a single server with no edge, proxy, or connection-reuse seam has no parser split, so request smuggling cannot exist — do not dispatch. Header injection into one server's own response is CRLF / response-splitting against ONE parser, not smuggling. SSRF, cache poisoning, and open redirect are downstream impacts of a confirmed desync, not the routing reason — if there is no front-end/back-end framing disagreement, route to those dedicated skills instead.
+  Use: Use request-smuggling when recon shows the target is served through more than one HTTP
+  processing layer, so two parsers sit on the wire and may disagree about where one request ends and
+  the next begins.
+  Signals: The clearest routing signal is an edge or intermediary fingerprint in the response
+  headers — a CDN or WAF banner (Cloudflare with a CF-Ray header, Akamai, Fastly with X-Served-By,
+  AWS CloudFront with X-Amz-Cf-Id, Azure Front Door, Imperva), a reverse-proxy banner (Server:
+  nginx, Via with Varnish, HAProxy, Traefik, Envoy), a load-balancer or gateway cookie (an ALB or
+  awselb cookie, F5 BIG-IP, NetScaler, Kong), or any sign that the front-end banner and 404/500
+  error-page style differ from the back-end app it fronts. Other openers: the connection stays alive
+  and is reused (HTTP/1.1 keep-alive to a distinct origin), the edge negotiates HTTP/2 to the client
+  while the origin still behaves like HTTP/1.1, an h2c upgrade is reachable, or the objective is to
+  reach an internal-only path the edge blocks on the first request (/admin, /metrics, /actuator). A
+  body-accepting POST endpoint that does not auto-redirect (/login, /search, /api/*, /graphql) gives
+  the input surface to probe.
+  Pair with: Also dispatch request-builder in parallel when the same evidence requires raw
+  method/header/body control; dispatch ssrf or open-redirect separately only when there is
+  independent outbound-fetch or redirect evidence, not merely because desync could become an impact;
+  co-dispatch means separate focused workers sharing the same investigation state, not merging skill
+  prompts.
+  Coverage: Covers the CL.TE, TE.CL, TE.TE, CL.0, HTTP/2 downgrade and h2c upgrade variants plus
+  header-normalization differentials, with timing and differential detection oracles and tool
+  dispatch (Smuggler, h2csmuggler, Burp Turbo Intruder, raw socket scripting). Dispatch only on
+  these recon facts, never on a probe result — a hang, a method or path response appearing on a
+  request you did not send, or a TE/CL obfuscation flipping behaviour are confirmation tells that
+  exist only after this skill runs, so they live in the skill body, not here.
+  Do not use: Disambiguation: a single server with no edge, proxy, or connection-reuse seam has no
+  parser split, so request smuggling cannot exist — do not dispatch. Header injection into one
+  server's own response is CRLF / response-splitting against ONE parser, not smuggling. SSRF, cache
+  poisoning, and open redirect are downstream impacts of a confirmed desync, not the routing reason
+  — if there is no front-end/back-end framing disagreement, route to those dedicated skills instead.
+  Do not dispatch when the described input surface is absent, when the value is only stored or
+  echoed without reaching this skill's mechanism, or when another specialist's sink explains the
+  evidence more directly.
 metadata:
   dispatchable: true
 ---
@@ -92,6 +124,14 @@ x=1
 
 ```
 
+TE.CL is the fiddly one: the **first chunk size is hex** and must equal
+the exact byte length of the smuggled request that follows it (`5c` above
+= 92 bytes), and the request MUST end with the terminating `0\r\n\r\n`.
+Count bytes including each `\r\n`; an off-by-one breaks the desync
+silently. Send it raw (`openssl s_client`) — any client that
+auto-recomputes `Content-Length` (curl, Burp with "Update Content-Length"
+checked) destroys the payload.
+
 ### TE.TE — both honour Transfer-Encoding, but disagree on obfuscation
 Use header obfuscation that exactly one of the two parsers ignores. Then
 that parser falls back to `Content-Length`, recreating CL.TE or TE.CL on
@@ -164,6 +204,34 @@ Connection: Upgrade, HTTP2-Settings
 Upgrade: h2c
 HTTP2-Settings: AAMAAABkAAQAAP__
 ```
+
+### Client-side desync (CSD) — no front-end needed
+A server-side desync needs a shared front-end connection. A *client-side*
+desync (CSD) works against a single server: find a path that ignores the
+body of a POST (an endpoint that treats POST like GET — static files,
+redirect handlers, some SPA routes), then poison the **victim's own
+browser connection** with a smuggled request. No proxy or connection
+pooling is required, and it is reachable purely from JavaScript a victim
+loads. The trigger is the victim's browser, so it works cross-origin.
+
+```javascript
+// Victim's browser sends a POST whose body the server treats as a
+// second request on the keep-alive socket the browser then reuses.
+fetch('https://target.example/', {
+  method: 'POST',
+  body: "GET / HTTP/1.1\r\nHost: target.example",
+  mode: 'no-cors', credentials: 'include'
+})
+```
+
+Outcomes a confirmed CSD enables: capture the victim's credentials into a
+store you can read, make the victim deliver a request to an internal path
+you cannot reach, or run reflected JavaScript as if from the target
+origin (stored/reflected XSS on the victim's session). The
+redirect-handler chain (POST that returns a redirect, blocked by CORS, so
+the browser runs the `catch` and reuses the poisoned socket) is the most
+reliable delivery. See `references/client-side-desync.md` for the full
+detection-to-impact chain and the reflected-JS variant.
 
 ## Detection
 

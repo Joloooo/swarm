@@ -1021,6 +1021,63 @@ class TokenLoggingCallback(AsyncCallbackHandler):
 TOKEN_LOGGER = TokenLoggingCallback()
 
 
+def record_external_usage(
+    usage: dict | None,
+    *,
+    agent_id: str,
+    node: str,
+    model: str = "",
+    duration_ms: int | None = None,
+) -> None:
+    """Account a token-bearing call made OUTSIDE the LangChain callback path.
+
+    The Codex hosted ``web_search`` runs via ``astream_codex`` directly, so it
+    never triggers ``on_llm_end`` — its tokens would otherwise be invisible
+    (``TOKEN_TOTALS`` / ``NODE_TOTALS`` empty, no ``full_logs.jsonl`` row, and
+    the ``▸ web_search`` rollup shows no chip). Hand this the usage dict the
+    stream reported and it mirrors exactly what ``on_llm_end`` records: bump
+    the per-agent and per-node running totals AND append one ``llm_end`` event.
+
+    No-ops on a falsy ``usage`` (e.g. the ChatGPT plan returns
+    ``usage_not_included``), so the node's display stays honestly blank rather
+    than fabricating a number.
+    """
+    if not usage:
+        return
+    it = int(usage.get("input_tokens", 0) or 0)
+    ot = int(usage.get("output_tokens", 0) or 0)
+    rt = int(usage.get("reasoning_tokens", 0) or 0)
+    ct = int(usage.get("cached_tokens", 0) or 0)
+    running = TokenLoggingCallback._update_totals(
+        agent_id=agent_id,
+        input_tokens=it,
+        output_tokens=ot,
+        reasoning_tokens=rt,
+        cached_tokens=ct,
+        node=node,
+    )
+    try:
+        from src.observability.writers import _resolve_active_run_id
+        rid = _resolve_active_run_id()
+    except Exception:  # noqa: BLE001 — observability must not break the graph
+        rid = None
+    event = {
+        "agent_id": agent_id,
+        "node": node,
+        "model": model or "?",
+        "input_tokens": it,
+        "output_tokens": ot,
+        "reasoning_tokens": rt,
+        "cached_tokens": ct,
+        "running_input": running.input_tokens,
+        "running_calls": running.calls,
+        "running_peak_input": running.peak_input,
+    }
+    if duration_ms is not None:
+        event["duration_ms"] = duration_ms
+    _append_llm_event(rid, event)
+
+
 def make_call_config(
     *,
     run_id: str | None,

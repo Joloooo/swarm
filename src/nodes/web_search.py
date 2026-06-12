@@ -26,6 +26,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.graph import config
+from src.llm.callbacks import record_external_usage
 from src.nodes.base import BaseNode
 from src.refusals.detect import looks_like_refusal
 from src.refusals.vocabulary import filter_text
@@ -155,6 +156,16 @@ class WebSearchNode(BaseNode):
                 "Codex web_search: searches=%d citations=%d refused=%s err=%s",
                 result.num_searches, len(result.citations),
                 result.hard_refused, result.error,
+            )
+            # Account the hosted-search tokens. This Codex call bypasses the
+            # LangChain callback, so without this the web_search node's cost is
+            # invisible (no NODE_TOTALS entry → blank ▸ web_search chip). No-op
+            # when the plan didn't report usage.
+            record_external_usage(
+                result.usage,
+                agent_id="web_search",
+                node="web_search",
+                model=result.model,
             )
 
             answer = result.answer

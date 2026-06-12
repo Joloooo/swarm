@@ -36,6 +36,27 @@ fetch "$SL/Discovery/Web-Content/raft-large-directories.txt"    "$DIR/raft-large
 fetch "$SL/Discovery/Web-Content/directory-list-2.3-medium.txt" "$DIR/directory-list-2.3-medium.txt"
 fetch "$SL/Discovery/Web-Content/big.txt"                       "$DIR/big.txt"
 
+echo "== CMS component slugs (wp-plugins preset — recon/fuzzing plugin enum) =="
+# The SecLists CMS plugin list is dated: it omits modern + known-vulnerable
+# plugins (no backup-backup → CVE-2023-6553, no elementor, no woocommerce).
+# So we rebuild it to BARE slugs and prepend a curated, version-controlled
+# block of high-value slugs (probed first, before the long common tail under a
+# run timer). The committed wordlists/wp-plugins.txt is the guaranteed
+# fallback; this step refreshes/extends it idempotently.
+WP_CVE_EXTRA="all-in-one-wp-migration backup-backup better-search-replace bricks duplicator elementor essential-addons-for-elementor-lite forminator litespeed-cache ninja-forms profile-builder really-simple-ssl royal-elementor-addons ultimate-member woocommerce wp-automatic wp-fastest-cache wp-file-manager wp-statistics wpforms-lite"
+if curl -fsSL "$SL/Discovery/Web-Content/CMS/wp-plugins.fuzz.txt" -o "$DIR/.wp-plugins.fuzz.part"; then
+  # SecLists entries look like `wp-content/plugins/<slug>/` → reduce to <slug>.
+  sed -E 's#^wp-content/plugins/##; s#/+$##' "$DIR/.wp-plugins.fuzz.part" \
+    | grep -E '^[A-Za-z0-9._%~-]+$' | sort -u > "$DIR/.wp-base.part"
+  printf '%s\n' $WP_CVE_EXTRA | sort -u > "$DIR/.wp-extra.part"
+  # curated CVE/modern slugs first, then the SecLists base minus those dupes.
+  { cat "$DIR/.wp-extra.part"; comm -23 "$DIR/.wp-base.part" "$DIR/.wp-extra.part"; } > "$DIR/wp-plugins.txt"
+  rm -f "$DIR/.wp-plugins.fuzz.part" "$DIR/.wp-base.part" "$DIR/.wp-extra.part"
+  echo "ok    wp-plugins.txt  ($(wc -l < "$DIR/wp-plugins.txt" | tr -d ' ') slugs, $(du -h "$DIR/wp-plugins.txt" | cut -f1); backup-backup $(grep -qx backup-backup "$DIR/wp-plugins.txt" && echo present || echo MISSING))"
+else
+  echo "WARN  could not refresh wp-plugins.txt from SecLists — keeping committed copy"
+fi
+
 echo "== usernames / passwords =="
 fetch "$SL/Usernames/top-usernames-shortlist.txt"              "$DIR/top-usernames-shortlist.txt"
 fetch "$SL/Passwords/Common-Credentials/10-million-password-list-top-100000.txt" "$DIR/passwords-top-100000.txt"

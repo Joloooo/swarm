@@ -1,7 +1,35 @@
 ---
 name: information-disclosure
 description: >-
-  Use information-disclosure when authorized testing should mine a target for bytes it leaks without intending to — code, configuration, identifiers, versions, or trust boundaries — and the recon picture already shows a likely leak channel rather than a clean app. Dispatch it as the cheap, high-yield first move on any unfamiliar target, and especially when recon surfaces fingerprinting headers (Server, X-Powered-By, X-AspNet-Version, Via, custom debug or tracing headers) that pin a precise component version, a stack trace or framework debug page (Werkzeug, Django DEBUG, Laravel Ignition, Symfony profiler, ASP.NET error pages) already visible in an ordinary response, a static artifact path returning 200 instead of 404 (/.git, /.env, /composer.json, source-map .map files, /swagger.json, /openapi.json, /actuator, /metrics, /debug/pprof, /server-status, backup or temp names like .bak and .old), Apache or nginx directory listings, a /graphql endpoint or OpenAPI docs hinting introspection or reflection is on, a SPA shipping large JS bundles with embedded __NEXT_DATA__ or build-time env values, or an objective phrased as reading internal data the UI hides such as versions, schema, paths, or hidden routes. It also covers differential oracles that infer existence or state from response status / length / ETag / Last-Modified / 304-vs-200, and cache-key confusion that serves cross-user content. Disambiguate from look-alikes by the goal, not the surface: if a leaked SQL fragment is the doorway you intend to extract data through with crafted queries it is SQL injection; if you retrieve another user's full record by swapping an id with no authorization check it is IDOR or broken access control (this skill only infers existence from differential responses); if you bend a path or file parameter with ../ to fetch arbitrary files it is LFI or path traversal (this skill only finds artifacts at fixed, intentionally reachable paths); if you make the server fetch a leaked internal URL it is SSRF; and if a reflected value is evaluated as a template it is SSTI while a value reflected into HTML is XSS.
+  Use: Use information-disclosure when authorized testing should mine a target for bytes it leaks
+  without intending to — code, configuration, identifiers, versions, or trust boundaries — and the
+  recon picture already shows a likely leak channel rather than a clean app.
+  Signals: Dispatch it when recon surfaces fingerprinting headers (Server, X-Powered-By,
+  X-AspNet-Version, Via, custom debug or tracing headers) that pin a precise component version, a
+  stack trace or framework debug page (Werkzeug, Django DEBUG, Laravel Ignition, Symfony profiler,
+  ASP.NET error pages) already visible in an ordinary response, a static artifact path returning 200
+  instead of 404 (/.git, /.env, /composer.json, source-map .map files, /swagger.json, /openapi.json,
+  /actuator, /metrics, /debug/pprof, /server-status, backup or temp names like .bak and .old),
+  Apache or nginx directory listings, a /graphql endpoint or OpenAPI docs hinting introspection or
+  reflection is on, a SPA shipping large JS bundles with embedded __NEXT_DATA__ or build-time env
+  values, or an objective phrased as reading internal data the UI hides such as versions, schema,
+  paths, or hidden routes. It also covers differential oracles that infer existence or state from
+  response status / length / ETag / Last-Modified / 304-vs-200, and cache-key confusion that serves
+  cross-user content. Disambiguate from look-alikes by the goal, not the surface: if a leaked SQL
+  fragment is the doorway you intend to extract data through with crafted queries it is SQL
+  injection; if you retrieve another user's full record by swapping an id with no authorization
+  check it is IDOR or broken access control (this skill only infers existence from differential
+  responses); if you bend a path or file parameter with ../ to fetch arbitrary files it is LFI or
+  path traversal (this skill only finds artifacts at fixed, intentionally reachable paths); if you
+  make the server fetch a leaked internal URL it is SSRF; and if a reflected value is evaluated as a
+  template it is SSTI while a value reflected into HTML is XSS.
+  Pair with: Also dispatch recon, error-handling, lfi in parallel when the same evidence shows those
+  mechanisms too; co-dispatch means separate focused workers sharing the same investigation state,
+  not merging skill prompts.
+  Do not use: Do not dispatch just because the target is unfamiliar; skip when no leak channel,
+  artifact path, verbose header/error, public docs, source map, directory listing, or differential
+  oracle is visible. If the leak requires crafted path traversal, object swapping, query injection,
+  or server-side fetch, route to that specialist first.
 metadata:
   dispatchable: true
 ---
@@ -77,6 +105,15 @@ response byte, artifact, and header as potential intelligence.
 ### DVCS and backups
 - `/.git/` (`HEAD`, `config`, `index`, `objects`), `.svn/entries`,
   `.hg/store` → reconstruct source and secrets.
+- A `403` (nginx `deny all`) on `/.git/` is NOT a dead end — the
+  files underneath are still fetchable by path. Confirm with
+  `/.git/HEAD`, `/.git/config`, `/.git/logs/HEAD`, then walk the
+  object graph by hand even with directory listing OFF. Full
+  per-DVCS extraction (git `cat-file` walk, `.git/index` parser, SVN
+  `wc.db` → `pristine/`) is in `references/dvcs-extraction.md`.
+- The win is the *history*: a secret committed then "removed" still
+  lives in an older commit object — fetch the commit BEFORE the
+  remove commit.
 - `.bak` / `.old` / `~` / `.swp` / `.swo` / `.tmp` / `.orig`,
   DB dumps, zipped deployments.
 - Build artifacts containing `.map`, env prints, internal URLs.
@@ -88,6 +125,18 @@ response byte, artifact, and header as potential intelligence.
   account tokens.
 - Credentials and connection strings; internal hosts and ports;
   JWT secrets.
+- **Find keys in what you recovered** — grep bundles / `.env` /
+  config dumps / reconstructed repo for high-signal shapes
+  (`AKIA[0-9A-Z]{16}`, `ghp_…`, `-----BEGIN … PRIVATE KEY-----`,
+  `eyJ…` JWTs). Then **validate** with the provider's cheapest
+  read-only echo endpoint (e.g. Telegram `getMe`,
+  `aws sts get-caller-identity`) — a key is only a finding if it is
+  live and in scope. Shapes + validation in
+  `references/secret-detection.md`.
+- A leaked ASP.NET `<machineKey>` (or a known/default one matched
+  against a captured `__VIEWSTATE`) breaks ViewState and auth-cookie
+  integrity → signed-object deserialization RCE chain. See
+  `references/iis-machinekey.md`.
 
 ### API schemas and introspection
 - **OpenAPI / Swagger** — `/swagger`, `/api-docs`,
@@ -163,6 +212,27 @@ response byte, artifact, and header as potential intelligence.
 - SSR vs. CSR — server-rendered pages omit fields while JSON API
   includes them.
 
+### ORM filter-injection leaks
+When a list/search endpoint forwards a user-controlled object into
+the ORM's filter/where clause, the ORM's own operators become a
+blind oracle to read fields the UI never returns (password hashes,
+reset tokens, keys on other users' rows). Signal: a filter param
+shaped like the ORM — `__`-suffixed lookups, nested `where`/`filter`
+JSON, or `q[...]` predicates.
+- **Django** (`filter(**request.data)`): `password__startswith`,
+  `__contains`, `__regex` as a char-by-char oracle; relational
+  traversal via `created_by__user__password`; MySQL ReDoS forces a
+  visible 500 on match.
+- **Prisma** (`where: req.query.filter`): over-fetch with
+  `include`/`select`, or `filter[createdBy][resetToken][startsWith]`.
+- **Ransack <4.0** (Ruby):
+  `q[user_reset_password_token_start]=2` returns rows only when the
+  prefix matches.
+Full operator catalogue, many-to-many traversal, and the CVE list in
+`references/orm-leak.md`. Disambiguate: this reads existing fields
+through legitimate filter operators — if you instead break out of the
+query into raw SQL it is SQL injection.
+
 ## Triage rubric
 
 | Severity | Examples |
@@ -176,7 +246,9 @@ response byte, artifact, and header as potential intelligence.
 
 ### Credential extraction
 - DVCS / config dumps expose secrets (DB, SMTP, JWT, cloud) → cloud
-  control-plane access.
+  control-plane access. Confirm each key is live with a read-only
+  provider probe before reporting (see
+  `references/secret-detection.md`); a revoked key is informational.
 
 ### Version → CVE
 1. Derive precise component versions from headers / errors /
@@ -230,7 +302,20 @@ A finding is real only when:
 ## Tools to use
 - `bash` — `curl -i` for header inspection,
   `gobuster` / `ffuf` / `feroxbuster` for artifact discovery (when
-  authorized), `git` to dump exposed `.git/` directories.
+  authorized), `git` to dump and walk exposed `.git/` directories.
+- `nuclei` — `-t token-spray/` validates one recovered token against
+  many provider endpoints at once.
+
+## References
+
+- `references/dvcs-extraction.md` — reconstruct source from exposed
+  `.git`/`.svn`/`.hg`/`.bzr` when directory listing is off.
+- `references/secret-detection.md` — regex shapes for leaked keys and
+  read-only validation per provider.
+- `references/orm-leak.md` — Django/Prisma/Ransack filter-injection
+  oracles, relational traversal, ReDoS error oracle, CVEs.
+- `references/iis-machinekey.md` — leaked/known ASP.NET machineKey →
+  ViewState integrity break.
 
 ## Rules
 - Document the *minimum* leaked information per finding — a stack

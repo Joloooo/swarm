@@ -19,6 +19,7 @@ CFM   : .cfm .cfml .cfc .dbm
 Perl  : .pl .pm .cgi .lib
 Node  : .js .json .node
 Flash : .swf      Yaws: .yaws
+SSI   : .shtml .shtm .stm .sht   (Apache mod_include / IIS SSI -> #exec, #include)
 ```
 
 IIS legacy quirks: `.cer` and `.asa` execute on IIS <= 7.5;

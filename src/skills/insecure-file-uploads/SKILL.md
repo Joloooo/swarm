@@ -1,7 +1,31 @@
 ---
 name: insecure-file-uploads
 description: >-
-  Use insecure-file-uploads when recon shows the application accepts a file from the user and stores or serves it back, and the objective involves running code, getting stored content rendered, or reading server files through that intake. The clearest routing signals are a form with enctype multipart/form-data and an input of type file, or any field or parameter named like file, upload, avatar, image, photo, attachment, import, document, media, logo, banner, cv, resume, or proof; a response that hands back a stored URL or path you can fetch; uploaded objects served from guessable or incremental paths; a presigned direct-to-cloud flow whose responses reference S3, GCS, or Azure blob hosts and signature parameters; a resumable or multipart protocol with init, chunk, and complete or finalize steps; an endpoint that accepts and extracts a zip, tar, or jar; a fetch-from-URL uploader; or a server fingerprint (PHP, Apache, IIS/ASP.NET, Tomcat/JSP) plus an upload that lands inside the web root, or an error string naming a media processor like ImageMagick, Ghostscript, ExifTool, ffmpeg, or LibreOffice. Disambiguation: script-bearing content typed into an ordinary text field is XSS, not this; a url or path parameter that only reads server files with no user file written is LFI, path traversal, or SSRF; a download or export endpoint that discloses arbitrary files is path traversal; and CSRF on the upload form concerns forging the request, not bypassing content validation. Route here only when user-supplied bytes are written and then served or processed. Covers extension / MIME / magic-byte bypass, polyglot files (GIFAR, PHAR, SVG-with-script), server-side execution paths (web shells, .htaccess / .user.ini / web.config tricks, ImageMagick / Ghostscript / ExifTool RCEs), stored XSS via uploaded HTML / SVG served inline, path traversal in filenames, archive attacks (Zip Slip, zip-bomb, symlink-in-zip), presigned-URL abuse, resumable / multipart finalize tricks, processing races (request before AV/CDR completes), and metadata-driven vectors (EXIF / XMP / Office document properties).
+  Use: Use insecure-file-uploads when recon shows the application accepts a file from the user and
+  stores or serves it back, and the objective involves running code, getting stored content
+  rendered, or reading server files through that intake. Signals: The clearest routing signals are a
+  form with enctype multipart/form-data and an input of type file, or any field or parameter named
+  like file, upload, avatar, image, photo, attachment, import, document, media, logo, banner, cv,
+  resume, or proof; a response that hands back a stored URL or path you can fetch; uploaded objects
+  served from guessable or incremental paths; a presigned direct-to-cloud flow whose responses
+  reference S3, GCS, or Azure blob hosts and signature parameters; a resumable or multipart protocol
+  with init, chunk, and complete or finalize steps; an endpoint that accepts and extracts a zip,
+  tar, or jar; a fetch-from-URL uploader; or a server fingerprint (PHP, Apache, IIS/ASP.NET,
+  Tomcat/JSP) plus an upload that lands inside the web root, or an error string naming a media
+  processor like ImageMagick, Ghostscript, ExifTool, ffmpeg, or LibreOffice. Pair with: Also
+  dispatch rce, deserialization, xxe, xss, lfi in parallel when the same evidence shows those
+  mechanisms too; co-dispatch means separate focused workers sharing the same investigation state,
+  not merging skill prompts. Coverage: Covers extension / MIME / magic-byte bypass, polyglot files
+  (GIFAR, PHAR, SVG-with-script), server-side execution paths (web shells, .htaccess / .user.ini /
+  web.config tricks, ImageMagick / Ghostscript / ExifTool RCEs), stored XSS via uploaded HTML / SVG
+  served inline, path traversal in filenames, archive attacks (Zip Slip, zip-bomb, symlink-in-zip),
+  presigned-URL abuse, resumable / multipart finalize tricks, processing races (request before
+  AV/CDR completes), and metadata-driven vectors (EXIF / XMP / Office document properties). Do not
+  use: Disambiguation: script-bearing content typed into an ordinary text field is XSS, not this; a
+  url or path parameter that only reads server files with no user file written is LFI, path
+  traversal, or SSRF; a download or export endpoint that discloses arbitrary files is path
+  traversal; and CSRF on the upload form concerns forging the request, not bypassing content
+  validation. Route here only when user-supplied bytes are written and then served or processed.
 metadata:
   dispatchable: true
 ---
@@ -100,6 +124,19 @@ authorization and validation must hold across every step.
   `.user.ini` (`auto_prepend_file` / `auto_append_file`) for PHP-FPM.
 - ASP / JSP equivalents where supported; IIS `web.config` to enable
   script execution.
+- **Self-contained config shells** — when only the config file is
+  droppable, the config maps *itself* to the interpreter and carries
+  the shell in one upload: `.htaccess` with `AddType ... .htaccess`
+  plus an inline `<?php passthru($_GET['c']);?>`; `web.config` that
+  re-enables the `*.config` handler plus an inline ASP body. A
+  `.htaccess`/XBM-or-WBMP polyglot also passes `exif_imagetype()`.
+  See `references/server-and-processor-rce.md`.
+- **Server-Side Includes** — if the host is Apache (`mod_include`) or
+  IIS with SSI on, a `.shtml` / `.stm` / `.shtm` upload runs
+  `<!--#exec cmd="id" -->` (command exec) or
+  `<!--#include file="../../web.config" -->` (file read) when served.
+  Try these extensions when PHP/ASP are blocked. Jetty: an `*.xml` or
+  `*.war` dropped in `webapps/` auto-deploys and runs `Runtime.exec`.
 
 ### Stored XSS
 - SVG with `onload` / `onerror` handlers served as `image/svg+xml`

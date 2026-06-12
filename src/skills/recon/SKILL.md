@@ -96,6 +96,51 @@ Two cheap exceptions:
 4. **Subdomain enumeration**: only if the target is a real domain.
 5. **Input-surface mapping**: forms, API endpoints, query parameters,
    any other user-controllable inputs.
+6. **Virtual-host discovery**: one IP can serve many sites, picked by
+   the `Host:` header. A default request only ever reaches the default
+   vhost — hidden ones (admin panels, staging, internal apps) hide
+   behind other `Host:` values on the *same* IP. See the next section.
+
+## Virtual-host (vhost) discovery
+
+A single IP or hostname often hosts more than the one site you see.
+The server routes each request by its `Host:` header, so a hidden vhost
+never shows up until you ask for it by name. This is distinct from DNS
+subdomain enumeration: a vhost may have **no public DNS record at all**
+and only answer when you send its name in the `Host:` header.
+
+When to run it: any time the target is an IP or a hostname and you
+suspect more than one app lives behind it (a generic default page, a
+load balancer / reverse-proxy banner, a wildcard TLS cert with several
+SAN entries, or a CTF-style box where the "real" app is hidden).
+
+- **Brute-force vhosts**: `gobuster vhost -u http://<target> -w <wordlist> --append-domain`
+  (omit `--append-domain` if your wordlist already holds FQDNs). Use a
+  vhost / subdomain wordlist via `get_wordlist`.
+- **Manual probe**: `curl -s -H "Host: admin.example.com" http://<target-ip>/`
+  — swap in known or guessed names and compare against the default.
+- **Difference oracle** — you found a real vhost when, versus the
+  default response, you see a different: HTML `<title>` / brand / meta,
+  body size (`Content-Length`), status code (200 vs 403 / redirect),
+  custom error page, or redirect chain to a different domain. A server
+  that returns the *same* page for every made-up `Host:` is a catch-all
+  — note it and move on; only **differing** responses are real vhosts.
+- **Seed the name list** from what you already hold: TLS-cert SAN
+  entries, links/JS hostnames in the homepage, `robots.txt`, and any
+  subdomains from the passive pass. Those are higher-signal than a blind
+  wordlist.
+- **Origin-IP / WAF bypass**: if the public name sits behind Cloudflare
+  or another WAF, resolve the site's **historical** IPs (passive DNS /
+  DNS history) and spray the current hostname as a `Host:` header
+  against each one (`curl -H "Host: example.com" http://<old-ip>/`). A
+  matching response means you reached the origin directly and skipped
+  the WAF — a high-value finding to hand off.
+
+Found a working vhost? File it as a surface (host + IP + what it serves)
+and re-run recon scoped to it — it is a fresh app to map, not the end of
+the pass. The fuller playbook (wordlist choice, catch-all detection,
+SAN harvesting, origin-finder workflow) is in `references/vhost-discovery.md`,
+loaded on demand.
 
 ## Enumerate a CMS down to its components
 
@@ -118,6 +163,13 @@ comprehensive component list.
   enumeration needs no API token; the WPVulnDB token only adds wpscan's
   own CVE annotations, which the planner can also resolve via `web_search`
   / `nuclei`.
+- If WPScan aborts, says its database is missing/stale, exits non-zero, or
+  was run without the all-plugin/all-theme forms (`ap`, `at`), treat
+  WordPress component enumeration as **not covered**. Immediately run a
+  fallback path enumeration against `/wp-content/plugins/FUZZ/` and
+  `/wp-content/themes/FUZZ/` with a component slug list, then request
+  `readme.txt`, plugin headers, and theme `style.css` on hits to recover
+  versions.
 - **Any stack (incl. non-WordPress CMS)**: run `nuclei` technology and
   CVE templates against the target, and request the known component path
   (`/wp-content/plugins/<slug>/`, `/modules/<slug>/`,

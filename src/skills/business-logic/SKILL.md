@@ -1,7 +1,32 @@
 ---
 name: business-logic
 description: >-
-  Use business-logic when recon reveals an application whose rules about money, quantities, privileges, or workflow order could be broken by the application accepting an action it should not, rather than by code execution. Strong routing signals: a multi-step process visible in the page flow or endpoint names (cart then shipping then payment then confirm; register then verify then activate; request-reset then token then set-password), especially with state markers like step, orderStatus, stepToken, paymentIntentId, reviewState, or approvalId; client-submitted fields the server should own, such as price, amount, total, quantity, qty, discount, coupon, role, isAdmin, tier, plan, credits, or balance appearing in forms, hidden inputs, or JSON bodies; sensitive operations with no apparent throttle (login, OTP verify, password reset, coupon apply, checkout); one-shot value tokens like vouchers, gift cards, referral or trial claims; idempotency or de-dup machinery such as an Idempotency-Key header, requestId, or nonce; multi-tenant or per-org scoping (tenant, org, seat, quota); and an objective phrased as moving money without paying, exceeding a limit, retaining a privilege after downgrade, or skipping an approval. These are domain-specific bugs that need a model of the business, not just test inputs. Disambiguation: if input is reflected and rendered it is XSS, if evaluated as a template it is SSTI, and if it alters a database query it is SQL injection, so route those to their skills instead; a single guessable id you can swap to read another user's record with no workflow around it is IDOR or access-control, while business-logic owns the case where the defect is a sequence of requests or a broken value or state invariant; pure credential or token-crypto weaknesses (default passwords, JWT signature bypass, weak sessions) belong to auth-testing, and missing headers, verbose errors, or version disclosure are config or info-disclosure findings, not this skill.
+  Use: Use business-logic when recon reveals an application whose rules about money, quantities,
+  privileges, or workflow order could be broken by the application accepting an action it should
+  not, rather than by code execution.
+  Signals: Strong routing signals: a multi-step process visible in the page flow or endpoint names
+  (cart then shipping then payment then confirm; register then verify then activate; request-reset
+  then token then set-password), especially with state markers like step, orderStatus, stepToken,
+  paymentIntentId, reviewState, or approvalId; client-submitted fields the server should own, such
+  as price, amount, total, quantity, qty, discount, coupon, role, isAdmin, tier, plan, credits, or
+  balance appearing in forms, hidden inputs, or JSON bodies; sensitive operations with no apparent
+  throttle (login, OTP verify, password reset, coupon apply, checkout); one-shot value tokens like
+  vouchers, gift cards, referral or trial claims; idempotency or de-dup machinery such as an
+  Idempotency-Key header, requestId, or nonce; multi-tenant or per-org scoping (tenant, org, seat,
+  quota); and an objective phrased as moving money without paying, exceeding a limit, retaining a
+  privilege after downgrade, or skipping an approval. These are domain-specific bugs that need a
+  model of the business, not just test inputs.
+  Pair with: Also dispatch auth-testing, bfla, idor, race-conditions, mass-assignment, csrf in
+  parallel when the same evidence shows those mechanisms too; co-dispatch means separate focused
+  workers sharing the same investigation state, not merging skill prompts.
+  Do not use: Disambiguation: if input is reflected and rendered it is XSS, if evaluated as a
+  template it is SSTI, and if it alters a database query it is SQL injection, so route those to
+  their skills instead; a single guessable id you can swap to read another user's record with no
+  workflow around it is IDOR or access-control, while business-logic owns the case where the defect
+  is a sequence of requests or a broken value or state invariant; pure credential or token-crypto
+  weaknesses (default passwords, JWT signature bypass, weak sessions) belong to auth-testing, and
+  missing headers, verbose errors, or version disclosure are config or info-disclosure findings, not
+  this skill.
 metadata:
   dispatchable: true
 ---
@@ -109,6 +134,30 @@ payloads.
   rates; tax rounding per-item vs. per-order.
 - Negative amounts, zero-price, free-shipping thresholds, minimum /
   maximum guardrails.
+- **Sub-precision rounding ("money printing")** — transfer/credit an
+  amount below the system's minimum unit (e.g. 0.5 satoshi when 1 is the
+  floor). If the sender is rounded down to 0 but the receiver is rounded
+  up to 1, value is created from nothing; with no rate limit this
+  automates into unbounded gain. Oracle: net ledger sum increases after
+  a round-trip that should be value-neutral.
+- **Negative quantity to offset the total** — add a positive-priced item
+  plus a negative-quantity item so the cart total drops while the
+  positive item still ships; checks that only validate "total ≥ 0", not
+  per-line non-negativity, miss this.
+
+### Review, rating, and comment abuse
+- **Unearned / out-of-range input** — post a review as a "verified
+  purchaser" without buying; submit a rating outside the scale (0, 6, or
+  negative on a 1–5 system) to skew aggregates or break the average.
+- **Uniqueness bypass** — if one review/comment/vote per user is the
+  rule, post many: directly resubmit, or race concurrent submissions
+  (see `race-conditions`) to slip past the once-per-user check.
+- **Privilege/identity spoofing** — copy the `verified`, `role`, or
+  `author`/`userId` fields a privileged commenter sends and replay them
+  as a normal user; impersonate another user by setting their id on the
+  post body. CSRF is often missing on these endpoints.
+- **No cap** — thread/comment counts with no limit feed storage
+  exhaustion (see `references/resource-exhaustion.md`).
 
 ### Quotas, limits, inventory
 - Off-by-one and time-bound resets (UTC vs. local); pre-warm at T-1s
@@ -118,11 +167,32 @@ payloads.
 - Distributed counters without strong consistency enable
   double-consumption.
 
+### Resource exhaustion as a logic flaw
+The defect is the app accepting an action whose cost or effect it should
+bound. HIGH severity but **destructive** — prove the *trigger* with one
+small probe, confirm the bound is missing, then STOP. Never run a
+sustained flood against a live target.
+- **Account-lockout DoS** — flood failed logins for a known username to
+  lock the *victim* out; no password guess needed. A real logic bug, not
+  brute force.
+- **Content-driven CPU/memory blowup** — XML/SVG entity bomb, deeply
+  nested or wide GraphQL queries, ReDoS in a search/validation field,
+  image/zip decompression bombs. One over-nested input that errors or
+  hangs the response is the signal.
+- **Storage/quota exhaustion** — unbounded comments, uploads, or log
+  writes with no cap eventually fill disk/inodes (`No space left on
+  device`).
+- Full vectors, probes, and the filesystem-limit table:
+  `references/resource-exhaustion.md`.
+
 ### Refunds and chargebacks
 - **Double-refund** — refund via UI and support tool; partial refunds
   summing above captured amount.
 - Refund after benefits consumed (downloaded digital goods, shipped
   items) due to missing post-consumption checks.
+- **Refund-but-keep** — request a refund yet retain access to the
+  product/premium feature; cancel a subscription and confirm the
+  capability is actually revoked, not just billing stopped.
 
 ### Feature gates and roles
 - Feature flags enforced client-side or at edge but not in core
@@ -168,9 +238,18 @@ payloads.
 ## Special domain contexts
 
 ### E-commerce
-- Stack incompatible discounts via parallel apply.
+- Stack incompatible discounts: parallel apply, **HTTP Parameter
+  Pollution** (`coupon=A&coupon=B`), or **mass assignment** of a
+  coupon array when the UI accepts one — backends that read "first" on
+  one layer and "last" on another may apply both.
+- Reuse a one-time discount code: resubmit it, or race it across two
+  accounts/sessions before the "used" flag commits.
+- Apply a discount to non-discounted items by editing the item id /
+  scope in the server request after the code validates.
 - Remove qualifying item after discount applied; retain free shipping
   after cart changes.
+- Negative delivery fee, or flip a `freeShipping` / `deliveryFee`
+  parameter to reduce the final amount.
 - Modify shipping tier post-quote; abuse returns to keep product and
   refund.
 

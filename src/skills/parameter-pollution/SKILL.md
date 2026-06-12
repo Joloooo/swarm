@@ -1,7 +1,35 @@
 ---
 name: parameter-pollution
 description: >-
-  Use parameter-pollution when recon shows two or more parsers in the request path that could disagree about which copy of a duplicated input wins — that is, when a perimeter layer fingerprints in front of a separate backend (for example a CDN, WAF, or API-gateway banner such as Server: cloudflare, cf-ray, an x-amzn or apigw request-id header, Via:, or a Kong/NGINX/ALB marker) sitting ahead of an identifiable framework, since the security check and the business logic then run in different places. Also dispatch when recon exposes a security-critical input that some edge layer is likely to validate while a deeper layer consumes it: an allowlist-checked URL or redirect parameter (url, redirect_uri, next, return), an object-id parameter on an endpoint where authorization plausibly happens at a gateway, a role/permission/flag field, a token or state value in an OAuth/CSRF/SAML flow, a form with hidden or protected fields suggesting mass-assignment surface, or a /graphql endpoint with per-operation rate limits or quotas. The objective phrased as bypassing a filter, reaching an input the perimeter blocks, or acting on a value the edge thinks it authorized also routes here. Covers HTTP Parameter Pollution (HPP) and JSON / form parser-precedence differentials — duplicate query / body / header parameters, scalar-vs-array and mixed-notation shape attacks, JSON duplicate keys, framework-specific precedence (PHP last-wins, ASP.NET concatenation, Express last-wins, Django last-wins, Spring first-wins), and duplicate Transfer-Encoding / Content-Length request smuggling. Disambiguation: if a single value reflected into HTML executes, that is XSS; if a single value evaluated as a template renders, that is SSTI; if swapping one id to read another user's record needs no edge-versus-backend disagreement, that is plain IDOR not pollution; if simply adding one extra field sticks with no duplicate or precedence trick, that is mass assignment — parameter-pollution is specifically when making two parsers disagree about a duplicated or reshaped input is the mechanism being tested.
+  Use: Use parameter-pollution when recon shows duplicated or shape-shifted inputs could make
+  validation and business logic disagree about which value wins, either across edge/backend layers
+  or inside one framework's query/body/header binding pipeline.
+  Signals: Dispatch when a security-critical input appears in a form, query string, JSON body,
+  header, or GraphQL variables and duplicate keys, array/scalar variants, query-plus-body copies,
+  semicolon parameters, dotted/bracket notation, or case-normalized headers might be interpreted
+  differently. Edge/backend splits (CDN, WAF, API gateway, reverse proxy) are strong evidence, but a
+  single app can also be vulnerable when middleware validates one representation and the handler
+  consumes another. Inputs worth testing include allowlist-checked URLs or redirects, object IDs,
+  roles/permissions/flags, OAuth/CSRF/SAML state, hidden protected fields, and rate-limit or quota
+  keys. The objective phrased as bypassing a filter or acting on a value the checker did not consume
+  also routes here.
+  Pair with: Also dispatch request-builder, open-redirect, idor, mass-assignment, ssrf,
+  auth-testing, graphql in parallel when the same evidence shows those mechanisms too; co-dispatch
+  means separate focused workers sharing the same investigation state, not merging skill prompts.
+  Coverage: Covers HTTP Parameter Pollution (HPP) and JSON / form parser-precedence differentials —
+  duplicate query / body / header parameters, scalar-vs-array and mixed-notation shape attacks, JSON
+  duplicate keys, framework-specific precedence (PHP last-wins, ASP.NET concatenation, Express
+  last-wins, Django last-wins, Spring first-wins), while duplicate Transfer-Encoding or
+  Content-Length belongs to request-smuggling unless the issue is ordinary parameter/header
+  precedence after parsing.
+  Do not use: Disambiguation: if a single value reflected into HTML executes, that is XSS; if a
+  single value evaluated as a template renders, that is SSTI; if swapping one id to read another
+  user's record needs no duplicate/shape precedence disagreement, that is plain IDOR not pollution;
+  if simply adding one extra field sticks with no duplicate or precedence trick, that is mass
+  assignment — parameter-pollution is specifically when making two parsers disagree about a
+  duplicated or reshaped input is the mechanism being tested. Do not dispatch when the described
+  input surface is absent, when the value is only stored or echoed without reaching this skill's
+  mechanism, or when another specialist's sink explains the evidence more directly.
 metadata:
   dispatchable: true
 ---
@@ -84,9 +112,11 @@ opposite-layer behavior.
 | ASP.NET / IIS | **Concatenated**, comma-separated | `Request.QueryString["p"]` returns `"A,B"`. |
 | ASP.NET Core | First wins (default model binder) | Mixed — `IFormCollection` exposes both. |
 | JSP / Tomcat | First wins | `getParameter` returns first; `getParameterValues` returns all. |
+| IBM HTTP Server / Lotus Domino | First wins | Legacy stacks; first occurrence only. |
 | Perl CGI | Concatenated, comma-separated | Same shape as ASP.NET classic. |
 | Python / Flask | First wins (`request.args.get`) | `getlist` returns all; werkzeug-specific. |
 | Python / Django | **Last wins** (`request.GET["p"]`) | `getlist` returns all. |
+| Python / Zope | All occurrences as array | Returns `['a','b']` directly. |
 | Node / Express (`querystring`) | First wins | Default before Express 4.16. |
 | Node / Express (`qs`) | **Last wins**, with bracket arrays | `app.set('query parser', 'extended')`; `p[]=` builds array. |
 | Node / Hapi | Last wins | Joi schema may reject duplicates. |
@@ -152,6 +182,23 @@ backends accept — that asymmetry is the exploit.
 - Duplicate `Transfer-Encoding` / `Content-Length` headers — front-end and
   back-end interpret different ones, smuggling a second request through.
 
+### Client-side HPP (CSHPP)
+Distinct from the server-side cases above: here a value you control is
+reflected **into a URL or link the page builds in the browser**, not
+into HTML/JS directly. By injecting an encoded separator you append a
+second parameter to that generated URL.
+- Reflected source — a server param echoed into an `href`, form `action`,
+  `<a>` link, redirect target, or `XMLHttpRequest`/`fetch` URL.
+- The injection — put an encoded `&` (`%26`) in your value so the page
+  decodes it and splits one parameter into two:
+  `?lang=en%26admin=true` becomes `lang=en&admin=true` in the built link.
+- Impact — the injected second parameter rides along on the next click
+  or auto-followed request, overriding a value (role, callback,
+  `redirect_uri`) on a same-origin endpoint that trusts page-generated
+  links. Pairs with open-redirect and csrf.
+- See `references/client-side-hpp.md` for the full reflection-to-link
+  walkthrough and probe pairs.
+
 ## Bypass techniques
 
 **Whitespace / separator tricks**: Some parsers split on `&`, others on
@@ -163,6 +210,14 @@ on some configurations, others don't.
 
 **URL-encoded parameter names**: `par%61m=evil` decodes to `param` in the
 backend but the WAF rule on the literal string `param` may miss it.
+
+**Encoded-separator injection**: Smuggle a *whole extra parameter* inside
+one value by encoding the separator. `p=value1%26other=value2` — the `%26`
+decodes to `&` at a layer that re-parses the string, splitting it into
+`p=value1` plus a new `other=value2`. Useful when a value gets concatenated
+into a downstream URL (server- or client-side) that is then re-parsed:
+the injected `other=` lands as a real parameter the first parser never saw.
+Try `%26`, double-encoded `%2526`, and a `;` separator variant.
 
 **Double / triple encoding**: `par%2561m` — `%25` decodes to `%`, then
 `%61` decodes to `a`. Layered decoders unwrap at different depths.

@@ -1,7 +1,26 @@
 ---
 name: idor
 description: >-
-  Use idor when recon shows a user-controlled identifier that the server uses to look up a stored record — a numeric, sequential, or low-entropy id in a URL path or query (such as an account, order, invoice, profile, document, message, or report id), a UUID/ULID/slug that was harvested from a list/search/export/email/JS bundle, or a relational reference like ownerId, accountId, tenantId, projectId, or subscriptionId sitting inside a JSON body, form field, cookie, or JWT claim. It also fits when the app exposes REST CRUD routes (GET/PUT/PATCH/DELETE /api/<resource>/{id}), GraphQL field arguments such as user(id:) or Relay node(id:) global ids, batch/bulk endpoints that take an array of ids (which often validate only the first element), file/object-storage keys or signed share links, multi-tenant scoping the client supplies via a header, subdomain, or path (X-Tenant-ID, X-User-Id, org slug), or whenever the target requires login and the stated objective is to read or change data belonging to another user, tenant, or role that the UI hides. Useful even when bodies are masked: confirm via response differentials (status, size, ETag, timing). Disambiguate from look-alikes: if the id is merely reflected back into the page rather than dereferenced server-side it is likely XSS; if the value steers where the server itself reaches out or which file it reads it is SSRF or path traversal/LFI; if the privileged route needs no object reference at all (a function the role should never invoke) dispatch bfla instead, though pairing idor with bfla is wise whenever the hypothesis is broadly broken authorization.
+  Use: Use idor when recon shows a user-controlled identifier that the server uses to look up a
+  stored record — a numeric, sequential, or low-entropy id in a URL path or query (such as an
+  account, order, invoice, profile, document, message, or report id), a UUID/ULID/slug that was
+  harvested from a list/search/export/email/JS bundle, or a relational reference like ownerId,
+  accountId, tenantId, projectId, or subscriptionId sitting inside a JSON body, form field, cookie,
+  or JWT claim. Signals: It also fits when the app exposes REST CRUD routes (GET/PUT/PATCH/DELETE
+  /api/<resource>/{id}), GraphQL field arguments such as user(id:) or Relay node(id:) global ids,
+  batch/bulk endpoints that take an array of ids (which often validate only the first element),
+  file/object-storage keys or signed share links, multi-tenant scoping the client supplies via a
+  header, subdomain, or path (X-Tenant-ID, X-User-Id, org slug), or whenever the target requires
+  login and the stated objective is to read or change data belonging to another user, tenant, or
+  role that the UI hides. Useful even when bodies are masked: confirm via response differentials
+  (status, size, ETag, timing). Pair with: Also dispatch bfla, auth-testing, graphql in parallel
+  when the same evidence shows those mechanisms too; co-dispatch means separate focused workers
+  sharing the same investigation state, not merging skill prompts. Do not use: Disambiguate from
+  look-alikes: if the id is merely reflected back into the page rather than dereferenced server-side
+  it is likely XSS; if the value steers where the server itself reaches out or which file it reads
+  it is SSRF or path traversal/LFI; if the privileged route needs no object reference at all (a
+  function the role should never invoke) dispatch bfla instead, though pairing idor with bfla is
+  wise whenever the hypothesis is broadly broken authorization.
 metadata:
   dispatchable: true
 ---
@@ -88,7 +107,10 @@ or serializers): `fields`, `include`, `expand`, `projection`, `with`,
 - Path-traversal-like references in virtual filesystems:
   `/files/user_123/../../user_456/report.csv`.
 - Wildcard substitution: `GET /api/users/*` or `GET /api/users/_all`
-  occasionally bypasses scoping on permissive frameworks.
+  occasionally bypasses scoping on permissive frameworks. Also try the
+  single-row/SQL-LIKE wildcards `%`, `_`, `.`, and a bare `*` in place of
+  the id (`/api/users/%`, `/api/users/.`) — some backends interpolate them
+  into a query and return every row.
 - File-extension appendage: `/resource/123` vs `/resource/123.json` vs
   `.xml` vs `.config` — Rails/Ruby and ASP.NET pipelines often diverge
   on serializer auth.
@@ -112,6 +134,24 @@ structure, compute the target instead of brute-forcing):
 - Same idea for any structured token: Snowflake (timestamp + worker +
   sequence), ULID (timestamp prefix), or an auto-increment exposed via a
   replayable hash. A time/counter-structured ID is computed, not sprayed.
+
+**Computed & encoded identifiers** (an "opaque" id is often a known value
+in disguise — decode/compute the victim's id instead of leaking it). See
+`references/computed-identifiers.md` for one-liners.
+- **Hashed reference**: the id is `md5`, `sha1`, `sha256`, or `crc32` of a
+  guessable input — an email, username, or sequential integer. Hash your
+  OWN known value and compare to your id to confirm the algorithm + input,
+  then hash the victim's value and request it. Test the raw integer too
+  (`md5("2")`), and salted/HMAC variants if a salt leaks in JS or cookies.
+- **Encoded reference**: the id is just an encoding, not a secret —
+  base64 / base64url / URL-encode / hex of an email, integer, or
+  `Type:rawId`. Decode it, mutate the inner value (next email, `id+1`,
+  next user), re-encode, and request. Encoding adds no entropy; a short
+  encoded id is a bearer of the plaintext.
+- **Different decimal/hex/epoch views**: a numeric id may appear as decimal
+  (`287790`), hex (`0x4642e`), or a Unix-epoch timestamp (`1695574808`,
+  ticks per second). Convert to the underlying integer, walk it, and
+  re-encode in whatever form the endpoint accepts.
 
 **Hidden-parameter discovery**:
 - Add IDs the request didn't originally carry (`?user_id=<victim>`).

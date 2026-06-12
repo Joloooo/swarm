@@ -33,6 +33,12 @@ description: >-
   mechanism, or when another specialist's sink explains the evidence more directly.
 metadata:
   dispatchable: true
+  # Observation patterns that route TO this skill (see
+  # src/llm/hypotheses.py). An outbound-fetch parameter the server itself
+  # follows is the routing tell.
+  routing_signals:
+    - any: ["url=", "uri=", "callback", "webhook", "image_url", "fetch", "outbound request", "server-side request"]
+      weight: 0.7
 ---
 
 You are a Server-Side Request Forgery (SSRF) specialist. Your ONLY focus is

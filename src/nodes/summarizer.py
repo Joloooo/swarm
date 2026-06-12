@@ -869,9 +869,12 @@ class SummarizerNode(BaseNode):
         # it never blocks the run.
         try:
             from src.llm.hypotheses import (
+                routing_rules_from_specs,
                 signal_from_routing_dict,
                 synthesize_hypotheses,
             )
+            from src.skills.loader import list_skill_signal_specs
+            skill_rules = routing_rules_from_specs(list_skill_signal_specs())
             fresh_items = (
                 llm_next_moves + detector_next_moves + tool_next_moves
                 + handoffs
@@ -893,6 +896,7 @@ class SummarizerNode(BaseNode):
                 signals=all_signals,
                 canonical_findings=canonical_for_synth,
                 prior_hypotheses=list(state.get("hypotheses") or []),
+                extra_rules=skill_rules or None,
             )
             if hypotheses:
                 update["hypotheses"] = hypotheses

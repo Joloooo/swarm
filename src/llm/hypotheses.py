@@ -206,6 +206,65 @@ ROUTING_RULES: tuple[RoutingRule, ...] = (
 )
 
 
+def routing_rules_from_specs(specs: Iterable[dict]) -> list[RoutingRule]:
+    """Build :class:`RoutingRule` objects from the loader's normalized
+    signal specs (see ``src.skills.loader.list_skill_signal_specs``).
+
+    Each spec is ``{"name", "vuln_class", "weight", "all_groups"}`` where
+    ``all_groups`` is a list of marker groups — the signal fires only when
+    every group has at least one marker present, so a spec can require a
+    co-occurrence (template tokens AND a rejection word). Malformed specs
+    are skipped rather than raised, so one bad frontmatter entry cannot
+    take the synthesis pass offline.
+    """
+    out: list[RoutingRule] = []
+    for spec in specs or []:
+        if not isinstance(spec, dict):
+            continue
+        vuln_class = str(spec.get("vuln_class") or "").strip().lower()
+        if not vuln_class:
+            continue
+        groups_raw = spec.get("all_groups") or []
+        groups: list[tuple[str, ...]] = []
+        for g in groups_raw:
+            markers = tuple(
+                str(m).strip().lower() for m in (g or []) if str(m).strip()
+            )
+            if markers:
+                groups.append(markers)
+        if not groups:
+            continue
+        try:
+            weight = float(spec.get("weight", 0.7))
+        except (TypeError, ValueError):
+            weight = 0.7
+        out.append(RoutingRule(
+            name=str(spec.get("name") or f"{vuln_class}-signal"),
+            vuln_class=vuln_class,
+            weight=weight,
+            all_groups=tuple(groups),
+        ))
+    return out
+
+
+def combine_routing_rules(
+    skill_rules: Iterable[RoutingRule] | None,
+) -> tuple[RoutingRule, ...]:
+    """Merge the built-in baseline with skill-declared rules.
+
+    Skill-declared rules **supersede the baseline per vuln class**: if a
+    skill declares any routing signals for ``ssti``, the baseline ``ssti``
+    rules step aside and the skill owns that class entirely (so a class is
+    never scored twice). Classes no skill has declared keep the baseline.
+    The baseline therefore acts as a resilient fallback — routing still
+    works if a SKILL.md is missing or its frontmatter fails to parse.
+    """
+    skill_rules = list(skill_rules or [])
+    owned = {r.vuln_class for r in skill_rules}
+    baseline = [r for r in ROUTING_RULES if r.vuln_class not in owned]
+    return tuple(baseline + skill_rules)
+
+
 def _blob(s: Signal) -> str:
     return f"{getattr(s, 'observation', '')} {getattr(s, 'evidence', '')}".lower()
 
@@ -319,13 +378,15 @@ def advance_hypothesis_state(
 # ── Signal → hypothesis contributions ─────────────────────────────────
 
 
-def _contributions(s: Signal) -> list[tuple[str, float]]:
+def _contributions(
+    s: Signal, rules: tuple[RoutingRule, ...] = ROUTING_RULES,
+) -> list[tuple[str, float]]:
     """Resolve one signal into ``[(vuln_class, signed_weight), ...]``.
 
     An explicit ``vuln_class`` + ``weight`` is used as-is. A bare
-    observation is run through the routing rules to infer which class(es)
-    it supports and by how much. ``kind == "negative"`` flips the sign so
-    a tried-and-did-not-work result counts against its class.
+    observation is run through ``rules`` to infer which class(es) it
+    supports and by how much. ``kind == "negative"`` flips the sign so a
+    tried-and-did-not-work result counts against its class.
     """
     negative = (getattr(s, "kind", "") or "").strip().lower() == "negative"
     out: list[tuple[str, float]] = []
@@ -339,7 +400,7 @@ def _contributions(s: Signal) -> list[tuple[str, float]]:
         out.append((explicit_class, w))
 
     blob = _blob(s)
-    for rule in ROUTING_RULES:
+    for rule in rules:
         if rule.vuln_class == explicit_class:
             continue  # already counted explicitly
         if _rule_fires(rule, blob):
@@ -410,22 +471,27 @@ def synthesize_hypotheses(
     signals: list[Signal] | None,
     canonical_findings: list[Finding] | None = None,
     prior_hypotheses: list[Hypothesis] | None = None,
+    extra_rules: Iterable[RoutingRule] | None = None,
 ) -> list[Hypothesis]:
     """Rebuild the ranked hypothesis list from the raw signal log + the
     canonical findings, carrying prior terminal states forward.
 
     Deterministic and LLM-free: the belief layer must stay explainable and
-    we have no calibration data to fit a model. Returns the hypotheses
-    sorted by ``priority`` (utility) descending.
+    we have no calibration data to fit a model. ``extra_rules`` are
+    skill-declared routing rules (from SKILL.md frontmatter) that supersede
+    the built-in baseline per vuln class — pass the result of
+    ``combine_routing_rules`` or just the skill rules (combined here).
+    Returns the hypotheses sorted by ``priority`` (utility) descending.
     """
     sigs = [s for s in (signals or []) if s is not None]
+    rules = combine_routing_rules(extra_rules) if extra_rules is not None else ROUTING_RULES
 
     # bucket → accumulated belief + the signals backing it
     buckets: dict[tuple[str, str], dict] = {}
 
     for s in sigs:
         surface = _surface_of(s)
-        for cls, w in _contributions(s):
+        for cls, w in _contributions(s, rules):
             cls = cls.strip().lower()
             if not cls:
                 continue

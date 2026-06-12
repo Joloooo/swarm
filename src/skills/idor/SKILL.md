@@ -23,6 +23,12 @@ description: >-
   wise whenever the hypothesis is broadly broken authorization.
 metadata:
   dispatchable: true
+  # Observation patterns that route TO this skill (see
+  # src/llm/hypotheses.py). Sequential/guessable object references that
+  # the server dereferences are the routing tell.
+  routing_signals:
+    - any: ["sequential id", "incrementing id", "object reference", "another user", "other user's", "guessable id"]
+      weight: 0.7
 ---
 
 You are an IDOR / BOLA specialist. Your ONLY focus is finding broken

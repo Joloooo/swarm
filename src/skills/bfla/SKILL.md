@@ -1,7 +1,40 @@
 ---
 name: bfla
 description: >-
-  Use bfla when recon shows that the target has more than one privilege tier and exposes actions a lower-privileged caller might reach — that is, when the question is "should this caller be permitted to invoke this function at all?" rather than "is this caller touching the right object?". Dispatch it the moment recon surfaces path segments that name a privilege level (such as /admin, /staff, /internal, /manage, /console, /actuator, /backoffice) or routes named after a privileged verb (such as /promote, /grant, /approve, /refund, /impersonate, /suspend, /disable-2fa, /reset-password); when a request body, JWT claims, or profile-update form carries a role-like field (role, is_admin, isAdmin, privilege, permissions, scope, plan); when identity-bearing headers (X-User-Id, X-User-Role, X-Admin, X-Forwarded-User, X-Remote-User, X-Tenant, X-Org-Id) suggest the app sits behind a gateway whose injected identity the backend may trust; when an admin console or feature-flagged action shares the same host or API as the user app while the front-end only hides the button; or when a GraphQL schema, OpenAPI/Swagger doc, gRPC reflection, or JS bundle reveals privileged mutations, methods, or endpoints with no matching UI, or where legacy and current routes (v1 vs v2, mobile vs web) both exist. Multi-role apps, multi-tenant SaaS, and APIs reachable across REST, GraphQL, gRPC, or WebSocket transports are all fertile ground. Technique coverage includes HTTP method confusion (POST/PUT/PATCH/DELETE accepted on a route with different enforcement than GET), role drift where a transport enforces auth but its WebSocket/gRPC/queue counterpart does not, GraphQL field-level resolver gaps, and batch-job or background-worker actions where creation is allowed but finalize/approve is unchecked. Disambiguate from look-alikes by the single tell of each: if the caller is allowed to call the function but can point it at another user's record by swapping an id, that is idor (object-level), not bfla — when broken authorization is the hypothesis, dispatch both since real bugs often chain them; if there is no valid session at all and you are forging or replaying a login or a token signature, that is an authentication-bypass concern, not bfla, which assumes you already hold a legitimate but lower-privileged session; and if a user-editable mutation simply accepts and stores extra fields it should ignore, lean toward mass-assignment, while bfla is specifically about reaching a restricted action.
+  Use: Use bfla when recon shows that the target has more than one privilege tier and exposes
+  actions a lower-privileged caller might reach — that is, when the question is "should this caller
+  be permitted to invoke this function at all?" rather than "is this caller touching the right
+  object?".
+  Signals: Dispatch it the moment recon surfaces path segments that name a privilege level (such as
+  /admin, /staff, /internal, /manage, /console, /actuator, /backoffice) or routes named after a
+  privileged verb (such as /promote, /grant, /approve, /refund, /impersonate, /suspend,
+  /disable-2fa, /reset-password); when a request body, JWT claims, or profile-update form carries a
+  role-like field (role, is_admin, isAdmin, privilege, permissions, scope, plan); when
+  identity-bearing headers (X-User-Id, X-User-Role, X-Admin, X-Forwarded-User, X-Remote-User,
+  X-Tenant, X-Org-Id) suggest the app sits behind a gateway whose injected identity the backend may
+  trust; when an admin console or feature-flagged action shares the same host or API as the user app
+  while the front-end only hides the button; or when a GraphQL schema, OpenAPI/Swagger doc, gRPC
+  reflection, or JS bundle reveals privileged mutations, methods, or endpoints with no matching UI,
+  or where legacy and current routes (v1 vs v2, mobile vs web) both exist. Multi-role apps,
+  multi-tenant SaaS, and APIs reachable across REST, GraphQL, gRPC, or WebSocket transports are all
+  fertile ground. Technique coverage includes HTTP method confusion (POST/PUT/PATCH/DELETE accepted
+  on a route with different enforcement than GET), role drift where a transport enforces auth but
+  its WebSocket/gRPC/queue counterpart does not, GraphQL field-level resolver gaps, and batch-job or
+  background-worker actions where creation is allowed but finalize/approve is unchecked.
+  Disambiguate from look-alikes by the single tell of each: if the caller is allowed to call the
+  function but can point it at another user's record by swapping an id, that is idor (object-level),
+  not bfla; dispatch both only when the same evidence includes both a restricted function boundary
+  and an object-selection boundary; if there is no valid session at all and you are forging or
+  replaying a login or a token signature, that is an authentication-bypass concern, not bfla, which
+  assumes you already hold a legitimate but lower-privileged session; and if a user-editable
+  mutation simply accepts and stores extra fields it should ignore, lean toward mass-assignment,
+  while bfla is specifically about reaching a restricted action.
+  Pair with: Also dispatch idor, mass-assignment, business-logic, graphql in parallel when the same
+  evidence shows those mechanisms too; co-dispatch means separate focused workers sharing the same
+  investigation state, not merging skill prompts.
+  Do not use: Do not dispatch when the described input surface is absent, when the value is only
+  stored or echoed without reaching this skill's mechanism, or when another specialist's sink
+  explains the evidence more directly.
 metadata:
   dispatchable: true
 ---
@@ -145,6 +178,29 @@ mutation Promote($id:ID!){
 - Internal RPCs trust upstream checks — reach them through exposed
   endpoints or SSRF; verify each service re-enforces authz.
 
+### Exposed management interfaces
+A framework management console reachable by an unprivileged caller IS
+a function-level authorization failure — the interface is the
+restricted "function". Highest-value, fastest-confirming BFLA lead.
+- **Spring Boot Actuator** — probe `/actuator/env`, `/actuator/heapdump`,
+  `/actuator/configprops` (leak DB passwords, API keys, tokens),
+  `/actuator/mappings` (dump hidden admin routes → feed the role
+  matrix), `/actuator/httptrace` (capture other users' cookies),
+  `/actuator/jolokia` (JMX → RCE path), `/actuator/shutdown`. Probe
+  both bare names and the `/actuator/` prefix (1.x vs 2.x+).
+- **Other consoles** — `/jolokia`, `/monitoring` (JavaMelody),
+  `/druid/index.html`, `/server-status`, `/h2-console`, `/metrics`,
+  `/debug`, `/console`.
+- A `401`/`403` is a lead, not a dead end — pivot to gateway-trust
+  and method/route bypasses below.
+- Confirming a reachable management endpoint that leaks secrets is
+  already a high-severity finding; record the leaked secret as proof
+  and do not run a destructive RCE/`shutdown` step on a live target
+  unless the engagement authorizes disruption.
+- Full how-to, endpoint table, and `/env` unmasking trick:
+  `references/management-interfaces.md`. Fuzz wordlist:
+  `references/actuator-endpoints.txt`.
+
 ## Bypass techniques
 
 - **Header trust** — supply `X-User-Id` / `X-Role` /
@@ -194,6 +250,11 @@ A finding is real only when:
 - `bash` — `curl` with role-specific tokens swapped per request,
   GraphQL introspection queries, JS-bundle inspection, `grpcurl`
   for direct gRPC probing.
+- `nuclei` — `http/exposed-panels/`, `http/default-logins/`,
+  `http/exposures/` templates to find management panels and weak
+  default credentials.
+- `ffuf` / `feroxbuster` — brute-force management paths and the
+  actuator endpoint wordlist (`references/actuator-endpoints.txt`).
 
 ## Rules
 - BFLA ≠ IDOR. BFLA = "this user shouldn't be able to call this

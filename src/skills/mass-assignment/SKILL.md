@@ -1,7 +1,32 @@
 ---
 name: mass-assignment
 description: >-
-  Use mass-assignment when recon shows a create or update endpoint that binds a client-supplied request body into a persisted record without an obvious field-level allowlist, and the objective is to gain a privilege, ownership, billing, or workflow-state change the normal UI does not offer. Strong routing signals are any account-mutation route (signup, register, profile, account, me, PUT/PATCH on a user), a request and response that share the same field names so one model clearly serves both directions, and a returned object already carrying read-only attributes the form never lets you edit such as role, isAdmin, permissions, status, approved, paid, verified, published, plan, tier, ownerId, userId, tenantId, orgId, creditBalance, or usageLimit. Also dispatch on a GraphQL input type that mirrors an entity type with field-level authz gaps, an OpenAPI or introspection schema that declares more writable properties than the UI sends, bulk or batch endpoints taking arrays of objects that may skip per-item allowlists, an endpoint that accepts more than one content-type, and framework fingerprints prone to permissive binding where the specific allowlist knob is misconfigured (Rails strong-parameters, Laravel `$fillable`/`$guarded`, Spring @ModelAttribute/@RequestBody, Django REST Framework writable nested serializers, Express/Mongoose/Prisma schema gaps). To disambiguate from look-alikes that share this body-and-parameter surface: swapping a resource id in the URL to read or change another user's record is IDOR, not mass assignment; a body value that gets rendered through a template engine is SSTI; a body value reflected into the HTML page is XSS; a body value concatenated into a backend query is SQL injection. Mass assignment is specifically the unauthorized binding of a trusted attribute as stored data, never a value that is executed or rendered. Do not dispatch when there is no model-backed write surface, only static pages or read-only search APIs with no request body to bind.
+  Use: Use mass-assignment when recon shows a create or update endpoint that binds a client-supplied
+  request body into a persisted record without an obvious field-level allowlist, and the objective
+  is to gain a privilege, ownership, billing, or workflow-state change the normal UI does not offer.
+  Signals: Strong routing signals are any account-mutation route (signup, register, profile,
+  account, me, PUT/PATCH on a user), a request and response that share the same field names so one
+  model clearly serves both directions, and a returned object already carrying read-only attributes
+  the form never lets you edit such as role, isAdmin, permissions, status, approved, paid, verified,
+  published, plan, tier, ownerId, userId, tenantId, orgId, creditBalance, or usageLimit. Also
+  dispatch on a GraphQL input type that mirrors an entity type with field-level authz gaps, an
+  OpenAPI or introspection schema that declares more writable properties than the UI sends, bulk or
+  batch endpoints taking arrays of objects that may skip per-item allowlists, an endpoint that
+  accepts more than one content-type, and framework fingerprints prone to permissive binding where
+  the specific allowlist knob is misconfigured (Rails strong-parameters, Laravel
+  `$fillable`/`$guarded`, Spring @ModelAttribute/@RequestBody, Django REST Framework writable nested
+  serializers, Express/Mongoose/Prisma schema gaps). To disambiguate from look-alikes that share
+  this body-and-parameter surface: swapping a resource id in the URL to read or change another
+  user's record is IDOR, not mass assignment; a body value that gets rendered through a template
+  engine is SSTI; a body value reflected into the HTML page is XSS; a body value concatenated into a
+  backend query is SQL injection. Mass assignment is specifically the unauthorized binding of a
+  trusted attribute as stored data, never a value that is executed or rendered. Do not dispatch when
+  there is no model-backed write surface, only static pages or read-only search APIs with no request
+  body to bind. Pair with: Also dispatch bfla, idor, auth-testing in parallel when the same evidence
+  shows those mechanisms too; co-dispatch means separate focused workers sharing the same
+  investigation state, not merging skill prompts. Do not use: Do not dispatch when the described
+  input surface is absent, when the value is only stored or echoed without reaching this skill's
+  mechanism, or when another specialist's sink explains the evidence more directly.
 metadata:
   dispatchable: true
 ---
@@ -139,6 +164,36 @@ modern APIs and GraphQL.
 - Use fragments to overfetch changed fields immediately after mutation
   (effect often visible even if the mutation returns filtered fields).
 
+## PHP external variable modification
+
+A close cousin of body autobinding: PHP scripts that import a whole
+request array into the local scope. `extract($_GET)`,
+`extract($_POST)`, `extract($_REQUEST)`, and the legacy
+`import_request_variables()` create a local variable for every request
+key. `extract()` defaults to `EXTR_OVERWRITE`, so a key matching an
+already-set variable name silently replaces it. Same class as mass
+assignment — user-supplied keys binding to trusted variables — but the
+sink is a PHP symbol table, not an ORM model. Old register-globals
+behaviour resurfaces this way.
+
+Probe targets (try as GET and POST params on `.php` endpoints):
+- **Auth / gate flags** — `?authenticated=1`, `?admin=1`, `?role=admin`,
+  `?isAdmin=1`, `?loggedin=1`, `?access=granted`. Watch for a state
+  flip with no credentials.
+- **Include-path poisoning** — when a script `include`s a variable the
+  request can now set, point it at a file: `?page=../../etc/passwd` or
+  `php://filter` / `data://` wrappers (this becomes LFI/RCE — co-dispatch
+  `lfi`).
+- **Global injection** — `?GLOBALS[admin]=1` overwrites globals on
+  PHP < 8.1 (write access to the whole `$GLOBALS` array was removed in
+  8.1.0).
+
+Signals: a `.php` endpoint whose behaviour changes when you add a
+plausible control-variable name you never saw in any form; a config or
+debug parameter that suddenly works; an error that leaks a variable
+name you can then set. See `references/php-external-variables.md` for
+the full probe catalogue, oracles, and gadget chains.
+
 ## Workflow
 
 1. **Identify endpoints** — create / update endpoints and GraphQL
@@ -174,7 +229,10 @@ A finding is real only when:
 
 ## Tools to use
 - `bash` — `curl` for crafting bodies with extra fields, GraphQL
-  introspection queries, multi-encoding comparisons.
+  introspection queries, multi-encoding comparisons, and PHP
+  external-variable probes (control-variable GET/POST keys,
+  `GLOBALS[...]` injection) — see
+  `references/php-external-variables.md`.
 
 ## Rules
 - High-yield hidden field names are listed above — try the full list,

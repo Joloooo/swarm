@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
 from src.llm.callbacks import make_call_config
@@ -622,6 +622,110 @@ def _format_relevant_summary(state: dict) -> str | None:
     )
 
 
+def _format_hypotheses(state: dict) -> str | None:
+    """Render the ranked hypotheses as a seed block so a dispatched worker
+    sees the focused theory the supervisor committed to.
+
+    Source: ``state["hypotheses"]`` — the belief/utility-ranked list the
+    synthesis pass (``src/llm/hypotheses.py``) rebuilds each cycle from the
+    raw signal log. Surfaces committed / supported / confirmed hypotheses
+    with their belief and deciding probe. Complements
+    ``_format_relevant_summary`` (the planner's free-text notes) with the
+    machine-fused, scored view. Returns ``None`` when none are actionable.
+    """
+    hyps = state.get("hypotheses") or []
+    rankable = [
+        h for h in hyps
+        if getattr(h, "state", "") in ("committed", "supported", "confirmed")
+    ]
+    if not rankable:
+        return None
+
+    rows: list[str] = []
+    for h in rankable[:5]:
+        surf = f" on {h.surface}" if getattr(h, "surface", "") else ""
+        conf = getattr(h, "confidence", 0.0)
+        tech = (getattr(h, "required_technique", "") or "").strip()
+        skill = (getattr(h, "required_skill", "") or "").strip()
+        if tech:
+            action = tech + (f" (skill={skill})" if skill else "")
+        elif skill:
+            action = f"dispatch {skill}"
+        else:
+            action = ""
+        line = (
+            f"- **{h.vuln_class}{surf}** — {getattr(h, 'state', '')}, "
+            f"confidence {conf:.0%}"
+        )
+        if action:
+            line += f"\n  → deciding probe: {action}"
+        rows.append(line)
+
+    return (
+        "## Leading hypotheses (ranked by the supervisor)\n\n"
+        "Observations from across the swarm have been fused into these "
+        "theories, scored by how strongly the evidence supports them. The "
+        "top one is the supervisor's committed line — run its deciding probe "
+        "before broadening.\n\n"
+        + "\n".join(rows)
+    )
+
+
+def _format_tool_attempts(state: dict) -> str | None:
+    """Render recent important tool outcomes for worker context."""
+    attempts = [
+        a for a in (state.get("tool_attempts") or [])
+        if isinstance(a, dict)
+    ]
+    if not attempts:
+        return None
+
+    rows: list[str] = []
+    for attempt in attempts[-10:]:
+        surface = str(attempt.get("surface") or "").strip()
+        tool = str(attempt.get("tool") or "").strip()
+        status = str(attempt.get("status") or "").strip()
+        coverage = str(attempt.get("coverage") or "").strip()
+        error = str(attempt.get("error_type") or "").strip()
+        fallback = bool(attempt.get("fallback_needed"))
+        command = str(attempt.get("command") or "").strip()
+        if not (surface or tool or command):
+            continue
+        bits = [b for b in (
+            f"surface={surface}" if surface else "",
+            f"tool={tool}" if tool else "",
+            f"status={status}" if status else "",
+            f"coverage={coverage}" if coverage else "",
+            f"error={error}" if error else "",
+            "fallback-needed" if fallback else "",
+        ) if b]
+        rows.append("- " + "; ".join(bits))
+        if command:
+            rows.append(f"  command: {command}")
+    if not rows:
+        return None
+    return (
+        "## Tool and surface outcomes\n\n"
+        "These are structured outcomes from earlier high-level tools. A "
+        "failed or partial tool run does NOT mean the surface was tested; "
+        "use a fallback or narrower command when `fallback-needed` appears. "
+        "A fully covered success should not be repeated without new evidence.\n\n"
+        + "\n".join(rows)
+    )
+
+
+def _format_skill_context_catalogue(config_name: str) -> str | None:
+    """Render the compact cross-skill context catalogue for a worker."""
+    try:
+        from src.skills.usage import render_context_skill_index
+
+        body = render_context_skill_index(current_skill=config_name)
+    except Exception:
+        return None
+    body = body.strip()
+    return body or None
+
+
 # Maximum chars per summarized probe in the prior-attempts block.
 # Big enough to show the bash command + first/last bytes of output;
 # small enough that 12 of these stays under ~5KB of context.
@@ -692,6 +796,224 @@ def _summarize_tool_call_pair(tool_call: dict, tool_msg: ToolMessage | None) -> 
     if len(line) > _PRIOR_PROBE_SUMMARY_CHARS:
         line = line[: _PRIOR_PROBE_SUMMARY_CHARS - 1] + "…"
     return line
+
+
+_TOOL_OUTCOME_IMPORTANT_TOKENS = (
+    "wpscan", "ffuf", "gobuster", "sqlmap", "nikto", "nmap", "nuclei",
+    "tplmap", "sstimap", "tinja", "hydra", "curl --parallel",
+    "xargs -p", "xargs -P", "parallel ", "threadpoolexecutor",
+    "concurrent.futures", "asyncio",
+)
+_TOOL_OUTCOME_MAX_COMMAND_CHARS = 260
+_TOOL_OUTCOME_MAX_EXCERPT_CHARS = 500
+
+
+def _tool_message_text(tool_msg: ToolMessage | None) -> str:
+    if tool_msg is None:
+        return ""
+    content = getattr(tool_msg, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                parts.append(str(block.get("text") or block.get("content") or ""))
+            else:
+                parts.append(str(block))
+        return "\n".join(parts)
+    return str(content or "")
+
+
+def _tool_call_arg(tool_call: dict, *names: str) -> str:
+    args = tool_call.get("args") if isinstance(tool_call, dict) else {}
+    if not isinstance(args, dict):
+        return ""
+    for name in names:
+        value = args.get(name)
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())
+    return ""
+
+
+def _compact_tool_field(value: str, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) > limit:
+        return text[: limit - 3].rstrip() + "..."
+    return text
+
+
+def _tool_exit_code(output: str) -> int | None:
+    match = re.search(r"\[.*?\bexit=(-?\d+).*?\]", output, re.DOTALL)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _tool_base_status(output: str, exit_code: int | None) -> tuple[str, str]:
+    low = output.lower()
+    if "timeout after" in low or "timed out" in low:
+        return "timeout", "timeout"
+    if "command not found" in low or "no such file or directory" in low:
+        return "failed", "command-not-found"
+    if exit_code is not None and exit_code != 0:
+        return "failed", "nonzero-exit"
+    return "success", ""
+
+
+def _important_tool_surface(tool_name: str, command: str) -> bool:
+    blob = f"{tool_name} {command}".lower()
+    return any(token.lower() in blob for token in _TOOL_OUTCOME_IMPORTANT_TOKENS)
+
+
+def _classify_tool_attempt(
+    *,
+    tool_name: str,
+    command: str,
+    output: str,
+    exit_code: int | None,
+    agent_id: str,
+    config_name: str,
+) -> dict | None:
+    """Return a coverage-style tool outcome, or None for routine probes."""
+    if not _important_tool_surface(tool_name, command):
+        return None
+
+    low_cmd = command.lower()
+    low_out = output.lower()
+    low_blob = f"{low_cmd}\n{low_out}"
+    status, error_type = _tool_base_status(output, exit_code)
+    surface = tool_name or "tool"
+    coverage = "full" if status == "success" else "none"
+    covered = status == "success"
+    fallback_needed = False
+
+    if "wpscan" in low_blob:
+        surface = "wordpress component enumeration"
+        wp_abort_markers = (
+            "scan aborted", "update required", "database file is missing",
+            "you can not run a scan", "cannot run a scan",
+            "please run wpscan --update",
+        )
+        if any(marker in low_out for marker in wp_abort_markers):
+            status = "failed"
+            covered = False
+            coverage = "none"
+            fallback_needed = True
+            error_type = "wpscan-db-missing-or-aborted"
+        else:
+            # `--enumerate p` can still miss arbitrary installed plugins.
+            # Full component coverage needs the all-plugins/all-themes forms.
+            enum_full = bool(
+                re.search(r"--enumerate\s+[^\s]*\bap\b", low_cmd)
+                or re.search(r"--enumerate\s+[^\s]*\bat\b", low_cmd)
+            )
+            if status == "success" and not enum_full:
+                covered = False
+                coverage = "partial"
+                fallback_needed = True
+                error_type = "partial-wordpress-component-enumeration"
+            elif status != "success":
+                fallback_needed = True
+        tool_name = "wpscan"
+    elif "wp-content/plugins" in low_blob or "wp-content/themes" in low_blob:
+        surface = "wordpress component fallback enumeration"
+        coverage = "partial" if status == "success" else "none"
+        covered = status == "success"
+    elif "sqlmap" in low_blob:
+        surface = "sql injection automated probe"
+        tool_name = "sqlmap"
+    elif "nmap" in low_blob:
+        surface = "network/service enumeration"
+        tool_name = "nmap"
+    elif "nikto" in low_blob:
+        surface = "web server known-issue scan"
+        tool_name = "nikto"
+    elif "ffuf" in low_blob or "gobuster" in low_blob:
+        surface = "content/path enumeration"
+        tool_name = "ffuf" if "ffuf" in low_blob else "gobuster"
+        coverage = "partial" if status == "success" else "none"
+    elif any(token in low_blob for token in (
+        "curl --parallel", "xargs -p", "threadpoolexecutor",
+        "concurrent.futures", "asyncio",
+    )):
+        surface = "concurrency/race probe"
+
+    if status != "success" and not fallback_needed:
+        fallback_needed = True
+
+    return {
+        "surface": surface,
+        "tool": tool_name or "tool",
+        "command": _compact_tool_field(command, _TOOL_OUTCOME_MAX_COMMAND_CHARS),
+        "status": status,
+        "covered": covered,
+        "coverage": coverage,
+        "error_type": error_type,
+        "fallback_needed": fallback_needed,
+        "source_agent": agent_id,
+        "config_name": config_name,
+        "exit_code": exit_code,
+        "output_excerpt": _compact_tool_field(output, _TOOL_OUTCOME_MAX_EXCERPT_CHARS),
+    }
+
+
+def _extract_tool_attempts_from_trace(
+    messages: list,
+    *,
+    agent_id: str,
+    config_name: str,
+) -> list[dict]:
+    """Extract important tool outcomes from AI tool calls + ToolMessages."""
+    responses: dict[str, ToolMessage] = {}
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        call_id = str(getattr(msg, "tool_call_id", "") or "")
+        if call_id:
+            responses[call_id] = msg
+
+    attempts: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for msg in messages:
+        if not isinstance(msg, AIMessage):
+            continue
+        for tool_call in getattr(msg, "tool_calls", []) or []:
+            if not isinstance(tool_call, dict):
+                continue
+            call_id = str(tool_call.get("id") or tool_call.get("tool_call_id") or "")
+            tool_name = str(tool_call.get("name") or "").strip()
+            command = _tool_call_arg(
+                tool_call,
+                "command", "cmd", "url", "query", "target", "data",
+            )
+            if not command:
+                continue
+            output = _tool_message_text(responses.get(call_id))
+            exit_code = _tool_exit_code(output)
+            attempt = _classify_tool_attempt(
+                tool_name=tool_name,
+                command=command,
+                output=output,
+                exit_code=exit_code,
+                agent_id=agent_id,
+                config_name=config_name,
+            )
+            if not attempt:
+                continue
+            key = (
+                str(attempt.get("surface") or ""),
+                str(attempt.get("tool") or ""),
+                str(attempt.get("command") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            attempts.append(attempt)
+    return attempts[-20:]
 
 
 def _collect_prior_skill_history(state: dict, agent_id: str) -> str | None:
@@ -889,14 +1211,19 @@ async def _run_skill_agent_impl(
     # recover from state. The seed is a single HumanMessage prepended to
     # the agent's input so a fresh worker doesn't start cold.
     #
-    # Order matters — these blocks are read top-down by the LLM and the
-    # earlier ones anchor focus:
-    #   1. dispatch_reason   — "why am I here, what's the hypothesis"
+    # Order matters for both model focus and prompt caching. Stable, heavy
+    # content goes first so it stays in the shared prefix; volatile run state
+    # follows; the concrete assignment remains at the end where it is most
+    # salient for the worker.
+    #
+    #   1. skill_catalogue   — stable all-skill routing/context descriptions
     #   2. findings          — "what is already confirmed true"
     #   3. recon_summary     — "what does the application look like"
     #   4. relevant_summary  — "what's the live investigation state"
-    #   5. web_search        — "what external knowledge was just pulled"
-    #   6. prior_history     — "what did I myself try on a previous run"
+    #   5. tool_attempts     — "which high-level tools covered or failed"
+    #   6. web_search        — "what external knowledge was just pulled"
+    #   7. prior_history     — "what did I myself try on a previous run"
+    #   8. dispatch_reason   — "why am I here, what's the hypothesis"
     #
     # Each helper returns ``None`` when its source field is empty, so
     # cold first dispatches (turn 1, before the planner has spoken)
@@ -904,9 +1231,9 @@ async def _run_skill_agent_impl(
     # compatible with the original ``{"messages": []}`` behavior.
     seed_parts: list[str] = []
 
-    dispatch_block = _format_dispatch_reason(state)
-    if dispatch_block:
-        seed_parts.append(dispatch_block)
+    skill_catalogue_block = _format_skill_context_catalogue(config.config_name)
+    if skill_catalogue_block:
+        seed_parts.append(skill_catalogue_block)
 
     findings_block = _format_findings(state)
     if findings_block:
@@ -919,6 +1246,14 @@ async def _run_skill_agent_impl(
     relevant_block = _format_relevant_summary(state)
     if relevant_block:
         seed_parts.append(relevant_block)
+
+    hypotheses_block = _format_hypotheses(state)
+    if hypotheses_block:
+        seed_parts.append(hypotheses_block)
+
+    tool_attempts_block = _format_tool_attempts(state)
+    if tool_attempts_block:
+        seed_parts.append(tool_attempts_block)
 
     web_search_ctx = _extract_latest_web_search(state)
     if web_search_ctx:
@@ -934,6 +1269,10 @@ async def _run_skill_agent_impl(
     prior_history = _collect_prior_skill_history(state, config.agent_id)
     if prior_history:
         seed_parts.append(prior_history)
+
+    dispatch_block = _format_dispatch_reason(state)
+    if dispatch_block:
+        seed_parts.append(dispatch_block)
 
     if seed_parts:
         seed_parts.append(
@@ -957,17 +1296,20 @@ async def _run_skill_agent_impl(
         node.log.info(
             "[%s] seeding worker with %d context block(s) "
             "(dispatch_reason=%s, findings=%s, recon_summary=%s, "
-            "relevant_summary=%s, web_search=%s, prior_history=%s, "
-            "benchmark_footer=%s)",
+            "relevant_summary=%s, tool_attempts=%s, skill_catalogue=%s, "
+            "web_search=%s, prior_history=%s, benchmark_footer=%s)",
             config.agent_id,
             sum(bool(b) for b in (
                 dispatch_block, findings_block, recon_block,
-                relevant_block, web_search_ctx, prior_history,
+                relevant_block, tool_attempts_block, skill_catalogue_block,
+                web_search_ctx, prior_history,
             )),
             bool(dispatch_block),
             bool(findings_block),
             bool(recon_block),
             bool(relevant_block),
+            bool(tool_attempts_block),
+            bool(skill_catalogue_block),
             bool(web_search_ctx),
             bool(prior_history),
             is_benchmark,
@@ -1064,11 +1406,17 @@ async def _run_skill_agent_impl(
     _run_tools = list(config.tools)
     try:
         from src.skills.loader import list_references
-        from src.tools.references import make_read_reference_tool
+        from src.tools.references import (
+            make_read_reference_tool,
+            make_read_skill_context_tool,
+            make_read_skill_reference_tool,
+        )
         if list_references(config.config_name):
             _run_tools.append(make_read_reference_tool(config.config_name))
+        _run_tools.append(make_read_skill_context_tool())
+        _run_tools.append(make_read_skill_reference_tool())
     except Exception as _ref_exc:
-        node.log.debug("read_reference wiring skipped: %s", _ref_exc)
+        node.log.debug("reference/context tool wiring skipped: %s", _ref_exc)
 
     def _agent_factory(sys_prompt: str):
         return create_agent(
@@ -1086,6 +1434,8 @@ async def _run_skill_agent_impl(
     from src.llm.provider import LLMConfig as _LLMConfig
     from src.llm.provider import Provider as _Provider
     fallback_factory: Any = None
+    _fallback_model: str | None = None
+    _fallback_effort: str | None = None
     _primary_cfg = _LLMConfig()
     if _primary_cfg.provider == _Provider.CODEX:
         # Lazy import — skill_runner is imported transitively from
@@ -1095,12 +1445,12 @@ async def _run_skill_agent_impl(
         # object at call-time (after graph.py has finished) avoids
         # that.
         from src import graph as _graph_module
-        _fallback_model = getattr(
+        _fallback_model = str(getattr(
             _graph_module.config.budgets, "fallback_model", "gpt-5.4",
-        )
-        _fallback_effort = getattr(
+        ))
+        _fallback_effort = str(getattr(
             _graph_module.config.budgets, "fallback_reasoning_effort", "low",
-        )
+        ))
 
         def _fallback_agent_factory(sys_prompt: str):
             from src.llm.provider import get_llm as _get_llm
@@ -1168,6 +1518,9 @@ async def _run_skill_agent_impl(
             ) = await astream_with_refusal_retry(
                 agent_factory=_agent_factory,
                 fallback_agent_factory=fallback_factory,
+                fallback_model_label=(
+                    str(_fallback_model) if fallback_factory is not None else None
+                ),
                 system_msg=system_msg,
                 seed_msgs=seed_msgs,
                 call_config=call_config,
@@ -1757,6 +2110,28 @@ async def _run_skill_agent_impl(
         or ""
     )
 
+    tool_attempts = _extract_tool_attempts_from_trace(
+        trace,
+        agent_id=config.agent_id,
+        config_name=config.config_name,
+    )
+    if tool_attempts:
+        node.log.info(
+            "[%s] extracted %d structured tool outcome(s)",
+            config.agent_id, len(tool_attempts),
+        )
+        try:
+            from src.observability.writers import append_event
+            append_event(
+                run_id,
+                "tool_attempts_extracted",
+                agent_id=config.agent_id,
+                config_name=config.config_name,
+                attempts=tool_attempts,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     # The worker's effective system prompt (after the preventive vocab
     # filter that ``astream_with_refusal_retry`` always applies). We
     # propagate it into ``summary_input`` so the summariser node can
@@ -1765,8 +2140,36 @@ async def _run_skill_agent_impl(
     # substitution — re-running it here yields the same bytes the
     # retry helper sent on the wire. Lazy import to avoid a hard
     # dependency cycle through ``src.refusals`` at module load.
-    from src.refusals.vocabulary import filter_text as _filter_text
+    from src.refusals.vocabulary import (
+        filter_messages as _filter_messages,
+        filter_text as _filter_text,
+    )
     worker_system_prompt_used, _ = _filter_text(system_msg)
+    worker_seed_msgs_used, _ = _filter_messages(seed_msgs)
+
+    # Reconstruct the exact worker conversation prefix for the summarizer:
+    # filtered seed HumanMessage(s) + the worker's AI/Tool trace. Prefer the
+    # full LangGraph snapshot because it also includes middleware-injected
+    # HumanMessage notes. Append any synthetic wrap-up/salvage messages we
+    # added after the snapshot so the report still sees them.
+    snapshot_messages = []
+    if isinstance(last_snapshot, dict):
+        snapshot_messages = [
+            m for m in (last_snapshot.get("messages") or [])
+            if isinstance(m, BaseMessage)
+        ]
+    if snapshot_messages:
+        worker_messages_for_summary = list(snapshot_messages)
+        seen_msg_ids = {id(m) for m in worker_messages_for_summary}
+        for msg in trace:
+            if isinstance(msg, BaseMessage) and id(msg) not in seen_msg_ids:
+                worker_messages_for_summary.append(msg)
+                seen_msg_ids.add(id(msg))
+    else:
+        worker_messages_for_summary = [
+            m for m in list(worker_seed_msgs_used) + list(trace)
+            if isinstance(m, BaseMessage)
+        ]
 
     # The summary input that the SummarizerNode will consume. Each
     # parallel worker writes a singleton list; the
@@ -1780,6 +2183,7 @@ async def _run_skill_agent_impl(
         "methodology": config.methodology,
         "dispatch_reason": dispatch_reason,
         "trace": trace,                    # in-memory, not mirrored to messages
+        "worker_messages": worker_messages_for_summary,
         "trace_path": str(trace_path) if trace_path else "",
         "completed": getattr(agent_result, "completed", False),
         "error": getattr(agent_result, "error", None),
@@ -1787,10 +2191,18 @@ async def _run_skill_agent_impl(
         "findings_count": len(findings),
         "iteration_count": _count_worker_iterations(trace),
         "target_url": target_url,
+        "tool_attempts": tool_attempts,
+        # Keep the summarizer request shape cache-compatible with the worker.
+        # Codex's prompt cache includes tool schemas, so replaying the same
+        # textual prefix with tools removed misses the cache.
+        "summary_tools": list(_run_tools),
         # The exact system prompt the worker's LLM saw — fed to the
         # summariser so its call shares the worker's cached prefix.
         "worker_system_prompt": worker_system_prompt_used,
     }
+    if worker_last_tier == "fallback" and _fallback_model:
+        summary_input["summary_model"] = _fallback_model
+        summary_input["summary_reasoning_effort"] = _fallback_effort or "low"
 
     # ── Success-path flag auto-verification ─────────────────────
     # In benchmark mode (``expected_flag`` set), scan the worker's
@@ -1904,6 +2316,130 @@ async def _run_skill_agent_impl(
         except Exception:  # noqa: BLE001
             pass
 
+    # Build the expensive worker digest while the worker's prompt prefix is
+    # still hot in the provider cache. The SummarizerNode remains the fan-in
+    # merger, but it can now reuse this precomputed report instead of waiting
+    # until the slowest sibling reaches the barrier and then issuing all
+    # digest calls. Skip LLM digesting on capture/cancel paths so a solved
+    # benchmark is not delayed by a report the planner will never need.
+    if captured_flag_value is not None:
+        summary_input["skip_digest_reason"] = "flag captured"
+        summary_input["precomputed_report"] = AIMessage(
+            content=(
+                "## Status\nsuccess — flag captured\n\n"
+                f"## Target\n{target_url}\n\n"
+                "## Inputs tried\nThe worker captured the expected flag "
+                "during tool execution; see the raw worker trace for the "
+                "exact request/response.\n\n"
+                f"## Server responses\nCaptured flag: {captured_flag_value}\n\n"
+                "## Inferred server-side behaviour\nThe exercised path "
+                "returned the benchmark token.\n\n"
+                "## NOT tried\nNot applicable after verified capture.\n\n"
+                "## Recommended next dispatch\nNone — verified capture.\n\n"
+                "## Cross-skill handoffs\n[]\n\n"
+                "## Next skill suggestions\n[]"
+            ),
+            additional_kwargs={
+                "agent_id": config.agent_id,
+                "kind": "worker_report",
+                "config_name": config.config_name,
+                "methodology": config.methodology,
+                "status": "success",
+                "iteration_count": int(summary_input.get("iteration_count") or 0),
+                "findings_count": len(findings),
+                "precomputed_at_worker_exit": True,
+                "skip_digest_reason": "flag captured",
+            },
+        )
+    elif sibling_captured_value:
+        summary_input["skip_digest_reason"] = "sibling captured"
+        summary_input["precomputed_report"] = AIMessage(
+            content=(
+                "## Status\nstopped — sibling worker captured the flag\n\n"
+                f"## Target\n{target_url}\n\n"
+                "## Inputs tried\nThis worker exited early after another "
+                "worker captured the expected flag.\n\n"
+                "## Server responses\nNo additional response summary was "
+                "generated after sibling capture.\n\n"
+                "## Inferred server-side behaviour\nNot applicable.\n\n"
+                "## NOT tried\nNot applicable after verified capture.\n\n"
+                "## Recommended next dispatch\nNone — another worker already "
+                "captured the flag.\n\n"
+                "## Cross-skill handoffs\n[]\n\n"
+                "## Next skill suggestions\n[]"
+            ),
+            additional_kwargs={
+                "agent_id": config.agent_id,
+                "kind": "worker_report",
+                "config_name": config.config_name,
+                "methodology": config.methodology,
+                "status": "sibling_captured",
+                "iteration_count": int(summary_input.get("iteration_count") or 0),
+                "findings_count": len(findings),
+                "precomputed_at_worker_exit": True,
+                "skip_digest_reason": "sibling captured",
+            },
+        )
+    else:
+        try:
+            from src.llm.digest import (
+                bind_tools_for_summary_cache,
+                summarize_worker_trace,
+            )
+
+            summary_llm: Any = llm
+            if worker_last_tier == "fallback" and _fallback_model:
+                try:
+                    from src.llm.provider import get_llm as _get_llm
+                    summary_llm = _get_llm(_LLMConfig(
+                        provider=_Provider.CODEX,
+                        model=_fallback_model,
+                        reasoning_effort=_fallback_effort or "low",
+                    ))
+                except Exception as e:  # noqa: BLE001
+                    node.log.debug(
+                        "[%s] fallback summary model rebuild failed; "
+                        "using primary model for digest: %s",
+                        config.agent_id,
+                        e,
+                    )
+            summary_llm = bind_tools_for_summary_cache(summary_llm, _run_tools)
+
+            summary_input["precomputed_report"] = await summarize_worker_trace(
+                trace=list(summary_input.get("trace") or []),
+                worker_messages=list(summary_input.get("worker_messages") or []),
+                worker_system_prompt=str(
+                    summary_input.get("worker_system_prompt") or ""
+                ),
+                agent_id=config.agent_id,
+                config_name=config.config_name,
+                methodology=config.methodology,
+                dispatch_reason=str(summary_input.get("dispatch_reason") or ""),
+                target_url=str(summary_input.get("target_url") or target_url or ""),
+                findings_count=len(findings),
+                iteration_count=int(summary_input.get("iteration_count") or 0),
+                completed=bool(getattr(agent_result, "completed", False)),
+                error=getattr(agent_result, "error", None),
+                refused=bool(getattr(agent_result, "error", None) == "model refused"),
+                model=summary_llm,
+                run_id=(state or {}).get("run_id"),
+                node_name="summarizer",
+            )
+            akw = dict(
+                getattr(summary_input["precomputed_report"], "additional_kwargs", {})
+                or {}
+            )
+            akw["precomputed_at_worker_exit"] = True
+            summary_input["precomputed_report"].additional_kwargs = akw
+        except Exception as e:  # noqa: BLE001
+            node.log.warning(
+                "[%s] worker-exit digest failed (%s: %s); "
+                "SummarizerNode will retry at fan-in",
+                config.agent_id,
+                type(e).__name__,
+                str(e)[:200],
+            )
+
     update: dict[str, Any] = {
         # NOTE: no ``"messages": trace`` — that was the cause of the
         # global-prompt explosion. The full trace stays on disk and
@@ -1914,6 +2450,8 @@ async def _run_skill_agent_impl(
         "findings": findings,
         "active_agents": [config.agent_id],
     }
+    if tool_attempts:
+        update["tool_attempts"] = tool_attempts
     # Sticky-fallback bookkeeping: if this dispatch used the fallback model
     # (rescued by it, exhausted it, or was sent straight to it), record the
     # config so its NEXT dispatch this run skips the doomed primary tier.

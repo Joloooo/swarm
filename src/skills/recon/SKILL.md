@@ -1,10 +1,41 @@
 ---
 name: recon
 description: >-
-  Use recon as the web/application half of reconnaissance whenever you hold a target you have not yet mapped — a bare URL, hostname, IP, or a freshly discovered route, subdomain, virtual host, or second app on another port — and need to learn what is actually running before any specialist can aim at it; it is always the correct cold-start move, since dispatching an injection, auth, or IDOR specialist before recon gives them nothing to work against. It runs in parallel with the network/port pass (recon-ports) and covers technology fingerprinting (server, framework, language, CMS), directory and file discovery, subdomain enumeration on FQDN targets, and input-surface mapping (forms, API endpoints, query params). Dispatch it the moment the HTTP root answers at all (any 200, a 301/302 to a login or app path, a 401/403, or even a real-server 404), when a response header carries a technology tell you have not catalogued (Server, X-Powered-By, X-AspNet-Version, framework session cookies like PHPSESSID or JSESSIONID, X-Generator, wp-json links), when the homepage HTML or JS bundle exposes input vectors you have not enumerated (forms, hidden inputs, fetch/axios calls to /api routes, generator meta tags, asset paths), when a robots.txt, sitemap, or comment names an unvisited path, when a thin or SPA-shell page hints at hidden routes worth directory enumeration, or when a real FQDN makes passive subdomain and Certificate-Transparency lookups cheap. Re-run it scoped to any newly found surface as the topology grows. To disambiguate from look-alikes: this lane reads only the web/app tier, so open-port discovery, service-version scanning, and non-HTTP service identification belong to the parallel recon-ports (nmap) pass, not here; and once you have located a single form, parameter, route, or version string, recon's job for that vector is done — adjudicating and testing it (a reflected value becomes XSS, SQL injection, SSTI, or LFI only downstream) is the specialist's depth work, while recon only maps breadth and hands off.
+  Use: Use recon as the web/application half of reconnaissance whenever you hold a target you have
+  not yet mapped — a bare URL, hostname, IP, or a freshly discovered route, subdomain, virtual host,
+  or second app on another port — and need to learn what is actually running before any specialist
+  can aim at it; it is always the correct cold-start move, since dispatching an injection, auth, or
+  IDOR specialist before recon gives them nothing to work against. Signals: It runs in parallel with
+  the network/port pass (recon-ports) and covers technology fingerprinting (server, framework,
+  language, CMS), directory and file discovery, subdomain enumeration on FQDN targets, and
+  input-surface mapping (forms, API endpoints, query params). Dispatch it the moment the HTTP root
+  answers at all (any 200, a 301/302 to a login or app path, a 401/403, or even a real-server 404),
+  when a response header carries a technology tell you have not catalogued (Server, X-Powered-By,
+  X-AspNet-Version, framework session cookies like PHPSESSID or JSESSIONID, X-Generator, wp-json
+  links), when the homepage HTML or JS bundle exposes input vectors you have not enumerated (forms,
+  hidden inputs, fetch/axios calls to /api routes, generator meta tags, asset paths), when a
+  robots.txt, sitemap, or comment names an unvisited path, when a thin or SPA-shell page hints at
+  hidden routes worth directory enumeration, or when a real FQDN makes passive subdomain and
+  Certificate-Transparency lookups cheap. Re-run it scoped to any newly found surface as the
+  topology grows. Pair with: Also dispatch recon-ports, fuzzing, information-disclosure in parallel
+  when the same evidence shows those mechanisms too; co-dispatch means separate focused workers
+  sharing the same investigation state, not merging skill prompts. Do not use: To disambiguate from
+  look-alikes: this lane reads only the web/app tier, so open-port discovery, service-version
+  scanning, and non-HTTP service identification belong to the parallel recon-ports (nmap) pass, not
+  here; and once you have located a single form, parameter, route, or version string, recon's job
+  for that vector is done — adjudicating and testing it (a reflected value becomes XSS, SQL
+  injection, SSTI, or LFI only downstream) is the specialist's depth work, while recon only maps
+  breadth and hands off.
 metadata:
   dispatchable: true
-  tools: [fetch_page, bash, read_file, gobuster_dir, nikto_scan, get_wordlist, list_wordlists]
+  tools:
+  - fetch_page
+  - bash
+  - read_file
+  - gobuster_dir
+  - nikto_scan
+  - get_wordlist
+  - list_wordlists
 ---
 
 You help map an unfamiliar web service so the next agents know
@@ -54,12 +85,49 @@ Two cheap exceptions:
    framework markers — the input vectors the next agents will
    actually exercise.
 2. **Technology fingerprinting**: web server, framework, language,
-   CMS (if any). Use HTTP headers, response patterns, tool output.
+   CMS (if any). Per OWASP WSTG-INFO-08 (Fingerprint Web Application
+   Framework), read HTTP headers (`Server`, `X-Powered-By`,
+   `X-Generator`), framework cookies, HTML comments / meta tags, file
+   extensions, error messages, and `robots.txt`. Record the **exact
+   version string** of every component you identify — versions drive
+   the version-to-known-vulnerability lookup the specialists depend on.
 3. **Directory and file discovery**: hidden endpoints, admin panels,
    backup files, interesting paths.
 4. **Subdomain enumeration**: only if the target is a real domain.
 5. **Input-surface mapping**: forms, API endpoints, query parameters,
    any other user-controllable inputs.
+
+## Enumerate a CMS down to its components
+
+Stopping at "it's WordPress / Joomla / Drupal" is only half the step.
+OWASP WSTG-INFO-08 makes the point that identifying the application
+matters precisely because *knowing its components drastically reduces
+the rest of the test* — so once the CMS is known, enumerate its
+third-party components (plugins, themes, modules), read each one's
+version, and check those versions for publicly known vulnerabilities.
+A component that is installed but inactive or unlinked appears nowhere
+in the homepage HTML, so a passive read or a short guess-list misses it
+— you have to ask the server for each candidate directly, against a
+comprehensive component list.
+
+- **WordPress**: `wpscan --url <target> --enumerate ap,at,u
+  --plugins-detection aggressive` — `ap`/`at` request every known plugin
+  and theme slug (~100k) directory-by-directory, surfacing components
+  that passive detection and a small wordlist never reach, then read each
+  component's version from its `readme.txt` / style header. Plugin
+  enumeration needs no API token; the WPVulnDB token only adds wpscan's
+  own CVE annotations, which the planner can also resolve via `web_search`
+  / `nuclei`.
+- **Any stack (incl. non-WordPress CMS)**: run `nuclei` technology and
+  CVE templates against the target, and request the known component path
+  (`/wp-content/plugins/<slug>/`, `/modules/<slug>/`,
+  `/sites/all/modules/<slug>/`, …) with `gobuster` / `ffuf` against a
+  component wordlist.
+
+Then file the exact component + version as a finding: a known-vulnerable
+component version is the lead that routes the run to the right specialist
+(rce, lfi, deserialization, …). Recon's job is to surface it, not to act
+on it.
 
 ## Tools to use
 - `fetch_page(url)` — **first call on any HTTP target.** Returns the
@@ -70,7 +138,9 @@ Two cheap exceptions:
   slower, run after the cheaper tools.
 - `bash` for anything else: `curl -sI` for header probes that pin
   down `Server` / `X-Powered-By` / framework cookies (the technology
-  fingerprint), plus sublist3r and other ad-hoc commands.
+  fingerprint); CMS component enumeration (`wpscan --enumerate ap,at
+  --plugins-detection aggressive`, `nuclei`); plus sublist3r and other
+  ad-hoc commands.
 
 ## Passive surface mapping for FQDN targets
 

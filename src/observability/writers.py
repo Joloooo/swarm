@@ -1,6 +1,6 @@
 """Disk writers for the per-run debug logs.
 
-Each run writes two artefacts under ``logs/run-<run_id>/``:
+Each run writes three artefacts under ``logs/run-<run_id>/``:
 
   - ``full_logs.jsonl``              — every LLM call (start + end / error
                                         rows) and every shell command,
@@ -16,6 +16,9 @@ Each run writes two artefacts under ``logs/run-<run_id>/``:
                                         Written by the LIVE renderer
                                         through the sink configured in
                                         :func:`set_terminal_log_file`.
+  - ``displayed_terminal_logs.ansi.log`` — colour-preserving sibling of
+                                        the terminal log for exact replay
+                                        of what was printed.
 
 History — the pre-refactor run dir had seven files (``nodes.jsonl``,
 ``worker_traces.jsonl``, ``llm_calls.jsonl``, ``terminal_events.jsonl``,
@@ -23,8 +26,9 @@ History — the pre-refactor run dir had seven files (``nodes.jsonl``,
 got read in practice; three were redundant with each other. The two
 files above are the survivors that actually answer debugging
 questions: ``full_logs.jsonl`` for "what did the model see / what did
-the tools do", ``displayed_terminal_logs.log`` for "what was the
-human-readable story of the run".
+the tools do", and ``displayed_terminal_logs.log`` for "what was the
+human-readable story of the run". The optional ``.ansi.log`` sibling
+keeps the exact colour/cursor stream for terminal replay.
 """
 
 from __future__ import annotations
@@ -335,19 +339,18 @@ def uninstall_jsonl_log_handler() -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Plain-text terminal-log sink — set once at run start by the runner.
+# Terminal-log sinks — set once at run start by the runner.
 #
 # The LIVE renderer (src/observability/live.py) calls
 # ``write_terminal_line(text)`` for every line it emits to stderr. This
-# function tees that text (ANSI-stripped) to ``displayed_terminal_logs.log``
-# so the file is a verbatim, color-stripped mirror of what showed on
-# screen.
+# function tees that text (ANSI-stripped) to the plain ``*.log`` sink.
 # ────────────────────────────────────────────────────────────────────────────
 
 
 # Single sink path for the whole process. ``None`` means "do not write a
 # file" — the LIVE renderer continues to print to stderr regardless.
 _TERMINAL_LOG_FILE: Path | None = None
+_TERMINAL_ANSI_LOG_FILE: Path | None = None
 
 
 # A SECOND, sweep-level sink. Unlike ``_TERMINAL_LOG_FILE`` (which the
@@ -359,6 +362,7 @@ _TERMINAL_LOG_FILE: Path | None = None
 # the per-run sink is ``None`` — still land in a file. ``write_terminal_
 # line`` / ``write_terminal_chunk`` tee to BOTH sinks. ``None`` disables it.
 _SWEEP_LOG_FILE: Path | None = None
+_SWEEP_ANSI_LOG_FILE: Path | None = None
 
 
 # ANSI CSI escape sequences (colours, cursor moves). Stripped so the
@@ -370,20 +374,25 @@ def set_terminal_log_file(path: Path | None) -> None:
     """Set (or clear) the path the LIVE renderer tees output to.
 
     Called once from the benchmark runner / CLI entry after the run_id
-    is known. Passing ``None`` disables file output (useful for Studio
-    / langgraph dev sessions where there is no run dir yet).
+    is known. Passing ``None`` disables per-run file output.
     """
-    global _TERMINAL_LOG_FILE
+    global _TERMINAL_LOG_FILE, _TERMINAL_ANSI_LOG_FILE
     if path is None:
         _TERMINAL_LOG_FILE = None
+        _TERMINAL_ANSI_LOG_FILE = None
         return
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     _TERMINAL_LOG_FILE = path
+    _TERMINAL_ANSI_LOG_FILE = path.with_suffix(".ansi.log")
 
 
 def get_terminal_log_file() -> Path | None:
     return _TERMINAL_LOG_FILE
+
+
+def get_terminal_ansi_log_file() -> Path | None:
+    return _TERMINAL_ANSI_LOG_FILE
 
 
 def set_sweep_log_file(path: Path | None) -> None:
@@ -394,17 +403,23 @@ def set_sweep_log_file(path: Path | None) -> None:
     the per-bench verdict blocks and the final ``Summary`` line — emitted
     while the per-run sink is ``None`` — are persisted. ``None`` disables it.
     """
-    global _SWEEP_LOG_FILE
+    global _SWEEP_LOG_FILE, _SWEEP_ANSI_LOG_FILE
     if path is None:
         _SWEEP_LOG_FILE = None
+        _SWEEP_ANSI_LOG_FILE = None
         return
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     _SWEEP_LOG_FILE = path
+    _SWEEP_ANSI_LOG_FILE = path.with_suffix(".ansi.log")
 
 
 def get_sweep_log_file() -> Path | None:
     return _SWEEP_LOG_FILE
+
+
+def get_sweep_ansi_log_file() -> Path | None:
+    return _SWEEP_ANSI_LOG_FILE
 
 
 def write_terminal_line(line: str) -> None:
@@ -412,16 +427,22 @@ def write_terminal_line(line: str) -> None:
 
     Tees to the per-run sink (``displayed_terminal_logs.log``) AND, when
     set, the sweep-level sink (:func:`set_sweep_log_file`) so cross-bench
-    verdict/summary lines are persisted too. Strips ANSI escape codes so
-    the files are readable in any editor. The trailing newline is added if
-    not already present. Best-effort — failures swallow silently (LIVE
-    must always print to stderr).
+    verdict/summary lines are persisted too. The files are ANSI-stripped so
+    any editor / ``grep`` works. The trailing newline is added if not already
+    present. Best-effort — failures swallow silently (LIVE must always print
+    to stderr).
     """
-    if _TERMINAL_LOG_FILE is None and _SWEEP_LOG_FILE is None:
+    if (
+        _TERMINAL_LOG_FILE is None
+        and _SWEEP_LOG_FILE is None
+        and _TERMINAL_ANSI_LOG_FILE is None
+        and _SWEEP_ANSI_LOG_FILE is None
+    ):
         return
     stripped = _ANSI_RE.sub("", line)
     if not stripped.endswith("\n"):
         stripped += "\n"
+    raw = line if line.endswith("\n") else line + "\n"
     with _TERMINAL_LOG_LOCK:
         for path in (_TERMINAL_LOG_FILE, _SWEEP_LOG_FILE):
             if path is None:
@@ -431,6 +452,14 @@ def write_terminal_line(line: str) -> None:
                     f.write(stripped)
             except Exception:
                 # Never let log writes break a run. The screen has the data either way.
+                pass
+        for path in (_TERMINAL_ANSI_LOG_FILE, _SWEEP_ANSI_LOG_FILE):
+            if path is None:
+                continue
+            try:
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(raw)
+            except Exception:
                 pass
 
 
@@ -443,10 +472,15 @@ def write_terminal_chunk(text: str) -> None:
     :func:`write_terminal_line` would corrupt the stream by injecting a
     newline after every word. Tees to both the per-run and sweep sinks.
 
-    Strips ANSI escape codes so the saved file stays editor-friendly.
-    Best-effort: failures swallow silently.
+    The ``*.log`` files stay ANSI-stripped and editor-friendly. Best-effort:
+    failures swallow silently.
     """
-    if (_TERMINAL_LOG_FILE is None and _SWEEP_LOG_FILE is None) or not text:
+    if (
+        _TERMINAL_LOG_FILE is None
+        and _SWEEP_LOG_FILE is None
+        and _TERMINAL_ANSI_LOG_FILE is None
+        and _SWEEP_ANSI_LOG_FILE is None
+    ) or not text:
         return
     stripped = _ANSI_RE.sub("", text)
     with _TERMINAL_LOG_LOCK:
@@ -456,5 +490,13 @@ def write_terminal_chunk(text: str) -> None:
             try:
                 with path.open("a", encoding="utf-8") as f:
                     f.write(stripped)
+            except Exception:
+                pass
+        for path in (_TERMINAL_ANSI_LOG_FILE, _SWEEP_ANSI_LOG_FILE):
+            if path is None:
+                continue
+            try:
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(text)
             except Exception:
                 pass

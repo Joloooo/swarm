@@ -194,6 +194,12 @@ TOOL_USAGE_RULES = """\
 - Prefer targeted, specific commands over broad scans.
 - When a tool produces very long output, focus on the summary/conclusion.
 - If a tool hangs or times out, try with a smaller scope or different flags.
+- The shell may be macOS/BSD or Linux. Do not assume GNU-only commands or
+  flags such as `hostname -I`, `ip -4`, `base64 -w0`, or `grep -P`; use
+  Python for portable interface, URL, encoding, and text-processing work when
+  portability matters.
+- In bash, if a `printf` format begins with `-`, write `printf -- '---...\\n'`;
+  otherwise bash may parse the format as an option and abort under `set -e`.
 - Do NOT run denial-of-service tools or stress tests (operator safety).
 """
 

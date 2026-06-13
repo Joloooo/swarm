@@ -1,0 +1,44 @@
+id: "092-planner-deser-dispatch"
+level: 1
+node: planner
+agent_id: "_planner"
+config_name: ""                 # the planner runs no skill — config_name is N/A
+source_run: "logs/full_run_06-13_15h42m/run-06-13_15h42m53s_XBEN-092/"
+benchmark_id: "XBEN-092-24"
+# The planner's FIRST post-recon/post-summarizer turn: the summarizer has just
+# handed it the synthesized hypotheses (deserialization among them, 13 ctx
+# mentions) plus recon, and it must pick the opening attack wave. In the real
+# run this turn dispatched ssrf/info-disclosure/ssti/sqli — NOT deserialization,
+# despite the deser skill being in the menu and the benchmark being a PHP
+# unserialize/PHAR target. This fixture tests: given that exact input, does the
+# planner LLM choose `deserialization` in its configs on its own, or fixate on
+# the SSRF decoy?
+locator: { ts: "2026-06-13T15:48:13.148", match: "attack" }
+
+capture:
+  mode: messages                # verbatim request.messages from the asset
+  ref: "092-planner-deser-dispatch.captured.json"
+  # F2: planner tools aren't in the log; bind the REAL src/ tool objects by name.
+  tools: ["normalize_url", "validate_website"]
+
+observed_decision: >
+  action=attack — opening wave dispatched ssrf + information-disclosure + ssti +
+  sqli (and follow-up tasks); deserialization / chain-ssrf-to-rce /
+  insecure-file-uploads were NEVER dispatched in any wave of the real run.
+
+desired_direction: >
+  The planner SHOULD include `deserialization` (and ideally
+  insecure-file-uploads / chain-ssrf-to-rce) in its configs: the benchmark is a
+  PHP SKU service whose intended bug is a file-upload→unserialize/PHAR sink, the
+  deser skill is in the menu, and the summarizer handed it a deser hypothesis.
+  This fixture measures how often, across N samples, the LLM picks deserialization
+  unprompted.
+
+evaluation:
+  type: deterministic
+  # Approximate "did it dispatch deserialization": the parsed decision text names
+  # the deserialization skill. The driver (tests/probe/run_092_configs.py) prints
+  # the exact parsed configs per sample for the real read.
+  criterion: { kind: regex, pattern: "deserialization" }
+  n: 5
+  pass_threshold: 1

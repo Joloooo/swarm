@@ -203,6 +203,14 @@ class Signal:
     #   - "negative":    a tried-and-did-not-work result (evidence AGAINST,
     #                    or "this surface is exhausted for this class")
     #   - "routing":     primarily a next-skill hand-off implication
+    #   - "confirm":     a PROBE demonstrated the issue — the executor that
+    #                    tested this class on this surface returned a
+    #                    confirmed verdict. The only signal kind that lets a
+    #                    hypothesis cross the COMMIT threshold (priors alone
+    #                    cap below it). See ``src/llm/hypotheses.py``.
+    #   - "refute":      a PROBE disproved it — the owning skill's own
+    #                    "it is not me" verdict. Strong negative weight that
+    #                    can drive a hypothesis to ``refuted``.
     kind: str = "observation"
     # Who emitted it: worker | summarizer | detector | consolidator |
     # skill_prior | planner.

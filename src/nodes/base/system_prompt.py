@@ -23,6 +23,8 @@ three audiences:
          per-finding evidence.
        - ``DEMONSTRATED_STANDARD``: what "complete" means by vuln class.
        - ``DIVERSITY_RULES``: brainstorm categories before iterating.
+       - ``COMMON_CHECKLIST_DISCIPLINE``: common classes may get one
+         evidence-matched smoke test, but repeated budget needs proof.
        - ``TRANSFORMATION_HYPOTHESIS``: payload-vs-sink reasoning when
          every variant returns the same response.
        - ``SEVERITY_RULES``: CRITICAL / HIGH / MEDIUM / LOW / INFO.
@@ -750,6 +752,26 @@ back to the planner. Do not hand-roll wordlist enumeration from a non-discovery
 skill."""
 
 
+COMMON_CHECKLIST_DISCIPLINE = """\
+## Common checklist classes need evidence after the smoke test
+For this rule, "common checklist classes" means SQL/NoSQL injection,
+XSS/browser-script injection, CSRF, broad fuzzing or wordlist enumeration,
+password spraying/default-credential guessing, crypto/hash/JWT cracking or
+tampering, and generic parameter-pollution/request-shape mutation.
+
+These classes are allowed as first-pass smoke tests when the visible surface
+plausibly matches the mechanism. Do not keep promoting, repeating, or expanding
+them unless the first pass produces class-specific evidence, or the technique
+is clearly the shortest conversion path from a confirmed primitive to the
+objective.
+
+This rule does NOT demote a class when the task text, app text, route names,
+errors, framework behavior, or confirmed findings directly point to it. If the
+surface says "execute XSS", exposes a SQL-like login/search/GraphQL oracle,
+leaks a hash, shows a JWT, exposes an encrypted cookie, or requires hidden
+directory discovery, that is positive evidence, not checklist noise."""
+
+
 def get_executor_prompt(stealth_level: int = 0) -> str:
     """Universal blocks + executor-only methodology + category guidance.
 
@@ -762,10 +784,12 @@ def get_executor_prompt(stealth_level: int = 0) -> str:
         EXHAUSTION_DISCIPLINE,
         DIVERSITY_RULES,
         ENUMERATION_DISCIPLINE,
+        COMMON_CHECKLIST_DISCIPLINE,
         TRANSFORMATION_HYPOTHESIS,
         BEHAVIOR_MODEL_RULES,
         SEVERITY_RULES,
         FINDING_CATEGORY_GUIDANCE,
+        VERDICT_SCHEMA,
     ]
     return "\n\n".join(parts)
 
@@ -809,11 +833,42 @@ PENTESTING_RULES = "\n\n".join([
     DEMONSTRATED_STANDARD,
     EXHAUSTION_DISCIPLINE,
     DIVERSITY_RULES,
+    COMMON_CHECKLIST_DISCIPLINE,
     TRANSFORMATION_HYPOTHESIS,
     BEHAVIOR_MODEL_RULES,
     SEVERITY_RULES,
     TOOL_USAGE_RULES,
 ])
+
+
+VERDICT_SCHEMA = """\
+## Closing verdict (REQUIRED — emit exactly once, as the last thing you do)
+
+Before you stop, emit ONE verdict block giving your honest assessment of
+whether the issue class you were assigned is actually present on the
+surface you tested. This is SEPARATE from any FINDING: a finding records
+what you proved; the verdict is your calibration signal to the
+supervisor, and it decides whether the swarm keeps investigating this
+class here or moves on.
+
+**VERDICT:**
+- Class: [the issue class you tested, e.g. ssti / sqli / idor]
+- Surface: [the endpoint or parameter you focused on, as specific as you can]
+- Outcome: [confirmed | refuted | inconclusive]
+    - confirmed   = you DEMONSTRATED it (the proof is in a FINDING above)
+    - refuted     = you tested it properly and it is NOT this class here
+    - inconclusive = you could not determine it (blocked, or out of steps)
+- Confidence: [0.0-1.0 — how likely THIS class is the real issue on this
+  surface, given everything you saw]
+- Redirect: [OPTIONAL — if the evidence points at a DIFFERENT class, name
+  it plainly, e.g. "looks like deserialization, not ssti"]
+- Note: [one short line: the single most decisive thing you observed]
+
+Telling the supervisor "it is not me" (refuted) is as valuable as a
+finding: it stops the swarm from re-testing a dead surface and frees
+budget for the real path. Be honest — do not report "inconclusive" to
+hedge when you actually have enough evidence to say confirmed or refuted.
+"""
 
 
 FINDING_FORMAT = FINDING_SCHEMA + "\n" + FINDING_CATEGORY_GUIDANCE

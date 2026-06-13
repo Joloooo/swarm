@@ -60,7 +60,7 @@ from src.refusals.detect import looks_like_refusal
 from src.refusals.recover import recover_from_refusal
 from src.refusals.retry import astream_with_refusal_retry
 from src.refusals.salvage import try_salvage
-from src.state import AgentResult, Finding, Severity
+from src.state import AgentResult, Finding, Severity, Signal
 
 if TYPE_CHECKING:
     from src.nodes.base import BaseNode
@@ -163,6 +163,21 @@ SEVERITY_MAP = {
     "info": Severity.INFO,
 }
 
+# Closing-verdict block (VERDICT_SCHEMA in system_prompt.py). The worker's
+# self-assessment of whether its assigned class is the real issue on the
+# tested surface — parsed into a signed Signal that updates hypothesis
+# belief (confirm raises it over the COMMIT gate; refute drives it down).
+VERDICT_PATTERN = re.compile(
+    r"(?:\*\*VERDICT:?\*\*|##\s+VERDICT|##\s+Verdict)"
+    r"(?:[\s\S]{0,160}?Class:\s*([\w-]+))?"
+    r"(?:[\s\S]{0,200}?Surface:\s*(.+?)$)?"
+    r"[\s\S]{0,200}?Outcome:\s*(confirmed|refuted|inconclusive)"
+    r"(?:[\s\S]{0,160}?Confidence:\s*([0-9.]+))?"
+    r"(?:[\s\S]{0,200}?Redirect:\s*(.+?)$)?"
+    r"(?:[\s\S]{0,200}?Note:\s*(.+?)$)?",
+    re.MULTILINE | re.IGNORECASE,
+)
+
 
 def _findings_from_markdown(content: str, agent_id: str) -> list[Finding]:
     """Parse the structured **FINDING:** / ## Finding format."""
@@ -232,6 +247,115 @@ def _extract_findings(messages: list, agent_id: str) -> list[Finding]:
         findings.extend(_findings_from_markdown(content, agent_id))
         findings.extend(_findings_from_json(content, agent_id))
     return findings
+
+
+# Verdict outcome → (base log-odds magnitude, Signal.kind). The executor's
+# closing verdict is the deciding-probe feedback that closes the belief
+# loop: a ``confirmed`` is the only signal kind that lets a hypothesis
+# cross the COMMIT threshold; a ``refuted`` is the owning skill's "it is
+# not me" and drives belief down hard.
+_VERDICT_OUTCOME = {
+    "confirmed": (3.0, "confirm"),
+    "refuted": (3.0, "refute"),
+    "inconclusive": (0.0, "observation"),
+}
+
+
+def _extract_verdicts(
+    messages: list, agent_id: str, config_name: str,
+) -> list[Signal]:
+    """Parse the worker's closing VERDICT block into signed Signal atoms.
+
+    Returns at most one verdict signal (plus an optional ``redirect``
+    routing signal) — the LAST verdict in the trace wins, since a worker
+    refines its assessment as it goes. ``Class`` / ``Surface`` default to
+    the dispatched skill identity when the worker omits them. The signed
+    weight feeds the hypothesis synthesis pass directly:
+
+    - confirmed   → kind="confirm", weight +3·conf  (crosses COMMIT gate)
+    - refuted     → kind="refute",  weight −3·(1−conf) (drives toward refuted)
+    - inconclusive→ kind="observation", weight = (conf−0.5)·1.2 (mild, signed)
+    """
+    last: tuple = ()
+    for msg in messages:
+        if not isinstance(msg, AIMessage):
+            continue
+        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        for m in VERDICT_PATTERN.finditer(content):
+            last = m.groups()
+    if not last:
+        return []
+
+    cls_raw, surface_raw, outcome_raw, conf_raw, redirect_raw, note_raw = last
+    outcome = (outcome_raw or "").strip().lower()
+    if outcome not in _VERDICT_OUTCOME:
+        return []
+    vuln_class = (cls_raw or config_name or "").strip().lower()
+    surface = " ".join((surface_raw or "").split()).strip()
+    note = " ".join((note_raw or "").split()).strip()[:200]
+    try:
+        conf = max(0.0, min(1.0, float(conf_raw))) if conf_raw else 0.5
+    except (TypeError, ValueError):
+        conf = 0.5
+
+    base, kind = _VERDICT_OUTCOME[outcome]
+    if outcome == "confirmed":
+        weight = base * max(conf, 0.5)
+    elif outcome == "refuted":
+        weight = -base * max(1.0 - conf, 0.5)
+    else:  # inconclusive — mild signed nudge around 0.5
+        weight = (conf - 0.5) * 1.2
+
+    out: list[Signal] = [Signal(
+        observation=f"{agent_id} verdict on {vuln_class}: {outcome}"
+                    + (f" — {note}" if note else ""),
+        surface=surface,
+        vuln_class=vuln_class,
+        suggested_skill=config_name,
+        weight=weight,
+        kind=kind,
+        source="executor_verdict",
+        source_agent=agent_id,
+    )]
+
+    # A redirect ("looks like X, not Y") lifts the alternative class so it
+    # can rise in the ranking — exactly what was missing when the real
+    # class never surfaced in the top hypotheses.
+    redirect = " ".join((redirect_raw or "").split()).strip()
+    if redirect:
+        redirect_class = _redirect_class(redirect)
+        if redirect_class and redirect_class != vuln_class:
+            out.append(Signal(
+                observation=f"{agent_id} redirect: {redirect}"[:200],
+                surface=surface,
+                vuln_class=redirect_class,
+                suggested_skill=redirect_class,
+                technique=redirect[:120],
+                weight=1.0,
+                kind="routing",
+                source="executor_verdict",
+                source_agent=agent_id,
+            ))
+    return out
+
+
+# Known dispatchable class tokens a redirect line might name. Kept loose —
+# the synthesis pass tolerates an unknown class (it just becomes a new
+# hypothesis bucket), so this only needs to catch the common spellings.
+_REDIRECT_CLASSES = (
+    "deserialization", "ssti", "sqli", "ssrf", "idor", "lfi", "rce", "xss",
+    "xxe", "csrf", "auth", "open-redirect", "file-upload", "mass-assignment",
+    "prototype-pollution", "request-smuggling", "crlf", "graphql",
+)
+
+
+def _redirect_class(text: str) -> str:
+    """Pull a known class token out of a free-text redirect line."""
+    low = text.lower()
+    for c in _REDIRECT_CLASSES:
+        if c in low:
+            return c
+    return ""
 
 
 # ── Refusal-path primitive salvage ──────────────────────────────────
@@ -1573,6 +1697,9 @@ async def _run_skill_agent_impl(
         result = last_snapshot or {}
         messages = result.get("messages", [])
         findings = _extract_findings(messages, config.agent_id)
+        verdict_signals = _extract_verdicts(
+            messages, config.agent_id, config.config_name,
+        )
 
         # If the FlagWatcher fired, also synthesise a CRITICAL Finding
         # so the worker reports ``1 finding`` instead of ``0`` and the
@@ -2450,6 +2577,19 @@ async def _run_skill_agent_impl(
         "findings": findings,
         "active_agents": [config.agent_id],
     }
+    if verdict_signals:
+        # The worker's closing self-assessment — the deciding-probe
+        # feedback that lets the synthesis pass recalibrate belief (confirm
+        # crosses COMMIT, refute drives toward refuted). See _extract_verdicts.
+        update["signals"] = verdict_signals
+        node.log.info(
+            "[%s] verdict: %s",
+            config.agent_id,
+            "; ".join(
+                f"{s.vuln_class}={'+' if s.weight >= 0 else ''}{s.weight:.1f}({s.kind})"
+                for s in verdict_signals
+            ),
+        )
     if tool_attempts:
         update["tool_attempts"] = tool_attempts
     # Sticky-fallback bookkeeping: if this dispatch used the fallback model

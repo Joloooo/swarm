@@ -476,7 +476,7 @@ class BaseNode(ABC):
             call_config=call_config,
             config=config,
             log=self.log,
-            max_plain_retries=max_plain_retries,
+            max_retries_per_tier=max_plain_retries,
         )
 
     async def run_skill_agent(

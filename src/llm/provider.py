@@ -289,12 +289,30 @@ def get_llm(config: LLMConfig | None = None) -> BaseChatModel:
         # ChatCodex reads the OAuth token from the default ~/.codex/auth.json
         # and refreshes it on demand (see src/llm/codex.py:_ensure_tokens).
         _log_provider_diagnostic(config, CODEX_API_ENDPOINT)
+        cache_retention = os.environ.get(
+            "SWARM_CODEX_PROMPT_CACHE_RETENTION", "24h"
+        ).strip()
+        if cache_retention.lower() in {"", "0", "false", "none", "off"}:
+            cache_retention = ""
+        # ``prompt_cache_key`` here is an OVERRIDE, not the literal key. It is
+        # OFF by default: a controlled probe showed the Codex subscription
+        # backend accepts but ignores prompt_cache_key for routing (no cache
+        # gain), so we don't send one unless asked. Set
+        # SWARM_CODEX_PROMPT_CACHE_KEY=auto to opt in (ChatCodex then computes
+        # a per-conversation key from run_id/pid/base agent_id), or to any
+        # other string to also namespace it under that prefix. See
+        # ChatCodex._resolve_prompt_cache_key and tests/live/probe_prompt_cache.py.
         return ChatCodex(
             model=config.model,
             temperature=config.temperature,
             max_tokens=config.max_tokens,
             reasoning_effort=config.reasoning_effort,
             reasoning_summary=config.reasoning_summary,
+            prompt_cache_retention=cache_retention or None,
+            prompt_cache_key=(
+                os.environ.get("SWARM_CODEX_PROMPT_CACHE_KEY")
+                or None
+            ),
             request_timeout_s=config.request_timeout_s,
         )
 

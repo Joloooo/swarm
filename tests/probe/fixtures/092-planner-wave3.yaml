@@ -1,0 +1,42 @@
+id: "092-planner-wave3"
+level: 1
+node: planner
+agent_id: "_planner"
+config_name: ""
+source_run: "logs/full_run_06-13_15h42m/run-06-13_15h42m53s_XBEN-092/"
+benchmark_id: "XBEN-092-24"
+# Wave-3 planner turn (16:05). By now the belief layer has COMMITTED ssrf at
+# 100% (22 signals) with an explicit "a committed hypothesis OWNS the turn — do
+# NOT pivot to a lower-belief surface" rule. Deserialization NEVER became a
+# hypothesis: it appears only as a detector HINT and a CONDITIONAL untried entry
+# ("check for PHAR/deserialization only if a controlled file/path sink is
+# found", listed third after sqli/xss). This fixture captures the moment the
+# planner could have pivoted to deser and did not — because it was never given a
+# deser belief and was told not to leave the committed SSRF decoy.
+locator: { ts: "2026-06-13T16:05:42.254", match: "attack" }
+
+capture:
+  mode: messages
+  ref: "092-planner-wave3.captured.json"
+  tools: ["normalize_url", "validate_website"]
+
+observed_decision: >
+  action=attack — dispatched ssrf (committed) + information-disclosure + sqli
+  (+ request-builder); deserialization NOT dispatched. Baseline replay (n=3)
+  reproduced this 3/3: configs were ssrf/information-disclosure/sqli/request-builder,
+  deserialization 0/3.
+
+desired_direction: >
+  Diagnostic, not a pass/fail target: shows that with SSRF committed at 100% and
+  a no-pivot rule, and deserialization presented only as a conditional hint, the
+  planner LLM never selects deserialization. The lever is UPSTREAM — the belief
+  layer must promote deser to a hypothesis and must not let a confirmed-but-decoy
+  SSRF lock the turn. The honest follow-up is a Level-1 STATE perturbation that
+  renders deserialization as a supported hypothesis (via the real builder) and
+  re-measures.
+
+evaluation:
+  type: deterministic
+  criterion: { kind: regex, pattern: "deserialization" }
+  n: 3
+  pass_threshold: 1

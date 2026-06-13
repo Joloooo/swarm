@@ -2398,6 +2398,18 @@ def _attach_skill_handoff_context(
     return routed_keys
 
 
+# Vuln classes whose exploit is a multi-step CHAIN (build a gadget/object,
+# deliver it through one sink, trigger it through another) rather than a
+# one-shot probe. A single "it is not me" from a worker that tried one
+# angle is weak evidence for these — they need persistence across several
+# attempts — so they are never net-dropped from dispatch on a refute. This
+# is a general property of the class, not tuned to any benchmark.
+_PERSISTENT_CHAIN_CLASSES = frozenset({
+    "deserialization", "chain-ssrf-to-rce", "file-upload",
+    "insecure-file-uploads", "rce", "xxe",
+})
+
+
 def _refuted_classes(state: SwarmGraphState) -> set[str]:
     """Vuln classes the swarm has REFUTED everywhere (idea: "it is not me").
 
@@ -2406,7 +2418,10 @@ def _refuted_classes(state: SwarmGraphState) -> set[str]:
     every probe of that class came back "not here". Those are dropped from
     the planner's picks so it stops re-dispatching a class its own workers
     disowned. Scoped conservatively (net, across all surfaces) so a
-    refutation on one endpoint never suppresses a live lead on another.
+    refutation on one endpoint never suppresses a live lead on another, and
+    complex chain classes (:data:`_PERSISTENT_CHAIN_CLASSES`) are never
+    dropped on a refute at all — a single failed angle does not disprove a
+    multi-step exploit.
     """
     refuted: set[str] = set()
     live: set[str] = set()
@@ -2417,7 +2432,7 @@ def _refuted_classes(state: SwarmGraphState) -> set[str]:
             refuted.add(cls)
         elif st in ("committed", "supported", "confirmed"):
             live.add(cls)
-    return refuted - live
+    return (refuted - live) - _PERSISTENT_CHAIN_CLASSES
 
 
 def _ensure_hypothesis_floor(

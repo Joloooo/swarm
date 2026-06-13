@@ -1370,12 +1370,39 @@ class _Live:
                   f"{reason_part}  ({_fmt_ms(duration_ms)})")
             rendered_any = True
 
+            # Skill ranking with pros/cons — the planner's explicit
+            # selection rationale. Rendered under the decision line so the
+            # operator (and the disk log) can see WHY each skill was picked
+            # or skipped. Captured in full_logs via the decision JSON in the
+            # message stream; this mirrors it into displayed_terminal_logs.
+            self._render_skill_ranking(decision.get("skill_ranking"))
+
         if not rendered_any:
             # Fallback — planner produced no parseable decision (e.g. tool
             # call only). Still mark the lifecycle so the user sees the
             # planner ran.
             head = _paint("▸ planner ", _DIM, _BLUE)
             _emit(f"{_now()}  {head} (no decision yet, {_fmt_ms(duration_ms)})")
+
+    def _render_skill_ranking(self, ranking: Any) -> None:
+        """Render the planner's ``skill_ranking`` (best-first skills with
+        pros/cons) under its decision line. Tolerant of missing/malformed
+        input — a planner that omits the field renders nothing. Goes to the
+        live ticker and its ``displayed_terminal_logs.log`` mirror.
+        """
+        if not isinstance(ranking, list) or not ranking:
+            return
+        indent = " " * 12
+        _emit(f"{indent}{_paint('· skill ranking', _DIM, _MAGENTA)}")
+        for i, entry in enumerate(ranking[:10], 1):
+            if not isinstance(entry, dict):
+                continue
+            skill = str(entry.get("skill") or "?").strip()
+            _emit(f"{indent}  {_paint(f'{i:2d}. {skill}', _BOLD)}")
+            for p in (entry.get("pros") or [])[:3]:
+                _emit(f"{indent}      {_paint('+ ' + str(p), _GREEN)}")
+            for c in (entry.get("cons") or [])[:3]:
+                _emit(f"{indent}      {_paint('- ' + str(c), _YELLOW)}")
 
     def _emit_multiline(
         self,

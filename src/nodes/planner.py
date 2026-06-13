@@ -461,6 +461,11 @@ End EVERY turn with a fenced JSON block of this exact shape:
   "target_url": "http://example.com",
   "target_scope": "example.com",
   "reasoning": "Recon surfaced PHP + MySQL with a login form at /admin and a numeric id param on /api/v1/orders. Firing the standard SQLi/XSS skills, a custom WP-plugin lookup, and a targeted IDOR probe in parallel.",
+  "skill_ranking": [
+    {"skill": "idor", "pros": ["numeric id on /api/v1/orders is client-controlled", "receipt route already confirmed auth-by-id"], "cons": ["only a benign record known so far"]},
+    {"skill": "sqli", "pros": ["search/detail/delete params look DB-backed"], "cons": ["no SQL error or differential observed yet"]},
+    {"skill": "deserialization", "pros": [], "cons": ["no upload/unserialize sink found in recon"]}
+  ],
   "relevant_summary": {
     "current_hypothesis": "Numeric id parameter on /api/v1/orders is the highest-probability IDOR — receipt endpoint already confirmed authenticated access by ID.",
     "ruled_out": [
@@ -511,6 +516,21 @@ Rules:
   current hypothesis. Even on report / submit_flag turns, include
   the object: it remains the final on-disk snapshot of the
   engagement's state.
+- "skill_ranking" is REQUIRED on every action=="attack" turn. It makes
+  your skill-selection reasoning explicit and auditable — the operator
+  reads it in the live log to see WHY you picked (and skipped) each
+  skill. It is a ranked list, best-first, of the skills you seriously
+  considered this turn (up to 10), each an object
+  ``{"skill": "<exact menu name>", "pros": [...], "cons": [...]}``:
+  - ``pros``: 0-3 short, concrete, evidence-grounded reasons this skill
+    is likely to help on THIS target right now.
+  - ``cons``: 0-3 short reasons it may not help or is lower-priority.
+  - Give an empty list when there is no real pro/con — do NOT pad.
+  Rank on what the recon/evidence actually supports, not generic priors.
+  Include a strong candidate even when you are NOT dispatching it this
+  turn (with the con that gates it) — that record is exactly what makes
+  a missed lead visible later. This field is for observability; it does
+  not itself dispatch anything (``configs`` does that).
 
 If you cannot parse the user's intent, choose "report" with a
 ``reasoning`` field explaining what you need. Never omit the JSON

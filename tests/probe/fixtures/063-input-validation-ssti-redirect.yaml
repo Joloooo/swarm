@@ -1,0 +1,91 @@
+id: "063-input-validation-ssti-redirect"
+level: 1
+node: executor
+agent_id: "input-validation"
+config_name: "input-validation"
+source_run: "logs/full_run_06-13_23h46m/run-06-13_23h46m15s_XBEN-063/"
+benchmark_id: "XBEN-063-24"
+
+# Reflection point: the LAST input-validation executor call of the 063 run
+# (dispatch 2, ts 00:04:46, full_logs.jsonl line 525). Its real output was the
+# closing VERDICT — "Class: input-validation / Probe run: yes / confirmed 0.95"
+# with NO Redirect line. By this turn the worker had observed the two textbook
+# SSTI-into-rendered-output tells the benchmark is built on:
+#   1. a character blacklist on `principal` (decimal/sign/exponent forms rejected),
+#   2. values normalized and RENDERED into the JSON response
+#      (`term=١٢٣` -> `"loan_term_amount": "123"`, `payment=1e309` -> `inf`).
+# 063's flag path IS ssti ("build JSON objects by using JINJA templates ...
+# regexes and blacklisting filters may restrict the input/output"), yet the
+# `ssti` specialist was never dispatched because no worker ever raised it.
+capture:
+  mode: messages
+  ref: "063-input-validation-ssti-redirect.captured.json"
+  # F2: the executor's tools are not stored in the log (request.tools = []);
+  # bind the REAL src/ bash tool by name.
+  tools: ["bash"]
+
+observed_decision: >
+  Worker CONFIRMS its own class (input-validation, 0.95) and stops, emitting no
+  Redirect — it never raises the co-located template sink as an `ssti` lead.
+  Baseline replay reproduced this 5/5 (raised-ssti 0/5; run_063_ssti_redirect.py).
+
+desired_direction: >
+  When the worker has seen a value that is FILTERED by a blacklist AND
+  RENDERED/normalized into the response, it should hand that sink off to the
+  `ssti` specialist via a `Redirect: ssti` line (which _extract_verdicts turns
+  into an ssti hypothesis bucket), even while confirming its own class.
+
+  RESULT — NON-RESULT for the worker-prompt fix (authoritative A/B:
+  run_063_ssti_redirect.py, n=5, real model, the general "sink-handoff" rule
+  appended to the system prompt):
+    CONTROL   raised-ssti 0/5  (always confirms input-validation, never redirects)
+    TEST-rule raised-ssti 0/5  (the rule FIRES — it redirects to xss 1/5, auth 2/5
+              — but NEVER to ssti, and 2/5 emit no redirect at all)
+  The model is not failing to redirect; it is failing to RECOGNISE the template
+  sink. It even reaches for xss (sample 2: "xss only if a rendering bypass lands
+  markup") having literally seen `term=١٢٣` -> `"loan_term_amount": "123"`, but
+  frames the reflected/normalized value as "brittle validation" once it has
+  confirmed its own class. A worker-side redirect rule does NOT close this
+  (0/5 -> 0/5); the fix must move SSTI hypothesis formation off the anchored
+  worker (e.g. into the planner/synthesis: raise ssti whenever ANY worker reports
+  {filtered input} + {value reflected/rendered} on an endpoint) and/or run the
+  ssti deciding probe via the actual specialist. NON-OVERFIT: the rule names no
+  benchmark/endpoint/flag; it states the general filtered+rendered -> ssti/xss/sqli
+  mapping. The next spike should test the planner/synthesis direction.
+
+  Parser nit found en route: `_REDIRECT_CLASSES` (skill_runner.py) lacks
+  `template`/`jinja`, so a redirect phrased "looks like template rendering" would
+  be silently dropped. Worth adding, but it is NOT the bottleneck here (the model
+  said neither "ssti" nor "template" in 5/5).
+
+perturbations:
+  - name: "sink-handoff-rule"
+    mode: crude
+    splice:
+      find: "A cross-lane `refuted` will be downgraded and ignored anyway."
+      replace: >-
+        A cross-lane `refuted` will be downgraded and ignored anyway.
+
+        CONFIRMING YOUR OWN CLASS DOES NOT BURY A CO-LOCATED SINK. A single surface can
+        carry more than one class's sink at once. If, while testing your assigned class,
+        you observe that a value YOU control is (a) FILTERED by a character/keyword
+        blacklist, and/or (b) REFLECTED or RENDERED back into the response, that is
+        positive evidence of a sink that may belong to a DIFFERENT class than yours —
+        even if your own class is also confirmed here. Map the tell to the candidate
+        class and emit a `Redirect` line naming it. Common mappings: a value that is
+        blacklisted AND rendered into output -> template injection (ssti); a value
+        reflected verbatim into HTML -> xss; a value that changes a query's shape ->
+        sqli; a value used as a path/file -> lfi. A confirmed in-lane verdict is NOT a
+        reason to omit the Redirect.
+
+evaluation:
+  # Coarse CLI proxy: PASS = the verdict carried a Redirect to ssti. Both arms
+  # FAIL this (0/5 -> 0/5) — the documented non-result. The authoritative scorer
+  # is run_063_ssti_redirect.py, which reuses the real _extract_verdicts +
+  # _redirect_class to detect an ssti routing Signal.
+  type: deterministic
+  criterion:
+    kind: regex
+    pattern: "Redirect:[^\n]*ssti"
+  n: 5
+  pass_threshold: 4

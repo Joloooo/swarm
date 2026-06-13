@@ -419,11 +419,22 @@ def build_crawl_query(
 
 # --- Identifier normalization (banner -> advisory-friendly terms) ---------
 #
-# Concept from pentest-agent-shen (utils/cve_info.py): a raw recon banner
-# ("Werkzeug/2.0.1", "Apache/2.4.49 (Debian)") rarely matches how a
-# CVE/advisory names the product, so a version-gated search on the raw string
-# retrieves noise. Shen expands the name with an LLM call; we use a small
-# static table instead so it stays pure/testable.
+# NOT copied from pentest-agent-shen — only the IDEA is shared. The problem:
+# a raw recon banner ("Werkzeug/2.0.1", "Apache/2.4.49 (Debian)") rarely
+# matches how a CVE/advisory names the product, so a literal search on the raw
+# string retrieves noise. Shen solves it with an LLM call (utils/cve_info.py:
+# "generate N alternative product names"); this is our OWN small static table,
+# deliberately NOT an LLM call so it stays pure/free/testable.
+#
+# What it is for NOW: web_search is Codex-native (see web_search.py) — the
+# search MODEL rewrites the query and expands product names itself, so this
+# table is a cheap, deterministic PRE-expansion, not the main normaliser. Its
+# only remaining job is to feed advisory-friendly terms into curated-source
+# selection (sources_for / build_crawl_query) BEFORE Codex runs. It is
+# therefore partly vestigial: harmless and free, but if you ever want to
+# delete it, measure how often it changes a query vs what Codex produces on
+# its own first — do not invest in growing it or porting Shen's LLM version
+# (that would just duplicate Codex's own query rewriting).
 #
 # RULE — every alias is a PRODUCT-NAME normalization ONLY: the canonical
 # name, a vendor/advisory spelling, or the parent stack the product ships in.

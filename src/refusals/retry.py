@@ -129,6 +129,7 @@ async def astream_with_refusal_retry(
     config: "AgentConfig",
     log: logging.Logger,
     fallback_agent_factory: Callable[[str], Any] | None = None,
+    fallback_model_label: str | None = None,
     max_retries_per_tier: int = 2,
     mode: str = "astream",
     start_on_fallback: bool = False,
@@ -158,6 +159,9 @@ async def astream_with_refusal_retry(
             tier 1 exhausts. Caller decides whether to supply one —
             non-Codex providers (anthropic / local) typically pass
             None since model-swap isn't well-defined for them.
+        fallback_model_label: human-readable fallback model name for
+            live recovery lines. It is display-only; the factory
+            remains the source of truth for the actual model object.
         max_retries_per_tier: how many additional attempts after the
             first within each tier. Default 2 → 3 attempts per tier
             → up to 6 attempts total when both tiers are configured.
@@ -262,6 +266,25 @@ async def astream_with_refusal_retry(
             # about to re-raise.
             pass
 
+    def _recovery_to_live(
+        event: str,
+        *,
+        primary_attempts: int | None = None,
+        fallback_attempt: int | None = None,
+    ) -> None:
+        try:
+            from src.observability.live import LIVE
+            LIVE.refusal_recovery(
+                agent=config.agent_id,
+                event=event,
+                fallback_model=fallback_model_label,
+                primary_attempts=primary_attempts,
+                fallback_attempt=fallback_attempt,
+                continued_from=len(current_messages),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     def _absorb_partial(exc: BaseException) -> None:
         """Roll the accumulated trace forward after a refusal.
 
@@ -301,6 +324,7 @@ async def astream_with_refusal_retry(
             "on the primary model earlier this run",
             config.agent_id,
         )
+        _recovery_to_live("direct")
     else:
         agent = agent_factory(filtered_sys)
         for attempt in range(max_retries_per_tier + 1):
@@ -342,6 +366,10 @@ async def astream_with_refusal_retry(
             "[%s] primary tier exhausted, switching to fallback model",
             config.agent_id,
         )
+        _recovery_to_live(
+            "switch",
+            primary_attempts=max_retries_per_tier + 1,
+        )
         fb_agent = fallback_agent_factory(filtered_sys)
         for attempt in range(max_retries_per_tier + 1):
             total_attempts += 1
@@ -353,6 +381,10 @@ async def astream_with_refusal_retry(
                     "[%s] rescued by fallback model on attempt %d "
                     "(continued from %d msg(s))",
                     config.agent_id, attempt + 1, len(current_messages),
+                )
+                _recovery_to_live(
+                    "rescued",
+                    fallback_attempt=attempt + 1,
                 )
                 return last_snapshot, total_attempts, last_tier
             except REFUSAL_EXCS as e:

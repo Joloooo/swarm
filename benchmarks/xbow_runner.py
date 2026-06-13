@@ -32,6 +32,7 @@ import socket
 import subprocess
 import sys
 import time
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage
@@ -861,73 +862,31 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         "error": None,
     }
     agent_state: dict = {}
-    leased_ip: str | None = None
 
+    # The benchmark target bring-up (build → loopback lease → port override →
+    # bridge/loopback URL → flag candidates) and its guaranteed teardown are
+    # owned by ``provision_target`` (benchmarks/provision.py) — the single
+    # definition the agentic-testing harness (tests/probe/) also enters, so a
+    # replayed node provisions its target identically to production. Lazy
+    # import: provision.py imports THIS module at load time, so importing it at
+    # module top here would create a cycle. Entered via an ``AsyncExitStack``
+    # so the target teardown runs in this function's ``finally`` — AFTER the
+    # timeout / late-capture harvest below — preserving the original ordering.
+    from benchmarks.provision import provision_target
+
+    stack = AsyncExitStack()
     try:
-        if not skip_build:
-            make_build(benchmark_id)
-        # Give this run its own loopback IP so the benchmark's REAL ports are
-        # bound to a unique host address the agent scans in isolation (see
-        # benchmarks/loopback.py + setup_loopback_pool.sh). Falls back to the
-        # legacy localhost:<random> mapping if the alias pool isn't set up.
-        leased_ip = loopback.acquire()
-        if leased_ip and _write_port_override(benchmark_id, leased_ip) is None:
-            loopback.release(leased_ip)
-            leased_ip = None
-        if not leased_ip:
-            LIVE.runner_message(
-                f"{benchmark_id}: no per-VM loopback IP "
-                "(run benchmarks/setup_loopback_pool.sh) — using localhost",
-                level="warn",
-            )
-        else:
-            # Clean slate: a benchmark container left running by a crashed or
-            # un-torn-down prior run can still answer on this run's leased IP
-            # and be "solved" instead of the freshly-launched target (a false
-            # flag-capture). Remove such stragglers before our own `up`.
-            _purge_contaminating_containers(leased_ip)
-        make_run(benchmark_id)
-        # Hand the agent the EXACT app URL (IP + the real published port),
-        # not just the IP — so it starts where a real engagement would
-        # (given scope) instead of hunting for the app among decoy ports.
-        #
-        # Prefer the container's OWN bridge IP when it is routable from the host
-        # (docker-mac-net-connect on macOS, or natively on Linux): the agent
-        # then scans only the container's network namespace, so the host's
-        # 0.0.0.0 services (AirPlay, Logitech, …) never leak onto the target.
-        # Otherwise fall back to the per-VM loopback alias (or plain localhost)
-        # exactly as before — the bring-up flow above is unchanged either way.
-        bridge_url = (
-            _container_bridge_target(benchmark_id) if _bridge_routable() else None
+        tgt = await stack.enter_async_context(
+            provision_target(benchmark_id, skip_build=skip_build)
         )
-        result["target_url"] = bridge_url or (
-            _primary_target_url(leased_ip, _override_host_map(benchmark_id))
-            if leased_ip
-            else discover_target_url(benchmark_id)
-        )
-
-        # Build the FULL candidate set the matcher will accept.
-        # Includes the sha256 prediction (``common.mk`` formula), the
-        # ``.env`` file's ``FLAG=`` value (what docker-compose autoload
-        # would inject when ``docker compose build`` ran directly), and
-        # the live container's actually-baked value (most authoritative
-        # when readable). Any one match counts as a capture. See
-        # :func:`expected_flag_candidates` for the full rationale.
-        #
-        # The "primary" candidate (for display + state["expected_flag"])
-        # is whichever the runner can confirm first — the live container
-        # read if available, else .env value, else sha256.
-        candidates = expected_flag_candidates(benchmark_id)
+        result["target_url"] = tgt.target_url
+        # Adopt the provisioned flag set. Mirrors the original conditional:
+        # only override the sha256-prediction defaults when a real candidate
+        # set was readable (empty set → keep the init values).
+        candidates = tgt.expected_flag_candidates
         if candidates:
-            primary = candidates[0]
-            if primary != flag:
-                logger.info(
-                    "[%s] primary flag now %s (was sha256 prediction %s); "
-                    "full candidate set: %s",
-                    benchmark_id, primary, flag, candidates,
-                )
-            flag = primary
-            result["expected_flag"] = primary
+            flag = tgt.expected_flag
+            result["expected_flag"] = tgt.expected_flag
             result["expected_flag_candidates"] = candidates
 
         # Show the start-of-run boundary now that target_url is known.
@@ -1075,23 +1034,12 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         # A crash mid-run may still leave findings on the streamed snapshot.
         _record_findings(result, agent_state)
     finally:
-        try:
-            docker_down(benchmark_id)
-        except Exception:  # noqa: BLE001
-            logger.exception("[%s] docker compose down failed", benchmark_id)
-        # Drop the generated port override and free this run's loopback IP so
-        # the next run (or a parallel sweep process) can reuse it.
-        _override_path(benchmark_id).unlink(missing_ok=True)
-        loopback.release(leased_ip)
+        # Tear down the provisioned target: docker compose down, drop the port
+        # override, release the loopback lease — all owned by provision_target.
+        # Running it here in the finally keeps teardown AFTER the timeout /
+        # late-capture harvest in the except blocks above, exactly as before.
+        await stack.aclose()
         result["duration_s"] = round(time.time() - started, 1)
-        # Clear the LIVE file sink so any later (non-bench) log lines
-        # from this Python process don't get appended to this run's
-        # log file.
-        try:
-            set_terminal_log_file(None)
-        except Exception:  # noqa: BLE001 — observability must not break the sweep
-            pass
-
     # Rate-limit safety net: if any LLM call this bench hit a Codex rate-limit
     # / quota error (process-global signal set in src/llm/codex.py) and we did
     # NOT capture a flag, record it as a crash even if some node swallowed the
@@ -1350,59 +1298,68 @@ async def main_async(args) -> int:
                 aborted = True
                 break
         r = await run_one(bid, skip_build=args.skip_build)
-        path = write_jsonl(r)
-
-        # Classify the run once — flag (ok) / fail / crash (api) — with the
-        # shared src.benchmark_verdict rule, and use that single verdict for
-        # BOTH the end-of-sweep tally and the picker mark so the terminal,
-        # the Summary line, and the ✓/✗/~ grid can never disagree. A
-        # full-budget ``agent timeout`` counts as fail, not crash.
-        status = bench_results.classify(bool(r["flag_found"]), r.get("error"))
-        summary[_SUMMARY_KEY[status]] += 1
-
-        # Mirror the verdict into the picker's ✓/✗/~ triage marks so the TUI
-        # grid reflects this run without a manual ``t`` press. The mark always
-        # reflects the latest run, so a codex/infra crash shows ~ even on a
-        # benchmark that previously passed/failed — that's how you spot runs
-        # that need re-running. Best-effort — must never break the sweep.
         try:
-            bench_results.record(bid, status)
-        except Exception:  # noqa: BLE001 — triage write must not stop the sweep
-            logger.exception("[%s] triage mark update failed", bid)
+            path = write_jsonl(r)
 
-        # Pull the most recent submission attempt for the
-        # expected-vs-captured verification block in bench_end. Empty
-        # list → empty string → bench_end renders "(no submission
-        # attempted)". On success, ``r["captured_flag"]`` is the
-        # verified value, and the last submission_attempts entry
-        # equals it; we pick the last attempt either way because it's
-        # what the planner most recently committed to (and matches
-        # what's verified for the verdict — see the run_one block at
-        # xbow_runner.py:307-316).
-        last_submission = ""
-        attempts = r.get("submission_attempts") or []
-        if attempts:
-            last_submission = str(attempts[-1] or "").strip()
+            # Classify the run once — flag (ok) / fail / crash (api) — with the
+            # shared src.benchmark_verdict rule, and use that single verdict for
+            # BOTH the end-of-sweep tally and the picker mark so the terminal,
+            # the Summary line, and the ✓/✗/~ grid can never disagree. A
+            # full-budget ``agent timeout`` counts as fail, not crash.
+            status = bench_results.classify(bool(r["flag_found"]), r.get("error"))
+            summary[_SUMMARY_KEY[status]] += 1
 
-        LIVE.bench_end(
-            bid,
-            ok=bool(r["flag_found"]),
-            duration_s=float(r["duration_s"] or 0.0),
-            findings_n=int(r["findings_count"] or 0),
-            findings_by_severity=dict(r.get("findings_by_severity") or {}),
-            # The summary.md artefact was removed in the 2026-05 log
-            # consolidation; we now point the end-of-bench line at the
-            # plain-text terminal log instead. The structured log is one
-            # directory over: ``logs/run-<run_id>/full_logs.jsonl``.
-            summary_path=f"{r['run_dir']}/displayed_terminal_logs.log",
-            error=r["error"],
-            expected_flag=str(r.get("expected_flag") or ""),
-            last_submission=last_submission,
-            expected_flag_candidates=tuple(
-                r.get("expected_flag_candidates") or ()
-            ),
-        )
-        LIVE.runner_message(f"           jsonl   → {path}")
+            # Mirror the verdict into the picker's ✓/✗/~ triage marks so the TUI
+            # grid reflects this run without a manual ``t`` press. The mark always
+            # reflects the latest run, so a codex/infra crash shows ~ even on a
+            # benchmark that previously passed/failed — that's how you spot runs
+            # that need re-running. Best-effort — must never break the sweep.
+            try:
+                bench_results.record(bid, status)
+            except Exception:  # noqa: BLE001 — triage write must not stop the sweep
+                logger.exception("[%s] triage mark update failed", bid)
+
+            # Pull the most recent submission attempt for the
+            # expected-vs-captured verification block in bench_end. Empty
+            # list → empty string → bench_end renders "(no submission
+            # attempted)". On success, ``r["captured_flag"]`` is the
+            # verified value, and the last submission_attempts entry
+            # equals it; we pick the last attempt either way because it's
+            # what the planner most recently committed to (and matches
+            # what's verified for the verdict — see the run_one block at
+            # xbow_runner.py:307-316).
+            last_submission = ""
+            attempts = r.get("submission_attempts") or []
+            if attempts:
+                last_submission = str(attempts[-1] or "").strip()
+
+            LIVE.bench_end(
+                bid,
+                ok=bool(r["flag_found"]),
+                duration_s=float(r["duration_s"] or 0.0),
+                findings_n=int(r["findings_count"] or 0),
+                findings_by_severity=dict(r.get("findings_by_severity") or {}),
+                # The summary.md artefact was removed in the 2026-05 log
+                # consolidation; we now point the end-of-bench line at the
+                # plain-text terminal log instead. The structured log is one
+                # directory over: ``logs/run-<run_id>/full_logs.jsonl``.
+                summary_path=f"{r['run_dir']}/displayed_terminal_logs.log",
+                error=r["error"],
+                expected_flag=str(r.get("expected_flag") or ""),
+                last_submission=last_submission,
+                expected_flag_candidates=tuple(
+                    r.get("expected_flag_candidates") or ()
+                ),
+            )
+            LIVE.runner_message(f"           jsonl   → {path}")
+        finally:
+            # Keep the per-run displayed-terminal sink attached through the
+            # human-facing verdict block above, then clear it before the next
+            # benchmark or the campaign-level summary writes.
+            try:
+                set_terminal_log_file(None)
+            except Exception:  # noqa: BLE001 — observability must not break the sweep
+                pass
 
     LIVE.runner_message(
         f"Summary: {summary['pass']} pass, {summary['fail']} fail, "

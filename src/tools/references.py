@@ -32,6 +32,39 @@ class _ReadReferenceArgs(BaseModel):
     )
 
 
+class _ReadSkillContextArgs(BaseModel):
+    reasoning: str = Field(
+        description=(
+            "One line: what live evidence makes this other skill relevant "
+            "as context right now."
+        )
+    )
+    skill_name: str = Field(
+        description=(
+            "Exact skill name from the Skill context catalogue "
+            "(e.g. 'error-handling', 'framework-nestjs')."
+        )
+    )
+
+
+class _ReadSkillReferenceArgs(BaseModel):
+    reasoning: str = Field(
+        description=(
+            "One line: why this specific cross-skill reference is needed "
+            "for the current task."
+        )
+    )
+    skill_name: str = Field(
+        description="Exact skill name from the Skill context catalogue."
+    )
+    reference_file: str = Field(
+        description=(
+            "Reference filename from that skill's reference list, filename "
+            "only."
+        )
+    )
+
+
 def make_read_reference_tool(skill_name: str) -> BaseTool:
     """Build a ``read_reference`` tool scoped to ``skill_name``'s references/."""
 
@@ -62,4 +95,49 @@ def make_read_reference_tool(skill_name: str) -> BaseTool:
             "its 'Open WHEN' note; do not guess filenames."
         ),
         args_schema=_ReadReferenceArgs,
+    )
+
+
+def make_read_skill_context_tool() -> BaseTool:
+    """Build a tool that lets a worker read another skill as context only."""
+
+    def _read(reasoning: str, skill_name: str) -> str:
+        from src.skills.usage import read_skill_context
+
+        return read_skill_context(skill_name)
+
+    return StructuredTool.from_function(
+        func=_read,
+        name="read_skill_context",
+        description=(
+            "Read another skill's main instructions as supporting context. "
+            "This does NOT spawn that skill, does NOT change your primary "
+            "assignment, and should only be used when live evidence matches "
+            "the other skill's catalogue description. If another skill should "
+            "continue on a different surface or mechanism, report a structured "
+            "cross-skill handoff instead."
+        ),
+        args_schema=_ReadSkillContextArgs,
+    )
+
+
+def make_read_skill_reference_tool() -> BaseTool:
+    """Build a tool for cross-skill reference-file access."""
+
+    def _read(reasoning: str, skill_name: str, reference_file: str) -> str:
+        from src.skills.usage import read_skill_reference
+
+        safe = Path(reference_file).name
+        return read_skill_reference(skill_name, safe)
+
+    return StructuredTool.from_function(
+        func=_read,
+        name="read_skill_reference",
+        description=(
+            "Open ONE reference file from another context-accessible skill. "
+            "Pass an exact skill name and a filename listed for that skill. "
+            "Use this only after read_skill_context or the catalogue shows "
+            "that the reference matches live evidence."
+        ),
+        args_schema=_ReadSkillReferenceArgs,
     )

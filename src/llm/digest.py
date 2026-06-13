@@ -27,13 +27,13 @@ What lives here
 ===============
 
 - :data:`PATTERN_B_TAIL` — the single user message appended to the
-  worker's trace asking for the structured digest. The bulk of the
-  summariser's prompt is the worker's own system prompt + trace,
+  worker's message list asking for the structured digest. The bulk of the
+  summariser's prompt is the worker's own system prompt + seed + trace,
   replayed byte-identically so OpenAI's automatic prompt cache hits
   on the prefix.
 - :func:`summarize_worker_trace` — Pattern B (Claude Code-style
   prefix reuse): system prompt = the worker's system prompt; input
-  = the worker's trace + one appended HumanMessage with the
+  = the worker's message list + one appended HumanMessage with the
   digest instructions. The worker's last LLM call put this exact
   prefix in the cache seconds ago, so prefix processing is paid
   once across all the worker's calls rather than re-paid by the
@@ -61,12 +61,10 @@ message list and only appends one short user message at the end —
 the prefix is byte-identical to the worker's last LLM call, which
 fired seconds ago, so it lives in the cache and is essentially free.
 
-The model has no ``tools`` bound on the summariser path (the
-summariser uses a fresh ``ChatModel`` via :func:`get_llm`), so even
-though the system prompt and trace frame the model as a tool-using
-worker it physically cannot emit ``function_call`` output items.
-The appended user message explicitly instructs "STOP testing, no
-more tool calls, produce only the structured summary".
+The summariser binds the same tool schemas as the worker when the caller
+can provide them. That is for prompt-cache shape identity only; the
+appended user message explicitly says "STOP testing" and "Do not call
+tools", and this path never executes any emitted tool call.
 
 When the worker crashed mid-loop or hit its iteration cap without a
 clean final ``AIMessage``, this same path runs over the partial trace —
@@ -127,6 +125,33 @@ REPORT_MAX_OUTPUT_TOKENS = _env_int("SWARM_REPORT_MAX_OUTPUT_TOKENS", 4_000)
 # ever entered the trace. Pattern B trusts that defense; truncating
 # the trace here would break byte-identity with the worker's last
 # call and miss the cache.
+
+
+# ── Prompt-cache shape preservation ───────────────────────────────────
+
+
+def bind_tools_for_summary_cache(
+    model: Any,
+    tools: list[Any] | None,
+) -> Any:
+    """Bind the worker's exact tools to a summary call when possible.
+
+    The Codex prompt cache keys on more than message bytes. In practice the
+    request's tool schema is part of the shape too, so replaying a worker
+    conversation with ``tools=[]`` misses the cache even when the textual prefix
+    matches. The summary prompt still says not to call tools; binding them here
+    is for request-shape identity with the worker's last LLM call.
+    """
+    if not tools:
+        return model
+    binder = getattr(model, "bind_tools", None)
+    if not callable(binder):
+        return model
+    try:
+        return binder(list(tools))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("summary tool binding skipped: %s", e)
+        return model
 
 
 # ── Token counting ─────────────────────────────────────────────────────
@@ -282,82 +307,41 @@ def cap_message_size(
 # replayed byte-identically so the prompt cache hits on the prefix
 # (see module docstring "Why Pattern B" for the design rationale).
 #
-# The tail is intentionally exhaustive and slightly redundant with the
-# worker's own framing because the model is mid-conversation when it
-# reads this — the worker context tells it to act like a tester, and
-# we need a strong, unambiguous "STOP testing, switch to summarising,
-# use this exact template" pivot at the end.
+# The tail must stay small. The worker prompt + trace are the cached prefix;
+# this is only the role switch and output contract appended after that prefix.
 #
 # Vocabulary policy compliance: this template is grepped by the CI check
 # in ``CLAUDE.md`` (Skill Vocabulary Policy section). Uses neutral
 # test-task vocabulary throughout. Domain technical names
 # (SQL injection, CSRF token, SSRF gadget) stay intact.
 PATTERN_B_TAIL = """\
-STOP. Do not perform any more testing. Do not produce any more tool
-calls. You are now switching roles to summarize everything you just
-did above.
+STOP testing. Do not call tools. Summarize the conversation above for
+the supervisor; they will not see raw tool calls.
 
-The supervisor will read your summary and decide what to do next. They
-will NOT see your tool calls, raw outputs, or intermediate reasoning —
-they see only your summary.
+Dispatch reason: {dispatch_reason}
 
-The supervisor dispatched you because:
-
-  {dispatch_reason}
-
-Output format (markdown, exactly these sections in this order):
-
+Return markdown with exactly these headings:
 ## Status
-One of: success | inconclusive | blocked | refused | crashed. One
-sentence why.{status_hint}
-
+success | inconclusive | blocked | refused | crashed plus one sentence.{status_hint}
 ## Target
-The endpoint / parameter / URL you focused on (be specific: method +
-path + parameter names).
-
+method/path/params tested.
 ## Inputs tried
-List every distinct family of test input you tried. For each family,
-give 2-3 representative examples verbatim. Example families to surface
-explicitly when relevant: plain keywords, mixed case, URL-encoded, hex
-/ unicode, comment-spliced, whitespace tricks, doubled-letter,
-logical-operator alternatives, time-based, boolean-blind, second-order.
-Include a count: "Inputs tried: <N> total via <tool>=<count>,
-<tool>=<count>, ...".
-
+families, representative values, and total/tool counts if known.
 ## Server responses
-Group by status code / body fingerprint. Call out outlier responses
-that suggested a near-miss (e.g. one 500 amid 120 200s, a different
-content length, a unique error string). Preserve byte-exact strings
-that look like flags, credentials, tokens, or unique error messages —
-DO NOT paraphrase them. If a response body contained a value of the
-form ``flag{{...}}`` or ``FLAG{{...}}``, reproduce it verbatim.
-
+status/body groups; copy exact flags, tokens, credentials, or unique errors.
 ## Inferred server-side behaviour
-What you concluded about the server's filtering, validation, or
-defence based on the responses. State the evidence — which response
-patterns led to which inference.
-
+evidence -> conclusion.
 ## NOT tried
-Specific input families or angles you did NOT attempt. This is the
-most valuable section for a re-dispatch — be concrete. "Did not test
-second-order injection via /profile" is good; "could try other
-approaches" is useless.
-
+specific remaining angles.
 ## Recommended next dispatch
-One paragraph: the single most promising untested angle, and why,
-based on the responses observed.
+one best next move.
+## Cross-skill handoffs
+JSON array or []: {{"surface":"","technique":"","suggested_skill":"","confidence":"high|medium|low","signal":"","reason":"","evidence_excerpt":"","reproduction":""}}
+## Next skill suggestions
+JSON array or []: {{"signal":"","possible_vuln_class":"","where":"","next_move":"","skill":"","confidence":"high|medium|low","reason":""}}
 
-## Notable per-tool differences
-e.g. "curl: 98 probes; sqlmap: 23 probes, all timed out at 30s".
-
-Vocabulary: write in neutral test-task vocabulary throughout. Refer to
-inputs as "test inputs", to the actor as "tester" or "test agent", and
-describe construction of inputs in neutral terms. Keep domain technical
-names intact (SQL injection, CSRF token, SSRF gadget).
-
-Be specific. "Tried various encodings" is useless — list them. Produce
-only the structured summary. No tool calls. No commentary before or
-after the summary itself.
+Use exact skill names from the earlier Skill context catalogue. Be
+concrete and concise. No text outside the summary.
 """
 
 
@@ -392,6 +376,7 @@ def _status_hint(status: str, error: str | None) -> str:
 async def summarize_worker_trace(
     *,
     trace: list[BaseMessage],
+    worker_messages: list[BaseMessage] | None = None,
     worker_system_prompt: str,
     agent_id: str,
     config_name: str,
@@ -411,10 +396,12 @@ async def summarize_worker_trace(
     ``AIMessage``.
 
     The call is built as: ``SystemMessage(worker_system_prompt) +
-    trace + HumanMessage(PATTERN_B_TAIL.format(...))``. The first two
-    parts are byte-identical to what the worker's last LLM call sent,
-    so the prompt cache hits on them and only the appended user
-    message + the generated summary pay full processing cost.
+    worker_messages + HumanMessage(PATTERN_B_TAIL.format(...))``. The
+    first two parts are byte-identical to what the worker's last LLM call
+    sent, so the prompt cache hits on them and only the appended user
+    message + the generated summary pay full processing cost. Legacy callers
+    can omit ``worker_messages``; in that case we fall back to the old
+    trace-only shape.
 
     Tags the result with ``additional_kwargs={"agent_id": ...,
     "kind": "worker_report", ...}`` so the seeder
@@ -443,16 +430,15 @@ async def summarize_worker_trace(
         status_hint=_status_hint(status, error),
     )
 
-    # Build the Pattern B prompt. The system prompt and the trace match
-    # byte-for-byte what the worker's last LLM call sent — that prefix
+    # Build the Pattern B prompt. The system prompt and worker message list
+    # match byte-for-byte what the worker's last LLM call sent — that prefix
     # is hot in OpenAI's prompt cache from the worker's last call
     # (which fired seconds ago), so we get a cache hit on it and pay
     # only for the appended user message + the generated summary.
     #
-    # The model has no tools bound here (the summariser uses a fresh
-    # ChatModel via ``get_llm()``), so even though the system prompt
-    # and trace frame the agent as a tool-using worker, it physically
-    # cannot emit ``function_call`` output items.
+    # The caller may bind the worker's tools to preserve Codex prompt-cache
+    # shape. This function never executes any emitted tool call; an empty
+    # text response falls back to a deterministic stub below.
     if worker_system_prompt:
         sys_content = worker_system_prompt
     else:
@@ -464,7 +450,7 @@ async def summarize_worker_trace(
             "report. No commentary."
         )
     messages: list[BaseMessage] = [SystemMessage(content=sys_content)]
-    messages.extend(trace)
+    messages.extend(list(worker_messages or trace))
     messages.append(HumanMessage(content=tail))
 
     # Lazy import to avoid the circular import path
@@ -550,6 +536,8 @@ def _stub_report(
         f"\n\n## Recommended next dispatch\nRe-dispatch {config_name} or "
         f"pick a different skill; the previous run produced "
         f"{findings_count} structured finding(s)."
+        f"\n\n## Cross-skill handoffs\n[]"
+        f"\n\n## Next skill suggestions\n[]"
     )
 
 

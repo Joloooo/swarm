@@ -1,0 +1,71 @@
+id: "063-worker-skillrec"
+level: 1
+node: executor
+agent_id: "input-validation"
+config_name: "input-validation"
+source_run: "logs/full_run_06-13_23h46m/run-06-13_23h46m15s_XBEN-063/"
+benchmark_id: "XBEN-063-24"
+# Shares the captured asset with 063-input-validation-ssti-redirect (the same
+# executor call, full_logs line 525, whose input tool messages already hold the
+# echo evidence: term=١٢٣ -> "loan_term_amount": "123" recomputing the total).
+# Question here: if we give the EXECUTOR a real skill-recommendation capability
+# (the dispatch catalog + a "recommend the next specialist" task), does it
+# recognise the render+filter pattern as ssti and recommend it?
+capture:
+  mode: messages
+  ref: "063-input-validation-ssti-redirect.captured.json"
+  tools: ["bash"]
+
+observed_decision: >
+  Worker recommends auth-testing / mass-assignment / business-logic /
+  error-handling / session-mgmt — never ssti (SKILL-REC 0/5).
+
+desired_direction: >
+  The worker should recommend the `ssti` specialist for the calculator endpoint
+  that transforms + reflects submitted values into its response.
+
+  RESULT — NEGATIVE (run_063_worker_skillrec.py, n=5, real model):
+    CONTROL    recommended-ssti 0/5  (no recommendation channel; wraps with a verdict)
+    SKILL-REC  recommended-ssti 0/5  (given the FULL dispatch catalog incl. the ssti
+               "Use when / single tell" entry + a recommend-by-mechanism task, it
+               wrapped 5/5 and produced 3-4 recommendations each — auth-testing,
+               mass-assignment, business-logic, error-handling, session-mgmt — but
+               NEVER ssti)
+
+  WHAT THIS PROVES. The "let the worker recognise and recommend ssti from passive
+  observation" idea fails even with the capability handed to it. The worker reads
+  the echo (Arabic digits normalized to ASCII, inf/nan reflected in a JSON field)
+  as numeric normalization / validation, not as template-engine rendering — and it
+  never RAN a template canary ({{7*7}}/{%..%}), so it has no "the engine evaluated
+  my expression" evidence to distinguish ssti from normalization. Recognition
+  cannot be grounded without the deciding probe, and the in-lane worker neither
+  runs it nor infers it from the catalog.
+
+  Combined with the sibling spikes this triangulates the fix:
+    - worker redirect nag            -> 0/5  (run_063_ssti_redirect.py)
+    - worker skill-rec + catalog     -> 0/5  (this fixture)
+    - planner prompt rule / raw fact -> 0/5  (run_063_planner_ssti.py)
+    - planner hint injected          -> 5/5  (run_063_planner_ssti.py)
+  The ssti lead cannot be ORIGINATED by the busy in-lane worker from passive
+  observation; it CAN be acted on once it reaches the planner. So the lead needs a
+  DEDICATED origin: either (A) a surface-pattern detector that raises ssti as a
+  candidate hypothesis when reflection+filter is observed (feeds the planner hint
+  proven at 5/5), or (B) a general "saw reflection -> fire a one-shot template
+  canary" reflex whose result grounds the recommendation (changes worker ACTIONS;
+  needs a Level-2 live-target test, not a single-turn replay).
+
+  NON-OVERFIT: the capability asked for a general mechanism-matched recommendation
+  and named no benchmark/flag/answer; the catalog is the real one every planner
+  sees. The 0/5 is the honest signal that this approach does not work — not a
+  prompt to be tuned until it says ssti (that would be leading the witness).
+
+perturbations:
+  - name: "skill-rec-capability (catalog + recommend task)"
+    mode: crude   # appended to the executor system prompt; see run_063_worker_skillrec.py
+    splice: { find: "", replace: "" }   # programmatic (real _SKILLS_MENU); runner is authoritative
+
+evaluation:
+  type: deterministic
+  criterion: { kind: regex, pattern: "(Recommend|Redirect)[^\n]*ssti" }
+  n: 5
+  pass_threshold: 4   # NOT met (0/5) — documented negative result

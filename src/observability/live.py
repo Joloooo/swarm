@@ -646,6 +646,21 @@ def _pad_clear() -> None:
 _RUN_CLOCK: dict[str, Any] = {"started": None, "budget_s": None}
 
 
+def run_elapsed_s() -> float | None:
+    """Seconds elapsed in the current run, off the same per-run wall clock the
+    live countdown footer uses (stamped at :meth:`bench_start`).
+
+    Returns ``None`` before the first ``bench_start`` — i.e. in unit tests,
+    decision replays, or any non-benchmark path where the clock was never
+    started. Callers that phase behaviour on run time (e.g. the planner's
+    time-ramped dispatch cap) treat ``None`` as "no clock → use steady-state".
+    """
+    started = _RUN_CLOCK.get("started")
+    if started is None:
+        return None
+    return time.perf_counter() - started
+
+
 def _run_clock_row() -> str | None:
     """Render ``⏱ run +MM:SS / BUDGET · NN% · ~MM:SS left`` for the pad.
 

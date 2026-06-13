@@ -69,3 +69,24 @@ async def replay_once(
         for tc in (getattr(resp, "tool_calls", None) or [])
     ]
     return ReplayResult(text=text, tool_calls=tool_calls, raw=resp)
+
+
+async def replay_n(
+    messages: list[BaseMessage],
+    *,
+    tools: list | None = None,
+    llm_config=None,
+    n: int = 3,
+    reset_between: bool = True,
+) -> list[ReplayResult]:
+    """Replay ``n`` times, resetting the shared process-globals between samples so
+    one sample cannot poison the next (SKILL §5 — N-sampling is mandatory because
+    temperature/reasoning variance makes a single run a coin flip)."""
+    from .runtime import reset_process_state
+
+    out: list[ReplayResult] = []
+    for _ in range(n):
+        if reset_between:
+            reset_process_state()
+        out.append(await replay_once(messages, tools=tools, llm_config=llm_config))
+    return out

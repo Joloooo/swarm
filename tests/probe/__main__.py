@@ -18,7 +18,7 @@ import sys
 from .capture import reconstruct_messages
 from .loader import load_captured_event, load_fixture
 from .perturb import crude_splice
-from .replay import replay_once, resolve_tools
+from .replay import replay_n, resolve_tools
 from .report import render
 from .score import aggregate
 
@@ -41,11 +41,7 @@ async def _run(args) -> int:
     threshold = fx.evaluation.pass_threshold
 
     print(f"replaying baseline ×{n} …", file=sys.stderr)
-    baseline = aggregate(
-        [await replay_once(messages, tools=tools) for _ in range(n)],
-        criterion,
-        threshold,
-    )
+    baseline = aggregate(await replay_n(messages, tools=tools, n=n), criterion, threshold)
 
     candidate = None
     crude = False
@@ -54,11 +50,7 @@ async def _run(args) -> int:
         crude = True
         print(f"replaying candidate (crude: {pert.name}) ×{n} …", file=sys.stderr)
         cmsgs = crude_splice(messages, pert.splice.get("find", ""), pert.splice.get("replace", ""))
-        candidate = aggregate(
-            [await replay_once(cmsgs, tools=tools) for _ in range(n)],
-            criterion,
-            threshold,
-        )
+        candidate = aggregate(await replay_n(cmsgs, tools=tools, n=n), criterion, threshold)
 
     print(render(fx, baseline, candidate, capture_mode=fx.capture.mode, crude=crude))
     return 0

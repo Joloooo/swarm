@@ -262,6 +262,81 @@ _VERDICT_OUTCOME = {
 }
 
 
+# ── Specialist-refutation gate ─────────────────────────────────────────
+#
+# Only a class's own specialist may pronounce that class dead. The failure
+# this prevents (XBEN-063, 7 repeats): a non-``ssti`` worker fires the
+# textbook ``{{7*7}}`` payload, hits the ``{{`` blacklist, and declares
+# "no SSTI" — burying the class so its real specialist (which knows the
+# brace-free ``{% %}`` bypass) is never dispatched. A worker giving a
+# ``refuted`` verdict on a class OUTSIDE its lane gets that refute
+# downgraded to a neutral, zero-weight observation, so the class stays a
+# live lead for the specialist that actually owns it. (Confirms are not
+# gated — a cross-lane confirm only lifts a class, it cannot bury one.)
+
+# Class-token aliases so the ownership check matches regardless of how a
+# worker spells the class (the synthesis pass uses the same loose tokens).
+_CLASS_ALIASES = {
+    "deser": "deserialization",
+    "insecure_deserialization": "deserialization",
+    "phar": "deserialization",
+    "path-traversal": "lfi",
+    "path_traversal": "lfi",
+    "directory-traversal": "lfi",
+    "command-injection": "rce",
+    "command_injection": "rce",
+    "cmdi": "rce",
+    "os-command-injection": "rce",
+    "file-upload": "insecure-file-uploads",
+    "file_upload": "insecure-file-uploads",
+    "arbitrary_file_upload": "insecure-file-uploads",
+}
+
+
+def _norm_class(token: str) -> str:
+    """Normalise a class token to its canonical key for ownership checks."""
+    t = (token or "").strip().lower()
+    return _CLASS_ALIASES.get(t, t)
+
+
+# Skills whose lane is NOT simply "the class with my name". Two kinds:
+#   - discovery / triage / chain / generic workers own NO single class —
+#     they surface leads and redirect, but may never refute a class;
+#   - multi-class skills own the explicit set listed.
+# Any skill not in this map owns exactly its own class (config_name), so a
+# plain specialist (sqli, idor, …) may refute only its own class.
+_SKILL_OWNED_CLASSES: dict[str, set[str]] = {
+    # discovery / triage / generic — own nothing, may only redirect
+    "exploration": set(),
+    "bug-identification": set(),
+    "recon": set(),
+    "recon-ports": set(),
+    "fuzzing": set(),
+    "request-builder": set(),
+    "basic-exploitation": set(),
+    "chain-ssrf-to-rce": set(),
+    # multi-class specialist
+    "input-validation": {"lfi", "rce", "crlf", "xxe", "insecure-file-uploads"},
+}
+
+
+def _worker_owns_class(config_name: str, vuln_class: str) -> bool:
+    """Whether the dispatched skill is the specialist for ``vuln_class`` —
+    i.e. allowed to issue a refuting verdict on it."""
+    skill_raw = (config_name or "").strip().lower()
+    skill = _norm_class(skill_raw)
+    cls = _norm_class(vuln_class)
+    # No class named (defaults to the worker's own skill) or the verdict is
+    # on the worker's own class → its call to make.
+    if not cls or cls == skill:
+        return True
+    owned = _SKILL_OWNED_CLASSES.get(skill_raw)
+    if owned is not None:
+        return cls in {_norm_class(c) for c in owned}
+    # Unmapped plain specialist: owns only its own class (handled above).
+    return False
+
+
 def _extract_verdicts(
     messages: list, agent_id: str, config_name: str,
 ) -> list[Signal]:
@@ -308,6 +383,15 @@ def _extract_verdicts(
     except (TypeError, ValueError):
         conf = 0.5
 
+    # Specialist-refutation gate: a worker may only refute a class it owns.
+    # A cross-lane ``refuted`` becomes a neutral, zero-weight observation so
+    # it cannot bury a class the worker is not the specialist for — the real
+    # specialist still gets dispatched (and any redirect line below still
+    # lifts the class as a lead).
+    cross_lane_refute = (
+        outcome == "refuted" and not _worker_owns_class(config_name, vuln_class)
+    )
+
     base, kind = _VERDICT_OUTCOME[outcome]
     if outcome == "confirmed":
         weight = base * max(conf, 0.5)
@@ -315,6 +399,15 @@ def _extract_verdicts(
         weight = -base * max(1.0 - conf, 0.5)
     else:  # inconclusive — mild signed nudge around 0.5
         weight = (conf - 0.5) * 1.2
+
+    if cross_lane_refute:
+        kind = "observation"
+        weight = 0.0
+        note = (
+            (note + " — " if note else "")
+            + f"cross-lane refute downgraded: {config_name} is not the "
+            f"{vuln_class} specialist, so this does not rule the class out"
+        )[:200]
 
     out: list[Signal] = [Signal(
         observation=f"{agent_id} verdict on {vuln_class}: {outcome}"

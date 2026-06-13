@@ -903,6 +903,29 @@ have a strong hunch — the honest outcome is `inconclusive`. A `refuted`
 that never ran the deciding probe wrongly tells the swarm to abandon a
 live lead; a `refuted` that DID run it correctly frees budget for the
 real path. So be precise about both the probe and the outcome.
+
+A FILTER REJECTION IS NOT A REFUTATION. If your payload was blocked,
+stripped, or rejected by a character/keyword filter, that is positive
+evidence the input reached and was parsed by the sink — a signpost to
+switch to the next representation of THIS SAME class, never grounds for
+`refuted`. Every injection class has a finite bypass ladder of
+alternative delimiter / encoding / context families; walk it on the real
+sink before you conclude. For example: SSTI `{{ }}` blocked → try the
+`{% %}` statement family, comments, or alternate-engine delimiters; SQLi
+`'` blocked → double-quote, backtick, numeric, or encoded-quote contexts;
+XSS `<script>` stripped → event-handler / `<svg onload>` / attribute
+contexts; OS-command `;` blocked → `|`, `&&`, `$(...)`, newline; path
+traversal `../` stripped → URL-encoded, `....//`, or absolute paths. Only
+once you have exhausted that ladder on the right sink is `refuted` honest;
+until then the outcome is `inconclusive` with a Redirect or Note pointing
+at the next family to try.
+
+STAY IN YOUR LANE FOR `refuted`. Only refute the class you were dispatched
+to test — you are its specialist and know its full bypass ladder. If your
+evidence points at a DIFFERENT class, do NOT refute that other class
+(you are not its specialist and a single off-lane payload does not settle
+it): use the `Redirect` line to name it so its own specialist gets
+dispatched. A cross-lane `refuted` will be downgraded and ignored anyway.
 """
 
 

@@ -385,10 +385,14 @@ def _contributions(
 
     An explicit ``vuln_class`` + ``weight`` is used as-is. A bare
     observation is run through ``rules`` to infer which class(es) it
-    supports and by how much. ``kind == "negative"`` flips the sign so a
-    tried-and-did-not-work result counts against its class.
+    supports and by how much. ``kind`` adjusts the sign:
+    ``negative``/``refute`` count AGAINST the class; ``confirm`` and
+    ``observation`` count for it. (Whether a ``confirm`` exists is tracked
+    separately by the bucket for the COMMIT gate — see
+    :func:`synthesize_hypotheses`.)
     """
-    negative = (getattr(s, "kind", "") or "").strip().lower() == "negative"
+    kind = (getattr(s, "kind", "") or "").strip().lower()
+    negative = kind in ("negative", "refute")
     out: list[tuple[str, float]] = []
 
     explicit_class = (getattr(s, "vuln_class", "") or "").strip().lower()
@@ -399,6 +403,12 @@ def _contributions(
             w = -w
         out.append((explicit_class, w))
 
+    # Verdict signals (confirm/refute) are scoped to the class the worker
+    # actually tested — they do NOT fan out through the routing rules,
+    # which are for inferring class from a bare observation.
+    if kind in ("confirm", "refute"):
+        return out
+
     blob = _blob(s)
     for rule in rules:
         if rule.vuln_class == explicit_class:
@@ -407,6 +417,13 @@ def _contributions(
             w = -rule.weight if negative else rule.weight
             out.append((rule.vuln_class, w))
     return out
+
+
+def _is_confirm(s: Signal) -> bool:
+    """A probe-confirmation verdict — the only signal that lets a
+    hypothesis cross the COMMIT threshold (see the gate in
+    :func:`synthesize_hypotheses`)."""
+    return (getattr(s, "kind", "") or "").strip().lower() == "confirm"
 
 
 def _surface_of(s: Signal) -> str:
@@ -491,6 +508,7 @@ def synthesize_hypotheses(
 
     for s in sigs:
         surface = _surface_of(s)
+        confirm = _is_confirm(s)
         for cls, w in _contributions(s, rules):
             cls = cls.strip().lower()
             if not cls:
@@ -498,15 +516,19 @@ def synthesize_hypotheses(
             b = buckets.setdefault((cls, surface), {
                 "logodds": 0.0, "support": [], "contra": [],
                 "has_primitive": False, "primitive": "", "attempts": [],
+                "has_confirm": False,
             })
             b["logodds"] += w
             (b["contra"] if w < 0 else b["support"]).append(s)
+            if confirm:
+                b["has_confirm"] = True
 
     # fold canonical findings into the same buckets
     for (cls, surface), fb in _finding_contributions(canonical_findings or []).items():
         b = buckets.setdefault((cls, surface), {
             "logodds": 0.0, "support": [], "contra": [],
             "has_primitive": False, "primitive": "", "attempts": [],
+            "has_confirm": False,
         })
         b["logodds"] += fb["logodds"]
         if fb["has_primitive"]:

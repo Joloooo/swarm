@@ -1,26 +1,19 @@
-"""Executor node — runs one skill or one generic task in the parallel fan-out.
+"""Executor node — runs one skill in the parallel fan-out.
 
 This is the swarm's executor in the Planner+Executor sense (Happe & Cito,
 Fu et al.): it owns no decision-making, only execution. The planner
 stages one or more dispatch items in ``state["pending_dispatch"]`` and
 the routing edge fans out one ``ExecutorNode`` invocation per item.
 
-Each invocation can run in one of two modes, decided by the planner:
+Each invocation runs exactly one named skill (the planner's ``configs``
+lane): the node loads a SKILL.md by name via ``src/skills/loader.py`` and
+runs it. Skills carry a focused system prompt plus a curated tool list
+(sqlmap for sqli, nmap for recon, etc.). When no class specialist fits a
+lead, the planner dispatches the ``exploration`` skill, which discovers
+surface and raises hypotheses rather than concluding on any class.
 
-- **Skill mode** (``configs`` / ``custom_configs`` on the planner JSON).
-  Loads a SKILL.md by name via ``src/skills/loader.py`` and runs it.
-  Skills carry a focused system prompt plus a curated tool list (sqlmap
-  for sqli, nmap for recon, etc.).
-
-- **Generic mode** (``tasks`` on the planner JSON). The planner provides
-  only a free-form task description; the loader synthesises a one-shot
-  skill with a comprehensive pentester prompt and the ``bash`` tool.
-  Use this for tasks that don't fit any pre-built skill — chained
-  exploits, niche tech, follow-ups on a specific finding.
-
-The node itself is mode-agnostic: both paths land as an ``AgentConfig``
-in the cache, and the node just calls ``self.run_skill_agent``. The
-stealth check then runs over the findings regardless of mode.
+The node loads the config and calls ``self.run_skill_agent``; the stealth
+check then runs over the findings.
 """
 
 import logging
@@ -52,7 +45,7 @@ def _stealth_check(result: dict, config_name: str, state: dict) -> None:
 
 
 class ExecutorNode(BaseNode):
-    """Execute one skill or one generic task and return its findings."""
+    """Execute one named skill and return its findings."""
 
     async def execute(self, state: dict) -> dict:
         config_name = state.get("config_name", "")

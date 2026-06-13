@@ -58,6 +58,29 @@ and the rest. You do **not** run port or service scans here — a
 separate recon pass (`recon-ports`) runs nmap in parallel and reports
 any non-web services it finds. Stay focused on the web application.
 
+## Always run a content-discovery pass (gobuster is a default, not optional)
+
+A homepage read shows you only what the homepage links to. Most
+non-trivial targets keep the interesting routes — admin panels,
+backup files, API roots, second apps in a subdirectory — off the
+linked path, so **every** recon pass must include at least one
+directory/file-discovery sweep. Treat this as a required step, not a
+"maybe later":
+
+- **Default sweep:** `gobuster_dir(url, wordlist="common")` against the
+  web root. Run it on every HTTP target once `fetch_page` has returned —
+  do not skip it just because the homepage "looked complete".
+- **Go deeper when signals warrant:** escalate to
+  `wordlist="medium"` when `common` finds hits that suggest more is
+  hidden, when the app is clearly large, or when the homepage is a thin
+  SPA shell. A clean `common` pass is **not** proof the tree is empty.
+- **Record every 200/403/redirect path** the sweep finds as surface,
+  even if you do not yet know what it does — a `403` on `/admin/` or a
+  `200` on `/backup.zip` is a lead for the specialists.
+
+A recon pass that skips content discovery routinely misses the route
+that gates the flag — file it as a default reflex.
+
 ## Map, don't exploit — hand off to the specialists
 
 Your job ends at a clear surface map, not at a working exploit. Once
@@ -190,6 +213,36 @@ Then file the exact component + version as a finding: a known-vulnerable
 component version is the lead that routes the run to the right specialist
 (rce, lfi, deserialization, …). Recon's job is to surface it, not to act
 on it.
+
+## Mine web-served source for hidden routes
+
+When the application serves its own source or config back over HTTP,
+that exposed text is a map of routes you have not visited yet — read it
+and turn the references into new surface. This is one of the
+highest-value recon moves, because the route that gates the flag is
+often named only inside a file the app accidentally serves.
+
+- **Exposed source → endpoint discovery loop.** If a probe or sweep
+  reaches readable source/config — `composer.json` / `composer.lock` /
+  `/vendor/`, a `Dockerfile`, `.env`, `web.config`, `.git/`, a stray
+  `.php`/`.py` source file, framework manifests — **fetch it and pull
+  out every path, route, filename, subdirectory, and internal-service
+  name it mentions**, then probe each of those against the target.
+  Example: composer files naming a package, a Dockerfile naming a
+  subdirectory, or a config naming an internal API path all point at
+  routes a blind wordlist would never guess. Feed the discovered paths
+  back in as fresh recon surface and re-sweep under them.
+- **"Whole tree is served" trigger.** Some signals mean the entire
+  source tree is reachable under the web root, not just the linked
+  pages: a `COPY . /var/www/html` (or similar) line in an exposed
+  `Dockerfile`, an open directory listing (`Index of /`), or directly
+  readable `/vendor/` / `/.git/` content. When you see one, assume
+  **nested** directories and files are served too — run a directory
+  sweep against the discovered subdirectories (`gobuster_dir(url +
+  "/<subdir>/", wordlist=...)`), not just the top level, and request the
+  source of any `.php`/`.py`/`.js` endpoint you find to mine it for yet
+  more routes. Do not stop at the root sweep when the evidence says the
+  whole tree is exposed.
 
 ## Tools to use
 - `fetch_page(url)` — **first call on any HTTP target.** Returns the

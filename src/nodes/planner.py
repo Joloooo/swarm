@@ -2354,6 +2354,7 @@ def _ensure_skill_handoff_floor(
         represented.append(candidate)
         represented_skills.add(skill)
 
+    insert_at = int(decision.get("_hypothesis_floor_count") or 0)
     added = 0
     for candidate in ranked:
         skill = candidate["suggested_skill"]
@@ -2361,9 +2362,10 @@ def _ensure_skill_handoff_floor(
             continue
         if added >= _HANDOFF_OVERFLOW_LIMIT:
             break
-        if len(configs) >= _HANDOFF_MAX_CONFIGS:
-            break
-        configs.append(skill)
+        # Insert evidence-backed handoffs before ordinary planner picks. The
+        # later wave cap is the single source of truth for max fan-out.
+        configs.insert(insert_at, skill)
+        insert_at += 1
         selected.add(skill)
         represented.append(candidate)
         represented_skills.add(skill)
@@ -2377,7 +2379,7 @@ def _attach_skill_handoff_context(
     pending: list[dict],
     handoffs: list[dict[str, str]],
 ) -> list[str]:
-    """Append handoff details to matching pending dispatch reasons."""
+    """Append handoff details and mark routed workers as prove-mode."""
     if not pending or not handoffs:
         return []
     routed_keys: list[str] = []
@@ -2390,6 +2392,7 @@ def _attach_skill_handoff_context(
         matches = by_skill.get(skill) or []
         if not matches:
             continue
+        item["mode"] = "prove"
         blocks: list[str] = []
         for handoff in matches[:2]:
             routed_keys.append(handoff["handoff_key"])
@@ -2465,10 +2468,10 @@ def _ensure_hypothesis_floor(
     1. **Drop net-refuted classes** (:func:`_refuted_classes`) — the
        owning skill said "it is not me", so stop re-dispatching it.
     2. **Inject the top committed/supported hypotheses' required skills**
-       (committed first, then by priority), up to
-       ``_HYPOTHESIS_FLOOR_LIMIT`` and the shared ``_HANDOFF_MAX_CONFIGS``
-       cap — guaranteeing the highest-belief leads actually run instead of
-       relying on the planner to obey the advisory directive.
+       by priority, one representative per skill, up to
+       ``_HYPOTHESIS_FLOOR_LIMIT`` — guaranteeing the highest-belief leads
+       actually run instead of relying on the planner to obey the advisory
+       directive.
 
     The remaining slots stay the planner's own exploration picks (the
     reserve). Returns the hypotheses represented this turn so their
@@ -2493,27 +2496,40 @@ def _ensure_hypothesis_floor(
              .strip().lower() in dispatchable)
     ]
     candidates.sort(key=lambda h: (
-        0 if getattr(h, "state", "") == "committed" else 1,
         -int(getattr(h, "priority", 0)),
+        0 if getattr(h, "state", "") == "committed" else 1,
+        (getattr(h, "required_skill", "")
+         or getattr(h, "vuln_class", "")).strip().lower(),
+        getattr(h, "surface", "") or "",
     ))
 
     selected = {c.lower() for c in configs}
     represented: list = []
+    represented_skills: set[str] = set()
+    insert_at = 0
     added = 0
     for h in candidates:
         skill = (getattr(h, "required_skill", "")
                  or getattr(h, "vuln_class", "")).strip().lower()
+        if skill in represented_skills:
+            continue
         if skill in selected:
             represented.append(h)  # planner already chose it — attach context
+            represented_skills.add(skill)
             continue
-        if added >= _HYPOTHESIS_FLOOR_LIMIT or len(configs) >= _HANDOFF_MAX_CONFIGS:
+        if added >= _HYPOTHESIS_FLOOR_LIMIT:
             continue
-        configs.append(skill)
+        # Put the belief floor ahead of ordinary planner picks. The global
+        # wave cap below will trim overflow while preserving PROVE workers.
+        configs.insert(insert_at, skill)
+        insert_at += 1
         selected.add(skill)
         represented.append(h)
+        represented_skills.add(skill)
         added += 1
 
     decision["configs"] = configs
+    decision["_hypothesis_floor_count"] = added
     return represented
 
 

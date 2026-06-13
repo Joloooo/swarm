@@ -140,6 +140,7 @@ _KNOWN_CLASSES = {
     "deserialization", "insecure-file-uploads", "command-injection",
     "csrf", "open-redirect", "jwt", "nosql", "graphql", "business-logic",
     "auth-testing", "session-mgmt", "information-disclosure",
+    "race-conditions", "fuzzing",
 }
 
 # Tech fingerprint extraction. Named products (a version, when present
@@ -248,10 +249,17 @@ def _any_crawl_yet(state: dict) -> bool:
 
 def _class_dispatch_counts(state: dict) -> dict[str, int]:
     counts: dict[str, int] = {}
+    ordered = sorted(_KNOWN_CLASSES, key=len, reverse=True)
     for agent in state.get("active_agents") or []:
         name = str(agent).strip().lower()
-        if name in _KNOWN_CLASSES:
-            counts[name] = counts.get(name, 0) + 1
+        matched = name if name in _KNOWN_CLASSES else ""
+        if not matched:
+            for cls in ordered:
+                if name.startswith(f"{cls}-"):
+                    matched = cls
+                    break
+        if matched:
+            counts[matched] = counts.get(matched, 0) + 1
     return counts
 
 

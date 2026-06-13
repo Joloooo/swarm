@@ -6,28 +6,29 @@ planner decides the next hop by emitting a JSON directive:
 
     {"action": "attack" | "recon" | "web_search" | "report",
      "configs": [...],
-     "custom_configs": [...],
-     "tasks": [...],
      "mode": "analyze" | "full",
      "target_url": "...",
      "target_scope": "...",
      "search_query": "...",
      "reasoning": "one or two sentences of reasoning"}
 
-When the planner picks ``action="attack"`` it also supplies what to run:
+When the planner picks ``action="attack"`` it also supplies what to run
+via a single lane:
 
-- ``configs``        — pre-built skills by name (sqli, xss, idor, ...).
-- ``custom_configs`` — invent a tailored skill on the fly with a full
-                       system_prompt the planner writes itself.
-- ``tasks``          — free-form task descriptions handed to a generic
-                       executor agent (Planner+Executor split, Happe &
-                       Cito 2025 / Fu et al. 2025).
+- ``configs`` — pre-built skills by name (sqli, xss, idor, ...). Every
+                worker is a vetted, lane-disciplined skill. When no class
+                specialist fits a lead, the planner picks the
+                ``exploration`` skill, whose job is to discover surface
+                and raise hypotheses (never to pronounce a class dead).
 
-All three lanes fan out to the same ExecutorNode. The loader synthesises
-each into an AgentConfig and caches it; the executor just resolves by
-name. The planner therefore owns what used to be split across
-``playbook_dispatch`` and ``dynamic_dispatch``, plus the generic-task
-lane that previously had no representation.
+This is deliberately a single dispatch path. Earlier revisions also had
+``custom_configs`` (a planner-written one-off skill) and ``tasks`` (a
+free-form instruction wrapped in a generic-executor prompt); both
+produced skill-less workers that could freelance into any class and
+falsely refute it. They were removed in favour of "every executor is a
+named skill" — the ``exploration`` skill absorbs the genuinely-uncovered
+case. The loader synthesises each named skill into an AgentConfig and
+caches it; the executor just resolves by name.
 
 The planner has two tools it can call mid-turn:
 
@@ -61,8 +62,6 @@ from src.refusals.detect import looks_like_refusal
 from src.skills.loader import (
     list_dispatchable_skills,
     load_skill,
-    register_custom_skill,
-    register_generic_task,
 )
 from src.state import SwarmGraphState
 from src.tools.url import normalize_url, validate_website
@@ -163,10 +162,10 @@ your decision. The allowed values for "action" are:
                    user already described the target in detail, or if
                    recon has already run, you can skip ahead.
 - "attack"       — fan out one or more executor agents in parallel. You
-                   must also supply WHAT each executor should run via
-                   one or more of the three lanes below: "configs",
-                   "custom_configs", "tasks". You can mix lanes in a
-                   single turn — they all dispatch to the same executor.
+                   must also supply WHAT each executor should run by
+                   naming skills in "configs" — the single dispatch lane.
+                   List as many skills as fit; they all dispatch in
+                   parallel to the same executor.
 - "web_search"   — look up an external fact (CVE details, bypass
                    technique, tool syntax). Also supply "search_query".
 - "submit_flag"  — declare a flag your workers captured from the target,
@@ -216,53 +215,34 @@ Rules:
 
 # Available attack skills (for action="attack")
 
-Pick any subset by name in "configs". Use the full descriptions below
-to judge which skills apply to the recon output you have. You
-are NOT required to include any particular skill — decide based on
-the target. If recon shows the target has no inputs, picking xss is
-pointless; if it's a pure static site, most of these don't fit.
+Pick any subset by name in "configs" — this is the ONLY dispatch lane.
+Every worker you run is one of these vetted skills; there is no
+free-form or invent-a-prompt lane. Use the full descriptions below to
+judge which skills apply to the recon output you have. You are NOT
+required to include any particular skill — decide based on the target.
+If recon shows the target has no inputs, picking xss is pointless; if
+it's a pure static site, most of these don't fit.
 
 Pre-registered skills:
 __SKILLS_MENU__
 
-# Custom configs (for action="attack")
+# When no specialist fits — the "exploration" skill
 
-If recon reveals a stack or attack surface that none of the pre-built
-skills cover well (niche CMS plugin, unusual API pattern, chained
-findings from prior turns) AND you can write a focused multi-step
-methodology for it, add an entry to "custom_configs":
+When recon surfaces a lead but no class specialist clearly fits it —
+a niche stack, an unusual API pattern, a one-off "go check whether X is
+true" follow-up, or surface you want characterised before committing a
+heavy specialist — dispatch the ``exploration`` skill (it is in the menu
+above). It is the general discovery worker: it investigates the lead and
+RAISES a hypothesis naming the specialist that should take it next; it
+does not pronounce any class present or absent.
 
-- "config_name": unique short identifier (e.g. "graphql-introspection-abuse").
-- "system_prompt": detailed instructions telling that executor what to
-  probe, which tools to run, and what payloads to try.
-
-Custom configs run with the same shell tool as the pre-registered skills.
-Reach for this when you'd otherwise be writing a small how-to-test
-playbook — i.e. when you have a clear methodology in mind.
-
-# Tasks (for action="attack") — generic executor lane
-
-For one-off probes that don't need a full methodology — "go check this
-specific endpoint for IDOR", "follow up on the verbose error from
-recon by fuzzing the id parameter", "try the credentials we found
-against /admin" — use "tasks" instead. Each entry is just a free-form
-description; the executor wraps it in a comprehensive pentester prompt
-and runs it with bash. Reach for this when:
-
-- The task is narrow enough that one or two tool invocations should
-  settle it.
-- You don't have a methodology to dictate — you want the executor to
-  pick its own approach for the specific task you describe.
-- You're following up on a single finding with a single hypothesis.
-
-Each "tasks" entry is one of:
-- a string ("Probe parameter `id` on /api/v1/orders for IDOR..."), or
-- an object {"description": "..."}.
-
-Difference vs. custom_configs: custom_configs is a *playbook* you write,
-tasks is an *instruction* you delegate. If you find yourself writing a
-3+ step methodology, it's a custom_config. If it's "do this one thing",
-it's a task.
+Prefer a concrete specialist whenever one clearly fits the recon —
+``exploration`` is for the genuinely-undecided case, not a default. And
+do not try to hand a worker its own bespoke methodology or payload list
+through the decision JSON: there is no lane for that anymore. If a class
+fits, dispatch its specialist (the specialist already carries the
+methodology); if none fits, dispatch ``exploration`` to find out which
+one should.
 
 # URL handling
 
@@ -285,9 +265,9 @@ After each worker, look at what came back:
 
 - New findings?   Consider continuing with a different tactic or going
                   to report.
-- Recon empty?    Don't blindly run every config; pick a minimal set
-                  or go straight to custom_configs tailored to whatever
-                  tiny signal recon did surface.
+- Recon empty?    Don't blindly run every config; pick a minimal set,
+                  or dispatch the "exploration" skill to characterise
+                  whatever tiny signal recon did surface.
 - Stealth level   If waf_detected is true and stealth_level is 2, be
   rising?         more conservative — consider report rather than firing
                   another loud scan.
@@ -360,14 +340,14 @@ After each worker, look at what came back:
                   Once the research is back, attack from MULTIPLE
                   ANGLES: dispatch one worker per MAJOR technique it
                   surfaced (e.g. blind/time-based vs. error-based vs.
-                  filter-bypass), baking that technique's specific
-                  payloads into each worker's "tasks" entry. Group
-                  angles in the same category into one worker; spawn
-                  separate workers for genuinely distinct approaches so
-                  they explore concurrently instead of one worker
-                  grinding a single family. The "request-builder" skill
-                  is a good pick for a single fresh input proposed from
-                  the observed input/output pattern. Do not re-research
+                  filter-bypass) by naming the matching specialist skill
+                  in "configs" — the specialist already carries that
+                  technique's methodology. Spawn separate workers for
+                  genuinely distinct approaches so they explore
+                  concurrently instead of one worker grinding a single
+                  family. The "request-builder" skill is a good pick for
+                  a single fresh input proposed from the observed
+                  input/output pattern. Do not re-research
                   a class you already searched this run — its results
                   are already in your context above.
 
@@ -449,18 +429,11 @@ End EVERY turn with a fenced JSON block of this exact shape:
 ```json
 {
   "action": "attack",
-  "configs": ["sqli", "xss"],
-  "custom_configs": [
-    {"config_name": "wp-plugin-cve-lookup",
-     "system_prompt": "You test WordPress plugins for known CVEs..."}
-  ],
-  "tasks": [
-    "Probe parameter `id` on /api/v1/orders for IDOR by fetching id=1..5 from an authenticated session and checking whether responses leak other users' orders."
-  ],
+  "configs": ["sqli", "xss", "idor"],
   "mode": "analyze",
   "target_url": "http://example.com",
   "target_scope": "example.com",
-  "reasoning": "Recon surfaced PHP + MySQL with a login form at /admin and a numeric id param on /api/v1/orders. Firing the standard SQLi/XSS skills, a custom WP-plugin lookup, and a targeted IDOR probe in parallel.",
+  "reasoning": "Recon surfaced PHP + MySQL with a login form at /admin and a numeric id param on /api/v1/orders. Firing the standard SQLi/XSS skills plus idor for the numeric id in parallel.",
   "skill_ranking": [
     {"skill": "idor", "pros": ["numeric id on /api/v1/orders is client-controlled", "receipt route already confirmed auth-by-id"], "cons": ["only a benign record known so far"]},
     {"skill": "sqli", "pros": ["search/detail/delete params look DB-backed"], "cons": ["no SQL error or differential observed yet"]},
@@ -487,9 +460,10 @@ End EVERY turn with a fenced JSON block of this exact shape:
 Rules:
 
 - "action" must be one of: attack, recon, web_search, submit_flag, report.
-- When action=="attack", at least one of "configs", "custom_configs",
-  or "tasks" must be non-empty. If you have nothing worth running,
-  pick "report".
+- When action=="attack", "configs" must be non-empty (it is the only
+  dispatch lane — name at least one skill from the menu, using
+  "exploration" when no class specialist fits). If you have nothing
+  worth running, pick "report".
 - When action=="submit_flag", the "flag" field is REQUIRED and must
   contain the exact ``flag{...}`` / ``FLAG{...}`` string a worker
   captured. See the "Submitting a captured flag" section.
@@ -2710,7 +2684,7 @@ def _build_forced_search_query(finding, state: SwarmGraphState) -> str:
 
 
 def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
-    """Register custom skills + tasks inline, then build pending_dispatch.
+    """Resolve the planner's ``configs`` into a pending_dispatch list.
 
     Each entry in the returned list carries a ``dispatch_reason`` field —
     the supervisor's reasoning for picking *this* worker on *this* turn.
@@ -2728,74 +2702,19 @@ def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
     is the right granularity since the planner reasoned about the
     fan-out as a unit, not per-config.
 
-    Three lanes are folded into one fan-out list, in this order:
-
-    1. ``configs``        - pre-built skills resolved by name.
-    2. ``custom_configs`` - planner-written one-off skills (full prompt).
-    3. ``tasks``          - generic-executor task descriptions.
-
-    All three end up as cached ``AgentConfig`` entries the executor node
-    can resolve via ``load_skill``. Unknown named skills and malformed
-    custom/task entries are skipped with a warning. Returns the list
-    of dispatch items - possibly empty, in which case the caller is
+    There is a single dispatch lane: ``configs`` — pre-built skills
+    resolved by name through ``load_skill``. (The earlier
+    ``custom_configs`` and ``tasks`` lanes, which synthesised skill-less
+    generic workers, were removed — every executor is now a vetted named
+    skill, and the ``exploration`` skill covers the uncovered case.)
+    Unknown named skills are skipped with a warning. Returns the list of
+    dispatch items - possibly empty, in which case the caller is
     responsible for falling back to "report".
     """
     mode = decision.get("mode") or state.get("mode") or "analyze"
 
-    # Step 1: register custom skills the planner invented inline so that
-    # the next ``load_skill(name)`` call can resolve them.
-    custom_names: list[str] = []
-    raw_custom = decision.get("custom_configs") or []
-    if not isinstance(raw_custom, list):
-        raw_custom = []
-    seen_custom: set[str] = set()
-    for entry in raw_custom:
-        if not isinstance(entry, dict):
-            continue
-        name = str(entry.get("config_name") or "").strip()
-        prompt = str(entry.get("system_prompt") or "").strip()
-        if not name or not prompt:
-            logger.warning(
-                "planner: dropping malformed custom_config %r (missing name or prompt)",
-                entry,
-            )
-            continue
-        if name in seen_custom:
-            logger.warning(
-                "planner: dropping duplicate custom_config name %r", name
-            )
-            continue
-        seen_custom.add(name)
-        register_custom_skill(name, prompt)
-        custom_names.append(name)
-
-    # Step 2: register free-form generic-executor tasks. Each task entry
-    # may be a bare string or an object {"description": "..."}; either
-    # way we synthesise a one-shot AgentConfig under config_name="task-N".
-    task_names: list[str] = []
-    raw_tasks = decision.get("tasks") or []
-    if not isinstance(raw_tasks, list):
-        raw_tasks = []
-    for j, entry in enumerate(raw_tasks):
-        if isinstance(entry, dict):
-            description = str(
-                entry.get("description") or entry.get("task") or ""
-            ).strip()
-        elif isinstance(entry, str):
-            description = entry.strip()
-        else:
-            logger.warning(
-                "planner: dropping task entry of unsupported type %r", entry
-            )
-            continue
-        if not description:
-            logger.warning("planner: dropping empty task entry %r", entry)
-            continue
-        cfg = register_generic_task(str(j), description)
-        task_names.append(cfg.config_name)
-
-    # Step 3: union all three lanes, resolve each through the loader,
-    # and stage them for fan-out.
+    # Single lane: resolve each named skill through the loader and stage
+    # it for fan-out.
     raw_named = decision.get("configs") or []
     if not isinstance(raw_named, list):
         raw_named = []
@@ -2811,7 +2730,7 @@ def _stage_attack(decision: dict, state: SwarmGraphState) -> list[dict]:
 
     pending: list[dict] = []
     seen: set[str] = set()
-    for i, name in enumerate(named + custom_names + task_names):
+    for i, name in enumerate(named):
         if name in seen:
             continue
         seen.add(name)
@@ -3543,8 +3462,8 @@ class PlannerNode(BaseNode):
                         "endpoints IS the expected behavior of this swarm.\n\n"
                         "Re-emit your JSON decision. Choose action=attack "
                         "(with at least one skill from the menu that has "
-                        "not yet been tried, or a custom_config tailored to "
-                        "a specific finding above), or action=recon if "
+                        "not yet been tried, or the exploration skill to "
+                        "characterise a specific finding above), or action=recon if "
                         "surface mapping is incomplete. Only pick "
                         "action=report if you genuinely judge no further "
                         "evidence-gathering is possible — not because the "

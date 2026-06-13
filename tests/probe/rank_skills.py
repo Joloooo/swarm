@@ -61,6 +61,30 @@ Rules:
 """
 
 
+# Synthetic recon discovery — what a good content-discovery + source-mining
+# pass (the new recon defaults) would plausibly surface on this target. It
+# reports only the DISCOVERED SURFACE (a served subdir with an upload endpoint
+# and a path-reading endpoint), NOT the vulnerability class — the planner must
+# still reason that an upload feeding a PHP path-read is a deser/PHAR sink. This
+# is the experimental manipulation that tests the causal claim "if recon finds
+# the sink, deser ranks up"; it is not shipped behaviour.
+INJECT_SINK_NOTE = """\
+[SYSTEM NOTE] Recon update — content-discovery + source-mining pass just
+completed:
+  - The served Dockerfile (GET /Dockerfile) contains `COPY . /var/www/html`, so
+    the ENTIRE source tree is reachable over HTTP, not just the linked pages.
+  - Sweeping nested directories found a subdirectory `/skumodel-srv/` (the
+    internal "SKU model API" the homepage referenced as 127.0.0.1:4455 is the
+    same code, now reachable directly under the web root).
+  - `/skumodel-srv/sku_process.php` accepts a POST `data` value and writes it to
+    a file on disk (an upload/write primitive).
+  - `/skumodel-srv/read_sku.php` takes a `file_path` parameter and reads /
+    processes that file path server-side (PHP file/path handling).
+  - Reading `read_sku.php` source shows it passes `file_path` into PHP
+    filesystem functions that operate on the supplied path.
+"""
+
+
 def _load_event(captured: str | None, fx) -> dict:
     if not captured:
         return load_captured_event(fx)
@@ -107,13 +131,15 @@ def _render(sample_i: int, n: int, text: str) -> bool:
     return bool(deser_rank)
 
 
-async def _main(n: int, captured: str | None) -> int:
+async def _main(n: int, captured: str | None, inject_sink: bool) -> int:
     fx = load_fixture("092-planner-deser-dispatch.yaml")
     event = _load_event(captured, fx)
     messages = reconstruct_messages(event)
+    if inject_sink:
+        messages.append(HumanMessage(content=INJECT_SINK_NOTE))
     messages.append(HumanMessage(content=RANK_INSTRUCTION))
 
-    label = captured or "wave1 (15:48)"
+    label = (captured or "wave1 (15:48)") + (" +injected-sink" if inject_sink else "")
     print(f"ranking probe on {label} ×{n} (real model, no tools bound) …", file=sys.stderr)
     deser_present = 0
     for i in range(n):
@@ -128,5 +154,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("-n", type=int, default=3)
     ap.add_argument("--captured", default=None, help="captured.json to use (default wave1)")
+    ap.add_argument("--inject-sink", action="store_true",
+                    help="inject a synthetic recon discovery of the served upload/path sink")
     args = ap.parse_args()
-    raise SystemExit(asyncio.run(_main(args.n, args.captured)))
+    raise SystemExit(asyncio.run(_main(args.n, args.captured, args.inject_sink)))

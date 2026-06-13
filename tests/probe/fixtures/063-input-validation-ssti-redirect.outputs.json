@@ -1,0 +1,92 @@
+[
+ {
+  "arm": "CONTROL",
+  "sample": 1,
+  "text": "**VERDICT:**\n- Class: input-validation\n- Surface: `GET /total_loan_payments?principal=&payment=&term=`\n- Probe run: yes\n- Outcome: confirmed\n- Confidence: 0.93\n- Note: Additional encoding/normalization and parser-shape probes confirmed inconsistent validation: `principal` rejects many transformed numeric forms, malformed parameter names trigger generic 500s, while `payment`/`term` accept Python-style numeric coercions including Unicode digits and infinities; no `flag{...}` appeared.",
+  "tool_calls": [],
+  "outcome": "confirmed",
+  "raised_ssti": false,
+  "named_template": false
+ },
+ {
+  "arm": "CONTROL",
+  "sample": 2,
+  "text": "**FINDING:**\n- Title: Inconsistent Unicode and non-finite numeric handling in loan calculator\n- Severity: LOW\n- Category: logic\n- URL: `http://172.18.0.3/total_loan_payments`\n- Parameter: `term`, `payment`, `principal`\n- Payload: `term=\u0661\u0662\u0663`; `term=\ud835\udfd9\ud835\udfda\ud835\udfdb`; `payment=1e309`; control comparison `principal=\u0661\u0662\u0663`\n- Evidence: Authenticated requests showed different parsing paths per parameter:\n  - `GET /total_loan_payments?principal=10000&payment=212&term=\u0661\u0662\u0663` returned:\n    ```json\n    { \"loan_principal\": \"10000\" ,\"monthly_payment\": \"212.0\", \"loan_term_amount\": \"123\", \"total_loan_payments\": \"26076.0\" }\n    ```\n  - `GET /total_loan_payments?principal=10000&payment=212&term=\ud835\udfd9\ud835\udfda\ud835\udfdb` returned:\n    ```json\n    { \"loan_principal\": \"10000\" ,\"monthly_payment\": \"212.0\", \"loan_term_amount\": \"123\", \"total_loan_payments\": \"26076.0\" }\n    ```\n  - `GET /total_loan_payments?principal=10000&payment=1e309&term=60` returned:\n    ```json\n    { \"loan_principal\": \"10000\" ,\"monthly_payment\": \"inf\", \"loan_term_amount\": \"60\", \"total_loan_payments\": \"inf\" }\n    ```\n  - But `GET /total_loan_payments?principal=\u0661\u0662\u0663&payment=212&term=60` returned:\n    ```text\n    Computed `loan_principal` value is not a number.\n    ```\n- CWE: CWE-20\n\nAdditional notes:\n- I did not find a normalize-after-check bypass that made the blocked `principal` decimal form reach the sink.\n- Additional malformed parameter-name variants still trigger generic 500s, e.g. `principal%00=10000`, `principal%0a=10000`, `principal;foo=10000`, `principal[0]=10000`, and `principal.value=10000`.\n- No `flag{...}` token appeared in any calculator response.\n\n**VERDICT:**\n- Class: input-validation\n- Surface: `GET /total_loan_payments?principal=&payment=&term=`\n- Probe run: yes\n- Outcome: confirmed\n- Confidence: 0.95\n- Note: The calculator uses inconsistent validators/converters across numeric parameters, accepts impossible numeric values like `inf`, normalizes some Unicode digits for `term`, and throws 500s on malformed `principal` key/value shapes, but this did not expose the hidden token.",
+  "tool_calls": [],
+  "outcome": "confirmed",
+  "raised_ssti": false,
+  "named_template": false
+ },
+ {
+  "arm": "CONTROL",
+  "sample": 3,
+  "text": "**FINDING:**\n- Title: Loan calculator accepts and reflects excessively long `principal` values without length enforcement\n- Severity: INFO\n- Category: info\n- URL: `http://172.18.0.3/total_loan_payments`\n- Parameter: `principal`\n- Payload: `principal=` + `1` repeated 5000 times + `&payment=1&term=1`\n- Evidence: Authenticated request returned `200` and reflected the entire very large numeric string in the JSON-like response, with response length `5123` and body beginning: `{ \"loan_principal\": \"111111111111111111111111111111...`\n- CWE: CWE-20\n\nNo `flag{...}` token appeared in the calculator responses tested.\n\n**Additional observations:**\n- Unicode normalization bypasses for decimal/sign/exponent characters did **not** convert into accepted decimal/exponential `principal` values; they returned `400 Computed loan_principal value is not a number`.\n- Parser/key-shape variants such as `principal%00=10000`, `principal%0a=10000`, `principal;foo=10000`, `principal[0]=10000`, and `principal.value=10000` still trigger generic Flask `500 Internal Server Error`, consistent with the already-known malformed-principal error-handling issue.\n- `term` accepts several Unicode digit classes and normalizes them through Python-like integer parsing, e.g. Arabic/Devanagari/fullwidth/mathematical digits become `\"123\"`.\n- `payment` continues to accept non-finite float values and overflow-to-infinity forms, e.g. `payment=1e309` returns `\"monthly_payment\": \"inf\"`.\n\n**VERDICT:**\n- Class: input-validation\n- Surface: `GET /total_loan_payments?principal=&payment=&term=`\n- Probe run: yes\n- Outcome: confirmed\n- Confidence: 0.93\n- Note: The calculator has demonstrably inconsistent validation/parsing: `principal` uses a brittle custom path with generic 500s on malformed key/value shapes, while `payment`/`term` accept unsafe numeric forms such as `inf`, `nan`, negatives, Unicode digits, and oversized values.",
+  "tool_calls": [],
+  "outcome": "confirmed",
+  "raised_ssti": false,
+  "named_template": false
+ },
+ {
+  "arm": "CONTROL",
+  "sample": 4,
+  "text": "**FINDING:**\n- Title: Calculator mishandles malformed `principal` parameter names\n- Severity: INFO\n- Category: info\n- URL: `http://172.18.0.3/total_loan_payments`\n- Parameter: `principal` / malformed `principal` key variants\n- Payload: `principal%00=10000&payment=212&term=60`, `principal%0a=10000&payment=212&term=60`, `principal;foo=10000&payment=212&term=60`, `principal[0]=10000&payment=212&term=60`, `principal.value=10000&payment=212&term=60`\n- Evidence: Baseline `principal=10000&payment=212&term=60` returns `200` with calculated output, while malformed parameter-name variants return generic Flask 500 pages: `<title>500 Internal Server Error</title> <h1>Internal Server Error</h1>`.\n- CWE: CWE-20\n\n**VERDICT:**\n- Class: input-validation\n- Surface: `GET /total_loan_payments?principal=&payment=&term=`\n- Probe run: yes\n- Outcome: confirmed\n- Confidence: 0.92\n- Note: The calculator has inconsistent numeric validation and unsafe parser/error handling; additional encoding, Unicode normalization, parameter-shape, and bounded ReDoS probes did not expose the flag or convert the issue beyond generic 500s and invalid numeric output.",
+  "tool_calls": [],
+  "outcome": "confirmed",
+  "raised_ssti": false,
+  "named_template": false
+ },
+ {
+  "arm": "CONTROL",
+  "sample": 5,
+  "text": "**FINDING:**\n- Title: Loan calculator accepts and reflects unbounded numeric `principal` values\n- Severity: LOW\n- Category: logic\n- URL: `http://172.18.0.3/total_loan_payments`\n- Parameter: `principal`\n- Payload: `principal=` followed by 5000 `1` digits, with `payment=1&term=1`\n- Evidence: The authenticated request returned `200` and reflected the oversized value in the JSON-like HTML response, e.g. body began: `{ \"loan_principal\": \"111111111111111111111111111111111111111111111111111111111111...` with response length `5123`.\n- CWE: CWE-20\n\n**VERDICT:**\n- Class: input-validation\n- Surface: `GET /total_loan_payments?principal=&payment=&term=`\n- Probe run: yes\n- Outcome: confirmed\n- Confidence: 0.95\n- Note: The calculator has confirmed inconsistent validation: `principal` rejects some decimal/encoded forms but accepts huge integer strings, `payment` accepts `nan`/`inf`/overflow, `term` accepts Unicode digits, and malformed parameter names/array shapes trigger generic 500s; no `flag{...}` appeared in these responses.",
+  "tool_calls": [],
+  "outcome": "confirmed",
+  "raised_ssti": false,
+  "named_template": false
+ },
+ {
+  "arm": "TEST-rule",
+  "sample": 1,
+  "text": "**FINDING:**\n- Title: Calculator endpoint has brittle parameter-name parsing causing unhandled 500 errors\n- Severity: LOW\n- Category: info\n- URL: `http://172.18.0.3/total_loan_payments`\n- Parameter: `principal` query parameter name / shape\n- Payload: `principal%00=10000&payment=212&term=60`  \n  Additional triggering variants: `principal%0a=10000&payment=212&term=60`, `principal;foo=10000&payment=212&term=60`, `principal[0]=10000&payment=212&term=60`, `principal.value=10000&payment=212&term=60`\n- Evidence: Baseline `principal=10000&payment=212&term=60` returns `200` with computed output, while malformed parameter names return:\n  ```html\n  <title>500 Internal Server Error</title>\n  <h1>Internal Server Error</h1>\n  <p>The server encountered an internal error and was unable to complete your request...\n  ```\n- CWE: CWE-20 / CWE-248\n\n**VERDICT:**\n- Class: input-validation\n- Surface: `GET /total_loan_payments?principal=&payment=&term=`\n- Probe run: yes\n- Outcome: confirmed\n- Confidence: 0.93\n- Redirect: parameter-pollution/business-logic may further assess duplicate/shape precedence and invalid financial values, but no flag-bearing primitive was demonstrated here.\n- Note: The deciding probe confirmed inconsistent numeric validation and brittle parameter parsing; additional Unicode/encoding bypasses did not convert this into file/data read, command execution, or token disclosure.",
+  "tool_calls": [],
+  "outcome": "confirmed",
+  "raised_ssti": false,
+  "named_template": false
+ },
+ {
+  "arm": "TEST-rule",
+  "sample": 2,
+  "text": "**FINDING:**\n- Title: Malformed `principal` parameter names trigger unhandled server errors\n- Severity: LOW\n- Category: info\n- URL: `http://172.18.0.3/total_loan_payments`\n- Parameter: `principal` query parameter name\n- Payload: `principal%00=10000&payment=212&term=60`\n- Evidence: Authenticated request returned a generic Flask 500 page: `<!doctype html> <html lang=en> <title>500 Internal Server Error</title> <h1>Internal Server Error</h1>...`. Similar malformed key variants also returned 500, including `principal%0a=10000&payment=212&term=60`, `principal;foo=10000&payment=212&term=60`, `principal[0]=10000&payment=212&term=60`, and `principal.value=10000&payment=212&term=60`.\n- CWE: CWE-20\n\n**FINDING:**\n- Title: Calculator accepts unsafe numeric parser edge cases\n- Severity: LOW\n- Category: logic\n- URL: `http://172.18.0.3/total_loan_payments`\n- Parameter: `payment`, `term`\n- Payload: `principal=10000&payment=1e309&term=60`\n- Evidence: The endpoint accepted overflow-to-infinity and returned: `{ \"loan_principal\": \"10000\" ,\"monthly_payment\": \"inf\", \"loan_term_amount\": \"60\", \"total_loan_payments\": \"inf\" }`. It also accepted Unicode digit terms such as `term=\u0661\u0662\u0663`, returning `\"loan_term_amount\": \"123\"` and recalculating the total.\n- CWE: CWE-20\n\n**VERDICT:**\n- Class: input-validation\n- Surface: `GET /total_loan_payments?principal=&payment=&term=`\n- Probe run: yes\n- Outcome: confirmed\n- Confidence: 0.95\n- Redirect: business-logic for impact of persisted unsafe loan values; xss only if a rendering bypass lands markup in the `text/html` calculator response\n- Note: The endpoint has confirmed inconsistent validation and unsafe parsing, including generic 500s for malformed `principal` keys and accepted `inf`/Unicode numeric values, but no `flag{...}` token appeared in responses.",
+  "tool_calls": [],
+  "outcome": "confirmed",
+  "raised_ssti": false,
+  "named_template": false
+ },
+ {
+  "arm": "TEST-rule",
+  "sample": 3,
+  "text": "No new non-duplicative finding was produced in this dispatch. I extended the prior `/total_loan_payments` input-validation work with normalization, parser-shape, numeric-class, and bounded ReDoS-style probes.\n\nKey additional observations:\n- Unicode decimal/sign/exponent substitutions for `principal` did not bypass validation; they returned `400 Computed loan_principal value is not a number`.\n- Parameter-name/parser variants such as `principal%00=10000`, `principal%0a=10000`, `principal;foo=10000`, `principal[0]=10000`, and `principal.value=10000` caused generic `500 Internal Server Error`, consistent with unsafe parameter handling already reported.\n- `term` accepts several Unicode decimal digit classes and normalizes/parses them into ASCII-equivalent integers, e.g. Arabic-Indic and mathematical digits.\n- `payment` continues to accept non-finite float values and overflow-to-infinity forms such as `1e309`, `\uff11e\uff13\uff10\uff19`, `+NaN`, and `+Infinity`.\n- No response contained `flag{...}`.\n- No stack trace or data disclosure appeared in the 500 responses.\n\n**VERDICT:**\n- Class: input-validation\n- Surface: `GET /total_loan_payments?principal=&payment=&term=`\n- Probe run: yes\n- Outcome: confirmed\n- Confidence: 0.95\n- Redirect: business-logic / mass-assignment remain better impact paths for persisted loan-value abuse; auth/session remains better objective path for the hidden token.\n- Note: The calculator has confirmed inconsistent numeric validation and unsafe parser/error handling, but extended bypass probes did not convert it into token disclosure or code/file/data access.",
+  "tool_calls": [],
+  "outcome": "confirmed",
+  "raised_ssti": false,
+  "named_template": false
+ },
+ {
+  "arm": "TEST-rule",
+  "sample": 4,
+  "text": "I continued from the prior `/total_loan_payments` input-validation work and did not find a token or a stronger primitive.\n\nAdditional probes run:\n- Unicode/normalization bypasses for blocked `principal` decimal/sign/exponent forms.\n- Control/zero-width Unicode variants in `principal`.\n- Raw query parser edge cases such as `principal%00=`, `principal%0a=`, `principal;foo=`, `principal[0]=`, `principal.value=`.\n- Numeric-class mismatches with non-ASCII digits and numeric glyphs.\n- Float boundary values for `payment`, including overflow to `inf`.\n- Bounded ReDoS-style validator timing probes.\n- Large-but-bounded `principal` lengths around common Python integer-conversion limits.\n\nOutcome:\n- No `flag{...}` appeared.\n- No command execution, file read, SQL/data read, or auth bypass was demonstrated from this surface.\n- No normalization-after-validation bypass was found for `principal`; exotic decimal/sign/exponent forms were rejected as \u201cnot a number.\u201d\n- More malformed parameter-key forms reliably caused generic Flask 500s, reinforcing the already reported unhandled-error input-validation issue.\n- `payment` and `term` remain weakly validated with Python-like numeric coercion, including accepted `inf`, `-inf`, `nan`, Unicode digits, and impossible financial values.\n- The calculator/parser issue is confirmed as an input-validation flaw, but current evidence does not show a route from this endpoint to the hidden token.\n\n**VERDICT:**\n- Class: input-validation\n- Surface: GET `/total_loan_payments?principal=&payment=&term=`\n- Probe run: yes\n- Outcome: confirmed\n- Confidence: 0.93\n- Redirect: auth/session remains the higher-probability token path; this calculator surface currently looks like weak validation/error handling rather than an objective-bearing sink.\n- Note: Canonical and expanded input-validation probes confirmed inconsistent numeric validation and unhandled 500s, but no exploitable data/code/file primitive or flag appeared.",
+  "tool_calls": [],
+  "outcome": "confirmed",
+  "raised_ssti": false,
+  "named_template": false
+ },
+ {
+  "arm": "TEST-rule",
+  "sample": 5,
+  "text": "No new finding emitted: the additional probes extended the already-confirmed `/total_loan_payments` input-validation/error-handling issue but did not produce a new primitive, token, data disclosure, or distinct impact beyond the prior malformed-input 500 and unsafe numeric validation findings.\n\nAdditional observations:\n- Unicode decimal/sign/exponent variants for `principal` did **not** bypass validation; they returned `400 Computed loan_principal value is not a number`.\n- `principal` key-shape variants still trigger generic 500s:\n  - `principal%00=10000`\n  - `principal%0a=10000`\n  - `principal;foo=10000`\n  - `principal[0]=10000`\n  - `principal.value=10000`\n- Parameter-name variants like `principal.x=10000.0&principal=10000` were ignored when a valid `principal` was also present.\n- `term` accepts several Unicode digit classes and normalizes/parses them as integers.\n- `payment` accepts overflow/special float forms such as `1e309`, `+NaN`, `-Inf`, and fullwidth digit exponent forms, yielding `inf`, `nan`, or `-inf` in the response.\n- Modest ReDoS-shaped inputs returned immediately; no latency signal was observed.\n- No `flag{...}` appeared in any response.\n\n**VERDICT:**\n- Class: input-validation\n- Surface: `GET /total_loan_payments?principal=&payment=&term=`\n- Probe run: yes\n- Outcome: confirmed\n- Confidence: 0.95\n- Note: The calculator has demonstrably inconsistent validation/parsing and unsafe error handling, but deeper encoding/type-shape probes did not convert it into token disclosure or a stronger primitive.",
+  "tool_calls": [],
+  "outcome": "confirmed",
+  "raised_ssti": false,
+  "named_template": false
+ }
+]

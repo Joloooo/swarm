@@ -1140,6 +1140,100 @@ def _extract_tool_attempts_from_trace(
     return attempts[-20:]
 
 
+# ── Per-skill investigation thread (continuity + compaction) ──────────
+#
+# Measured: a single fresh worker context peaks around 45-87k tokens —
+# under the ~120k point where the model degrades. Carrying prior work
+# forward (continuity) is what risks crossing that line, so the thread is
+# compacted to a bounded CHARACTER budget that leaves headroom for the
+# fresh work on top. Commands are kept verbatim; tool OUTPUTS are shrunk
+# to a one-line summary (the user's "keep what was executed, shrink the
+# outputs"). ~120k chars ≈ 30k tokens for the carried thread.
+_THREAD_CHAR_BUDGET = 120_000
+_RECORD_CMD_CHARS = 240
+_RECORD_OUTPUT_CHARS = 200
+_MAX_STEPS_PER_RUN = 40
+
+# Cheap artifact tells worth preserving in a shrunk output summary — the
+# things that actually decide whether a probe progressed.
+_OUTPUT_TELLS = (
+    "root:x:0:0", "uid=", "gid=", "flag{", "information_schema",
+    "union select", "@@version", "traceback", "stack trace", "exception",
+    "denied", "forbidden", "not a number", "500 internal", "200 ok",
+    "302 found", "401 ", "403 ", "404 ", "no such", "syntax error",
+)
+
+
+def _summarize_output(output: str) -> str:
+    """Shrink a tool output to a one-line summary: size + first line +
+    the decisive artifact tells that survive compaction."""
+    o = (output or "").strip()
+    if not o:
+        return "(no output)"
+    first_line = next((ln for ln in o.splitlines() if ln.strip()), "")[:120]
+    low = o.lower()
+    tells = sorted({t for t in _OUTPUT_TELLS if t in low})
+    tail = f"  tells={','.join(tells[:5])}" if tells else ""
+    return f"[{len(o)}b] {first_line}{tail}"[:_RECORD_OUTPUT_CHARS]
+
+
+def _compact_run_record(messages: list, verdict_signals: list) -> str:
+    """Build a compact record of ONE dispatch: each step's command kept
+    verbatim, its tool output shrunk to a one-line summary, then the
+    closing verdict. This is the unit the continuity thread accumulates."""
+    responses: dict[str, ToolMessage] = {}
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            cid = str(getattr(msg, "tool_call_id", "") or "")
+            if cid:
+                responses[cid] = msg
+
+    lines: list[str] = []
+    for msg in messages:
+        if not isinstance(msg, AIMessage):
+            continue
+        for tc in getattr(msg, "tool_calls", []) or []:
+            if not isinstance(tc, dict):
+                continue
+            cmd = _tool_call_arg(tc, "command", "cmd", "url", "query", "target", "data")
+            if not cmd:
+                continue
+            cid = str(tc.get("id") or tc.get("tool_call_id") or "")
+            out = _tool_message_text(responses.get(cid))
+            lines.append(
+                f"- `{' '.join(cmd.split())[:_RECORD_CMD_CHARS]}` "
+                f"→ {_summarize_output(out)}"
+            )
+            if len(lines) >= _MAX_STEPS_PER_RUN:
+                break
+        if len(lines) >= _MAX_STEPS_PER_RUN:
+            break
+
+    for s in (verdict_signals or []):
+        if str(getattr(s, "source", "")) == "executor_verdict":
+            lines.append(f"- VERDICT: {str(getattr(s, 'observation', ''))[:200]}")
+            break
+
+    return "\n".join(lines) if lines else "(no tool steps this run)"
+
+
+def _build_investigation_thread(
+    state: dict, config_name: str, messages: list, verdict_signals: list,
+) -> dict:
+    """Append this dispatch's compacted record to the skill's thread,
+    increment its run count, and trim the OLDEST runs until the thread is
+    back under the character budget. Returns the single-key update for
+    ``state['investigation_threads']``."""
+    prior = (state.get("investigation_threads") or {}).get(config_name) or {}
+    run_count = int(prior.get("run_count", 0)) + 1
+    runs = [str(r) for r in (prior.get("runs") or [])]
+    runs.append(_compact_run_record(messages, verdict_signals))
+    # Drop oldest runs (keeping at least the current one) until under budget.
+    while len(runs) > 1 and sum(len(r) for r in runs) > _THREAD_CHAR_BUDGET:
+        runs.pop(0)
+    return {config_name: {"run_count": run_count, "runs": runs}}
+
+
 def _collect_prior_skill_history(state: dict, agent_id: str) -> str | None:
     """Return the previous summarizer report for this ``agent_id``, or
     ``None`` if there is no prior dispatch.
@@ -1175,6 +1269,37 @@ def _collect_prior_skill_history(state: dict, agent_id: str) -> str | None:
         "NOT repeat probes already tried; pick up from where the "
         "previous run left off.\n\n"
         f"{body}"
+    )
+
+
+def _format_investigation_thread(state: dict, config_name: str) -> str | None:
+    """Render this skill's own compacted cross-dispatch history as a seed
+    block, with the run count, so a re-dispatched worker CONTINUES instead
+    of starting fresh. Complements ``_collect_prior_skill_history`` (the
+    supervisor's digest) with the worker's own raw command trail."""
+    th = (state.get("investigation_threads") or {}).get(config_name)
+    if not th:
+        return None
+    runs = [str(r) for r in (th.get("runs") or []) if str(r).strip()]
+    if not runs:
+        return None
+    run_count = int(th.get("run_count", len(runs)))
+    start = run_count - len(runs) + 1
+    body = "\n\n".join(f"### Run {start + i}\n{r}" for i, r in enumerate(runs))
+    trimmed = "" if len(runs) >= run_count else (
+        "(your earliest runs were trimmed for context budget)\n\n"
+    )
+    return (
+        f"## Your prior work on this skill — you have been dispatched "
+        f"{run_count} time(s)\n\n"
+        "This is YOUR OWN compacted history across dispatches: commands kept "
+        "verbatim, tool outputs shrunk to a one-line summary. CONTINUE from "
+        "here — do not repeat a probe already run below; deepen it or pivot "
+        "based on what it showed. If you have now tried enough to judge this "
+        "class on this surface, say so plainly in your closing VERDICT: a "
+        "confident `refuted` (\"it is not me\") frees the swarm to move on "
+        "and is as useful as a finding.\n\n"
+        + trimmed + body
     )
 
 
@@ -1390,6 +1515,10 @@ async def _run_skill_agent_impl(
             f"{web_search_ctx}"
         )
 
+    thread_block = _format_investigation_thread(state, config.config_name)
+    if thread_block:
+        seed_parts.append(thread_block)
+
     prior_history = _collect_prior_skill_history(state, config.agent_id)
     if prior_history:
         seed_parts.append(prior_history)
@@ -1443,6 +1572,7 @@ async def _run_skill_agent_impl(
 
     trace: list = []
     findings: list[Finding] = []
+    verdict_signals: list[Signal] = []
     # Resolve the run_id once so every LLM call below logs into the
     # same ``logs/run-<id>/llm_calls.jsonl`` and so on a crash the
     # salvage path knows where to write its output.
@@ -2592,6 +2722,19 @@ async def _run_skill_agent_impl(
         )
     if tool_attempts:
         update["tool_attempts"] = tool_attempts
+    # Continuity: append this dispatch's compacted record to the skill's
+    # investigation thread so the NEXT dispatch continues instead of
+    # re-deriving (commands kept, outputs shrunk, oldest runs trimmed to a
+    # bounded budget). See _build_investigation_thread.
+    try:
+        update["investigation_threads"] = _build_investigation_thread(
+            state, config.config_name, messages, verdict_signals,
+        )
+    except Exception as e:  # noqa: BLE001 — continuity must never break a run
+        node.log.warning(
+            "[%s] investigation-thread build failed (%s) — skipping",
+            config.agent_id, e,
+        )
     # Sticky-fallback bookkeeping: if this dispatch used the fallback model
     # (rescued by it, exhausted it, or was sent straight to it), record the
     # config so its NEXT dispatch this run skips the doomed primary tier.

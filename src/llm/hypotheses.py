@@ -60,6 +60,7 @@ technical names (SQL injection, SSRF, template injection) stay intact.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, replace
 from typing import Any, Iterable
 
@@ -78,6 +79,12 @@ from src.state import (
 # only know "high/medium/low" map through :func:`signal_weight`; producers
 # with a real measurement set ``Signal.weight`` directly.
 _CONFIDENCE_WEIGHT = {"high": 1.4, "medium": 0.8, "low": 0.4}
+
+# Hard cap on the ranked hypothesis list so the planner/worker prompt is
+# never flooded. Synthesis rebuilds from the signal log each cycle, so a
+# truncated low-priority hypothesis simply reappears next cycle if its
+# signals persist — nothing is permanently lost.
+MAX_HYPOTHESES = 24
 
 # Belief thresholds on ``confidence`` = sigmoid(logodds).
 SUPPORTED_CONFIDENCE = 0.40  # ≥ this: several signals agree (supported)
@@ -436,8 +443,42 @@ def _is_confirm(s: Signal) -> bool:
     return (getattr(s, "kind", "") or "").strip().lower() == "confirm"
 
 
+_SCHEME_HOST_RE = re.compile(r"https?://[^/\s]+")
+_PATH_RE = re.compile(r"/[^\s,;?#]*")
+_PARAM_RE = re.compile(r"[?&]?([a-z_][\w\-]{1,40})\s*=")
+_WORD_RE = re.compile(r"([a-z_][\w\-]{1,40})")
+
+
+def normalize_surface(raw: str) -> str:
+    """Collapse a free-text surface string to a stable canonical key.
+
+    Workers describe the same endpoint many ways — ``post /sku_add.php
+    sku,name,description; post /sku_search.php search``, ``/sku_add.php``,
+    ``http://host:8081/sku_add.php?sku=1`` — and the verbose,
+    cycle-varying forms never merged, so one real sink fractured into a
+    dozen hypotheses (the 90-from-101 explosion). This normalizes to
+    ``<path> <first-param>``: strip the scheme/host, take the FIRST
+    endpoint of a multi-endpoint blob, keep its path and first parameter
+    name. Surfaces with no path collapse to their first few words.
+    """
+    t = " ".join(str(raw or "").split()).lower()
+    if not t:
+        return ""
+    t = _SCHEME_HOST_RE.sub("", t)
+    first = re.split(r"[;,]", t, maxsplit=1)[0].strip()
+    m = _PATH_RE.search(first)
+    if m:
+        path = m.group(0).rstrip("/") or "/"
+        rest = first[m.end():]
+        pm = _PARAM_RE.search(rest) or _WORD_RE.search(rest)
+        param = pm.group(1) if pm else ""
+        return f"{path} {param}".strip()
+    # No path (e.g. "flask session cookie") — collapse to a short slug.
+    return " ".join(first.split()[:4])
+
+
 def _surface_of(s: Signal) -> str:
-    return " ".join(str(getattr(s, "surface", "") or "").split()).strip().lower()
+    return normalize_surface(getattr(s, "surface", "") or "")
 
 
 def _required_action(
@@ -469,7 +510,7 @@ def _finding_contributions(
         cls = (getattr(f, "category", "") or "").strip().lower()
         if not cls:
             continue
-        surface = (getattr(f, "url", "") or "").strip().lower()
+        surface = normalize_surface(getattr(f, "url", "") or "")
         status = (getattr(f, "status", "") or "").strip().lower()
         primitive = (getattr(f, "primitive", "") or "").strip().lower()
         demonstrated = (
@@ -620,4 +661,4 @@ def synthesize_hypotheses(
             out.append(replace(h))
 
     out.sort(key=lambda h: h.priority, reverse=True)
-    return out
+    return out[:MAX_HYPOTHESES]

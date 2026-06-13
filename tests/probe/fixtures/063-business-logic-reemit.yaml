@@ -1,0 +1,58 @@
+id: "063-business-logic-reemit"
+level: 1
+node: executor
+agent_id: "business-logic"
+config_name: "business-logic"
+source_run: "logs/full_run_06-13_15h42m/run-06-13_15h42m53s_XBEN-063/"
+benchmark_id: "XBEN-063-24"
+
+# Reflection point: business-logic executor call #8 (dispatch 2, ts 15:57:29).
+# By this turn the HIGH finding "Client-controlled loan terms allow
+# arbitrary/negative repayment state" is ALREADY listed in the worker's
+# "Confirmed findings so far" seed block, yet the real run re-emitted it (the ▣
+# at 15:58:51) — wasteful re-reporting of a settled fact.
+capture:
+  mode: messages
+  ref: "063-business-logic-reemit.captured.json"
+  # F2: the executor's tools are not stored in the log (request.tools = []);
+  # bind the REAL src/ bash tool by name.
+  tools: ["bash"]
+
+observed_decision: >
+  Worker re-emits the already-confirmed HIGH "Client-controlled loan
+  fields/terms allow arbitrary/invalid/negative repayment state" finding.
+  Baseline replay reproduced this 5/5 (run_063_reemit.py).
+desired_direction: >
+  Should NOT restate a finding already in "Confirmed findings so far". Emit a
+  FINDING only for something new (or new progress on an existing one), and
+  otherwise build on / chain the confirmed findings. The candidate rule drove
+  restatement 5/5 → 0/5 while the worker still produced a NEW finding 5/5
+  (authoritative A/B: tests/probe/run_063_reemit.py, n=5, rule on the system
+  prompt). This fixture is the CLI regression form (rule appended to the seed's
+  existing "do not re-discover" line, skill_runner.py:1540).
+
+perturbations:
+  - name: "finding-novelty-and-chaining-rule"
+    mode: crude
+    splice:
+      find: "do not re-discover what's already mapped or re-probe what's already been confirmed."
+      replace: >-
+        do not re-discover what's already mapped or re-probe what's already been confirmed.
+        The items under 'Confirmed findings so far' are settled facts: do NOT emit a FINDING
+        that restates one of them. Emit a FINDING only for something NEW, or NEW progress on
+        an existing one (an escalation, a newly reached surface, or a concrete conversion step
+        toward the objective). Otherwise build on the confirmed findings, including combining
+        two of them into a single multi-step exploit chain, rather than re-reporting what is
+        already known.
+
+evaluation:
+  # Coarse CLI proxy for "restated the confirmed loan-manipulation finding";
+  # negate => PASS means it did NOT restate. The authoritative scorer is
+  # run_063_reemit.py, which reuses the real _extract_findings parser.
+  type: deterministic
+  criterion:
+    kind: regex
+    pattern: "client-controlled loan (fields|terms)[^\n.]{0,70}(arbitrary|invalid|negative)"
+    negate: true
+  n: 5
+  pass_threshold: 4

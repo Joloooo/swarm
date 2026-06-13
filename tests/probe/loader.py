@@ -55,6 +55,7 @@ class Fixture:
     config_name: str = ""                      # skill identity (load-bearing for executor)
     locator: dict = field(default_factory=dict)
     capture: Capture | None = None
+    state_seed: dict = field(default_factory=dict)  # Level-2: construct the node's input state
     observed_decision: str = ""
     desired_direction: str = ""
     perturbations: list[Perturbation] = field(default_factory=list)
@@ -84,6 +85,7 @@ def load_fixture(path: str | pathlib.Path) -> Fixture:
             ref=cap.get("ref", ""),
             tools=list(cap.get("tools") or []),
         ),
+        state_seed=data.get("state_seed") or {},
         observed_decision=data.get("observed_decision", ""),
         desired_direction=data.get("desired_direction", ""),
         perturbations=[

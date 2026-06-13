@@ -464,6 +464,26 @@ def _signals_reducer(
     return list(merged.values())[-_MAX_SIGNALS:]
 
 
+def _investigation_threads_reducer(
+    existing: dict | None, new: dict | None,
+) -> dict:
+    """Merge the per-skill investigation threads (the continuity store).
+
+    Keyed by ``config_name``; each value is
+    ``{"run_count": int, "log": str}`` — a compacted record of everything
+    that skill has done across all its dispatches this run (commands kept
+    verbatim, tool outputs shrunk). A re-dispatched worker is seeded with
+    its thread so it CONTINUES instead of starting fresh and re-deriving
+    what prior runs already established. New value wins per key (the worker
+    rebuilds the full compacted log each exit), old keys persist.
+    """
+    if not new:
+        return existing or {}
+    merged = dict(existing or {})
+    merged.update(new)
+    return merged
+
+
 def _hypotheses_reducer(
     existing: list[Hypothesis] | None, new: list[Hypothesis] | None,
 ) -> list[Hypothesis]:
@@ -996,6 +1016,13 @@ class SwarmGraphState(TypedDict, total=False):
     # (priority) on separate axes. Last-non-empty-write-wins, like
     # ``canonical_findings``.
     hypotheses: Annotated[list[Hypothesis], _hypotheses_reducer]
+    # Per-skill continuity store (the re-dispatch-context fix). Keyed by
+    # ``config_name`` → ``{"run_count": int, "log": str}``: a compacted
+    # record of everything that skill has done across all its dispatches
+    # (commands kept, tool outputs shrunk to a bounded budget). Seeded into
+    # the next dispatch so a re-run continues instead of re-deriving. See
+    # the thread builder/compactor in ``src/nodes/base/skill_runner.py``.
+    investigation_threads: Annotated[dict, _investigation_threads_reducer]
 
     # ── Worker → Summarizer hand-off (the context-window fix) ──
     # Each worker (executor, recon, salvage) writes a SINGLE-ITEM list

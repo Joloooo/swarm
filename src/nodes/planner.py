@@ -2087,6 +2087,13 @@ _HANDOFF_MAX_CONFIGS = max(1, _env_int("SWARM_HANDOFF_MAX_CONFIGS", 6))
 # unranked class can still surface (the synthesis ranking is not yet
 # trustworthy enough to dispatch top-K blind; see the 092 post-mortem).
 _HYPOTHESIS_FLOOR_LIMIT = max(0, _env_int("SWARM_HYPOTHESIS_FLOOR", 3))
+# Hard cap on workers dispatched per attack wave, and the soft per-mode
+# target. Fewer, more-focused workers finish faster → the planner gets more
+# observation/replan cycles in the same wall-clock. The split is a SOFT
+# target: if one mode is short, the other backfills up to the cap; if there
+# are fewer than the cap total, all run (never force-filled to 6).
+_MAX_DISPATCH_PER_WAVE = max(1, _env_int("SWARM_MAX_DISPATCH", 6))
+_DISPATCH_MODE_HALF = max(1, _env_int("SWARM_DISPATCH_HALF", 3))
 
 _HANDOFF_TECHNIQUE_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("sqli", ("sql", "union", "boolean", "time-based", "database", "query")),
@@ -2476,9 +2483,16 @@ def _ensure_hypothesis_floor(
 
 
 def _attach_hypothesis_context(pending: list[dict], hyps: list) -> None:
-    """Append each hypothesis's deciding probe to its matching dispatch
-    reason, so a worker dispatched to advance a hypothesis knows the exact
-    surface + technique to test and is reminded to return a VERDICT."""
+    """Turn each hypothesis-matched dispatch into a PROVE-mode worker: hand
+    it the FULL hypothesis the supervisor sees (class, surface, belief,
+    supporting evidence, deciding probe) and a single binary mandate —
+    prove or disprove it. The worker and planner are then on the same page,
+    and the verdict the worker returns is anchored to that exact hypothesis.
+
+    Sets ``item['mode']='prove'`` on matched items; unmatched items are
+    tagged ``'explore'`` by :func:`_tag_explore_dispatches`. We do NOT inject
+    a hardcoded probe — the worker runs the deciding test using its own
+    skill's techniques, so nothing benchmark-specific leaks in."""
     if not pending or not hyps:
         return
     by_skill: dict[str, list] = {}
@@ -2492,22 +2506,77 @@ def _attach_hypothesis_context(pending: list[dict], hyps: list) -> None:
         matches = by_skill.get(skill) or []
         if not matches:
             continue
-        blocks: list[str] = []
+        item["mode"] = "prove"
+        blocks: list[str] = [
+            "MODE: PROVE — your single job this dispatch is to PROVE or "
+            "DISPROVE the hypothesis below. Run its deciding probe FIRST "
+            "(use your own skill's techniques on the named surface) before "
+            "anything else; only explore adjacent ideas if the probe is "
+            "inconclusive and budget remains."
+        ]
         for h in matches[:2]:
+            n_support = len(getattr(h, "supporting", []) or [])
             blocks.append("\n".join([
-                "Hypothesis to advance (supervisor belief):",
+                "Hypothesis to prove/disprove (the supervisor's belief — you "
+                "see exactly what it sees):",
                 f"- class: {getattr(h, 'vuln_class', '')}",
                 f"- surface: {getattr(h, 'surface', '') or '(target-wide)'}",
-                f"- state: {getattr(h, 'state', '')} "
-                f"(confidence {getattr(h, 'confidence', 0.0):.0%})",
-                f"- deciding probe: {getattr(h, 'required_technique', '') or 'confirm or refute this class here'}",
-                "- On exit, return a VERDICT (confirmed/refuted/inconclusive) "
-                "for this class + surface so the supervisor can recalibrate.",
+                f"- belief: {getattr(h, 'state', '')} "
+                f"(confidence {getattr(h, 'confidence', 0.0):.0%}, "
+                f"{n_support} signal(s) agree)",
+                f"- deciding probe: {getattr(h, 'required_technique', '') or 'the canonical confirm-test for this class on this surface'}",
+                "- On exit return a VERDICT for THIS class + surface with "
+                "`Probe run: yes/no`. If you could not run the deciding probe "
+                "on the real surface, say `inconclusive` (not refuted) — an "
+                "honest 'I did not get to test it' keeps the lead alive.",
             ]))
         prior = str(item.get("dispatch_reason") or "").strip()
         item["dispatch_reason"] = (
             prior + "\n\n" + "\n\n".join(blocks) if prior else "\n\n".join(blocks)
         )
+
+
+def _balance_and_cap_dispatch(pending: list[dict]) -> list[dict]:
+    """Cap the wave at ``_MAX_DISPATCH_PER_WAVE`` with a soft prove/explore
+    split.
+
+    Aims for ~``_DISPATCH_MODE_HALF`` PROVE (hypothesis-driven) and
+    ~``_DISPATCH_MODE_HALF`` EXPLORE workers, but flexes: if one mode is
+    short, the other backfills the freed slots up to the cap. If the wave
+    already has at most the cap, every worker runs — we never pad up to the
+    cap just to fill it. PROVE items are those tagged by
+    :func:`_attach_hypothesis_context`; everything else is EXPLORE.
+    Original dispatch order is preserved.
+    """
+    if len(pending) <= _MAX_DISPATCH_PER_WAVE:
+        return pending
+    prove = [i for i in pending if i.get("mode") == "prove"]
+    other = [i for i in pending if i.get("mode") != "prove"]
+    keep = prove[:_DISPATCH_MODE_HALF] + other[:_DISPATCH_MODE_HALF]
+    remaining = _MAX_DISPATCH_PER_WAVE - len(keep)
+    if remaining > 0:
+        keep += (prove[_DISPATCH_MODE_HALF:] + other[_DISPATCH_MODE_HALF:])[:remaining]
+    keep_ids = {id(i) for i in keep}
+    return [i for i in pending if id(i) in keep_ids]
+
+
+def _tag_explore_dispatches(pending: list[dict]) -> None:
+    """Any dispatch not claimed as PROVE is an EXPLORE worker: open-ended
+    investigation whose job is to surface findings and propose new
+    hypotheses (the breadth/coverage lane). Prepends a short mode header so
+    the worker knows it is not tied to a single hypothesis."""
+    for item in pending:
+        if item.get("mode") == "prove":
+            continue
+        item["mode"] = "explore"
+        header = (
+            "MODE: EXPLORE — open-ended investigation of this surface/area. "
+            "Map it, test what the evidence suggests, and surface any "
+            "findings; if you spot a likely vulnerability class, say so in "
+            "your VERDICT's Redirect so the supervisor can form a hypothesis."
+        )
+        prior = str(item.get("dispatch_reason") or "").strip()
+        item["dispatch_reason"] = header + ("\n\n" + prior if prior else "")
 
 
 def _tool_coverage_note(state: SwarmGraphState) -> str | None:
@@ -3583,6 +3652,9 @@ class PlannerNode(BaseNode):
                 pending, handoff_claims
             )
             _attach_hypothesis_context(pending, hypothesis_claims)
+            # Soft 50/50 prove/explore balance + hard cap of 6 (see Step 4).
+            pending = _balance_and_cap_dispatch(pending)
+            _tag_explore_dispatches(pending)
             if not pending:
                 self.log.warning(
                     "planner: action=attack but no runnable configs after "

@@ -1,7 +1,35 @@
 ---
 name: request-builder
 description: >-
-  Use request-builder when the planner needs fine-grained manual control over a single HTTP request that ordinary tools cannot easily express, and recon already shows an endpoint whose behaviour hinges on the exact shape of what is sent. Reach for it when a discovered route only responds to a non-standard method (PUT, PATCH, DELETE, or a method named in an Allow header or OPTIONS response), when a form or API path advertises a specific content-type such as JSON, XML, or multipart upload that must be matched precisely, when response headers or documentation imply a required custom header, cookie, or auth token must be placed just so, or when an endpoint takes a tightly structured body (nested JSON, encoded fields, length-bounded values) that a generic client would mangle. It also fits when the stated objective is to replay a request seen during recon while changing one header, parameter, or body field at a time and reading how the response shifts, or when a server visibly normalizes input (echoing it back trimmed, lowercased, or URL-decoded) so a precisely pre-shaped value is needed to land a target post-transformation form. A common loop is to hand it the endpoint shape, the inputs already tried, and the observed responses (status codes, body excerpts) and have it infer the transformation and return one fresh input value to try next. Do not dispatch it on signals that only appear after a skill-specific test input has already produced a measured differential. As disambiguation: when a concrete vulnerability class is already identified, prefer that specialist (SQL injection, XSS, SSRF, path traversal, SSTI); use request-builder only for raw request control no specialist covers, or as a building block alongside one. Choose recon for discovering endpoints and parameters in the first place, fuzzing for high-volume input variation across a wordlist, and request-builder when you instead need one carefully hand-crafted request whose method, headers, encoding, or body must be exact.
+  Use: Use request-builder when the planner needs fine-grained manual control over a single HTTP
+  request that ordinary tools cannot easily express, and recon already shows an endpoint whose
+  behaviour hinges on the exact shape of what is sent.
+  Signals: Reach for it when a discovered route only responds to a non-standard method (PUT, PATCH,
+  DELETE, or a method named in an Allow header or OPTIONS response), when a form or API path
+  advertises a specific content-type such as JSON, XML, or multipart upload that must be matched
+  precisely, when response headers or documentation imply a required custom header, cookie, or auth
+  token must be placed just so, or when an endpoint takes a tightly structured body (nested JSON,
+  encoded fields, length-bounded values) that a generic client would mangle. It also fits when the
+  stated objective is to replay a request seen during recon while changing one header, parameter, or
+  body field at a time and reading how the response shifts, or when a server visibly normalizes
+  input (echoing it back trimmed, lowercased, or URL-decoded) so a precisely pre-shaped value is
+  needed to land a target post-transformation form. A common loop is to hand it the endpoint shape,
+  the inputs already tried, and the observed responses (status codes, body excerpts) and have it
+  infer the transformation and return one fresh input value to try next. Do not dispatch it on
+  signals that only appear after a skill-specific test input has already produced a measured
+  differential. As disambiguation: when a concrete vulnerability class is already identified, prefer
+  that specialist (SQL injection, XSS, SSRF, path traversal, SSTI); use request-builder only for raw
+  request control no specialist covers, or as a building block alongside one. Choose recon for
+  discovering endpoints and parameters in the first place, fuzzing for high-volume input variation
+  across a wordlist, and request-builder when you instead need one carefully hand-crafted request
+  whose method, headers, encoding, or body must be exact.
+  Pair with: Also dispatch the specialist skill that owns the endpoint mechanism being shaped in
+  parallel when the same evidence shows those mechanisms too; co-dispatch means separate focused
+  workers sharing the same investigation state, not merging skill prompts.
+  Do not use: Do not dispatch for endpoint discovery, wordlist fuzzing, or ordinary specialist
+  probes that do not need exact method/header/body control. Prefer the concrete specialist when it
+  can express the request normally; use request-builder alongside it when exact encoding, method,
+  headers, cookies, or body shape is the blocker.
 metadata:
   dispatchable: true
   skip_base_prompt: true

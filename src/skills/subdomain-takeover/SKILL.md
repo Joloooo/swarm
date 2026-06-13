@@ -1,7 +1,36 @@
 ---
 name: subdomain-takeover
 description: >-
-  Use subdomain-takeover when authorized recon on a multi-hostname scope (an apex with many subdomains, a stated `*.example.com` engagement, or a passive-DNS / certificate-transparency inventory) surfaces names whose DNS chain points at infrastructure the target does not directly control, signalling a possibly dangling third-party pointer. The routing tells are all visible before this skill runs: a subdomain whose CNAME, ALIAS, or A record resolves toward a recognised provider zone (`github.io`, `*.s3*.amazonaws.com`, `cloudfront.net`, `azurewebsites.net`, `blob.core.windows.net`, `trafficmanager.net`, `azureedge.net`, `fastly.net`, `herokudns.com`, `vercel.app`, `netlify.app`, `myshopify.com`, `zendesk.com`, `statuspage.io`, and similar SaaS or CDN hosts); an NS delegation handing a child zone to nameservers on a vendor domain that may be expired or registrable; MX records aimed at a decommissioned mail provider; leftover DNS verification artifacts (`asuid`, `_dnsauth`, `_github-pages-challenge` TXT) with no matching live binding; a wildcard CNAME aimed at a provider; or recon naming abandoned-sounding hosts (status, docs, support, blog, staging, legacy, cdn, assets) referenced in old certificates or asset lists. It is especially worth dispatching when such a takeover-eligible name also appears as an OAuth redirect target, a CORS allowlisted origin, a CSP source, or a parent-domain cookie scope, since control of the trusted name then pivots to session or script trust. To disambiguate look-alikes: a subdomain that simply 404s or shows a soft-404 from the target's own server or load balancer is ordinary content discovery, not takeover; a name that redirects you elsewhere is open-redirect and a parameter that fetches a URL is SSRF, both different classes; manipulating how a resolver answers is DNS rebinding or cache poisoning, not this; the single tell for subdomain-takeover is that DNS still points a name at an external resource the target no longer owns and that you could re-register on that provider. Coverage includes per-provider takeover signatures (HTTP fingerprints plus TLS clues), NS-record delegation takeover via expired nameserver domains, and MX-based mail takeover.
+  Use: Use subdomain-takeover when authorized recon on a multi-hostname scope (an apex with many
+  subdomains, a stated `*.example.com` engagement, or a passive-DNS / certificate-transparency
+  inventory) surfaces names whose DNS chain points at infrastructure the target does not directly
+  control, signalling a possibly dangling third-party pointer.
+  Signals: The routing tells are all visible before this skill runs: a subdomain whose CNAME, ALIAS,
+  or A record resolves toward a recognised provider zone (`github.io`, `*.s3*.amazonaws.com`,
+  `cloudfront.net`, `azurewebsites.net`, `blob.core.windows.net`, `trafficmanager.net`,
+  `azureedge.net`, `fastly.net`, `herokudns.com`, `vercel.app`, `netlify.app`, `myshopify.com`,
+  `zendesk.com`, `statuspage.io`, and similar SaaS or CDN hosts); an NS delegation handing a child
+  zone to nameservers on a vendor domain that may be expired or registrable; MX records aimed at a
+  decommissioned mail provider; leftover DNS verification artifacts (`asuid`, `_dnsauth`,
+  `_github-pages-challenge` TXT) with no matching live binding; a wildcard CNAME aimed at a
+  provider; or recon naming abandoned-sounding hosts (status, docs, support, blog, staging, legacy,
+  cdn, assets) referenced in old certificates or asset lists. It is especially worth dispatching
+  when such a takeover-eligible name also appears as an OAuth redirect target, a CORS allowlisted
+  origin, a CSP source, or a parent-domain cookie scope, since control of the trusted name then
+  pivots to session or script trust. To disambiguate look-alikes: a subdomain that simply 404s or
+  shows a soft-404 from the target's own server or load balancer is ordinary content discovery, not
+  takeover; a name that redirects you elsewhere is open-redirect and a parameter that fetches a URL
+  is SSRF, both different classes; manipulating how a resolver answers is DNS rebinding or cache
+  poisoning, not this; the single tell for subdomain-takeover is that DNS still points a name at an
+  external resource the target no longer owns and that you could re-register on that provider.
+  Coverage includes per-provider takeover signatures (HTTP fingerprints plus TLS clues), NS-record
+  delegation takeover via expired nameserver domains, and MX-based mail takeover.
+  Pair with: Also dispatch information-disclosure in parallel when the takeover-eligible hostname
+  exposes public artifacts, trusted-origin policy, or provider metadata worth mining; co-dispatch
+  means separate focused workers sharing the same investigation state, not merging skill prompts.
+  Do not use: Do not dispatch for ordinary DNS inventory, target-owned 404s, parked pages still
+  controlled by the target, or live hosts with no dangling provider/NS/MX evidence; route redirects,
+  server-side fetch parameters, and DNS rebinding/cache issues to their own skills.
 metadata:
   dispatchable: true
 ---

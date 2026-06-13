@@ -532,6 +532,26 @@ the form ``{"findings": [{"title": "...", "severity": "...",
 """
 
 
+# Finding-novelty + chaining contract. A re-dispatched worker sees every prior
+# worker's results in its "Confirmed findings so far" seed block, yet by default
+# it re-emits one of them as a fresh FINDING — wasted output that the live
+# display paints as a duplicate ▣ and that anchors the worker on settled work
+# instead of new progress (validated on the 063 business-logic re-dispatch:
+# restatement 5/5 → 0/5 under this rule, tests/probe/run_063_reemit.py). The
+# rule also turns the confirmed-findings list from a flat "don't redo" notice
+# into an explicit instruction to COMBINE findings into a multi-step chain.
+FINDING_NOVELTY_RULE = """\
+## Finding novelty & chaining (mandatory)
+
+The items under "Confirmed findings so far" are settled facts. Do NOT emit a
+FINDING that restates one of them. Emit a FINDING only for something NEW, or for
+NEW progress on an existing one (an escalation, a newly reached surface, or a
+concrete conversion step toward the objective). Otherwise, build on the
+confirmed findings — including combining two of them into a single multi-step
+exploit chain — rather than re-reporting what is already known.
+"""
+
+
 FINDING_CATEGORY_GUIDANCE = """\
 ### Picking the right Category — mechanism, not symptom
 
@@ -790,6 +810,7 @@ def get_executor_prompt(stealth_level: int = 0) -> str:
         SEVERITY_RULES,
         FINDING_CATEGORY_GUIDANCE,
         VERDICT_SCHEMA,
+        FINDING_NOVELTY_RULE,
     ]
     return "\n\n".join(parts)
 

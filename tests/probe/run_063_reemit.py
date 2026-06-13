@@ -39,32 +39,27 @@ from .runtime import reset_process_state
 
 CAPTURED = "063-business-logic-reemit.captured.json"
 
-# The exact rule we would add to the executor's finding-output contract.
-RULE = (
-    "\n\n## Finding novelty & chaining (mandatory)\n\n"
-    "The items under 'Confirmed findings so far' are settled facts. Do NOT "
-    "emit a FINDING that restates one of them. Emit a FINDING only for "
-    "something NEW, or for NEW progress on an existing one (an escalation, a "
-    "newly reached surface, or a concrete conversion step toward the "
-    "objective). Otherwise, build on the confirmed findings — including "
-    "combining two of them into a single multi-step exploit chain — rather "
-    "than re-reporting what is already known."
-)
-
 
 def _with_rule(messages: list[BaseMessage]) -> list[BaseMessage]:
-    """Append RULE to the SystemMessage (the executor's finding contract lives in
-    the system prompt). Faithful preview of the real-builder change."""
+    """Append the REAL src/ ``FINDING_NOVELTY_RULE`` to the SystemMessage.
+
+    ``get_executor_prompt`` now ends with this exact block, so appending it to
+    the captured system message reproduces the SHIPPED prompt (the rule is the
+    final joined part) — this is the real code path, not a copy, so the re-run
+    confirms the change we actually merged."""
+    from src.nodes.base.system_prompt import FINDING_NOVELTY_RULE
+
+    rule = "\n\n" + FINDING_NOVELTY_RULE
     out: list[BaseMessage] = []
     patched = False
     for m in messages:
         if not patched and isinstance(m, SystemMessage) and isinstance(m.content, str):
-            m = m.model_copy(update={"content": m.content + RULE})
+            m = m.model_copy(update={"content": m.content + rule})
             patched = True
         out.append(m)
     if not patched:  # no system msg — fall back to first message
         messages[0] = messages[0].model_copy(
-            update={"content": (messages[0].content or "") + RULE}
+            update={"content": (messages[0].content or "") + rule}
         )
     return out
 

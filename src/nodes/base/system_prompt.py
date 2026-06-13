@@ -854,20 +854,28 @@ class here or moves on.
 **VERDICT:**
 - Class: [the issue class you tested, e.g. ssti / sqli / idor]
 - Surface: [the endpoint or parameter you focused on, as specific as you can]
+- Probe run: [yes | no] — did you actually run the DECIDING probe for this
+  class on this surface (the canonical test that would settle it), e.g.
+  for SSTI a template payload sent to the reflecting server-side sink, for
+  deserialization a crafted object delivered to the real deserialization
+  entry point? Answer "no" if you only tested adjacent things, a different
+  surface, or ran out of steps before the decisive test.
 - Outcome: [confirmed | refuted | inconclusive]
-    - confirmed   = you DEMONSTRATED it (the proof is in a FINDING above)
-    - refuted     = you tested it properly and it is NOT this class here
-    - inconclusive = you could not determine it (blocked, or out of steps)
+    - confirmed   = you DEMONSTRATED it (proof in a FINDING above) — requires Probe run: yes
+    - refuted     = you ran the deciding probe and it is NOT this class here — requires Probe run: yes
+    - inconclusive = you did NOT run the deciding probe (wrong/adjacent surface, blocked, or out of steps)
 - Confidence: [0.0-1.0 — how likely THIS class is the real issue on this
   surface, given everything you saw]
 - Redirect: [OPTIONAL — if the evidence points at a DIFFERENT class, name
   it plainly, e.g. "looks like deserialization, not ssti"]
 - Note: [one short line: the single most decisive thing you observed]
 
-Telling the supervisor "it is not me" (refuted) is as valuable as a
-finding: it stops the swarm from re-testing a dead surface and frees
-budget for the real path. Be honest — do not report "inconclusive" to
-hedge when you actually have enough evidence to say confirmed or refuted.
+CRITICAL: you may ONLY say `confirmed` or `refuted` if `Probe run: yes`.
+If you did not run the deciding probe on the real surface — even if you
+have a strong hunch — the honest outcome is `inconclusive`. A `refuted`
+that never ran the deciding probe wrongly tells the swarm to abandon a
+live lead; a `refuted` that DID run it correctly frees budget for the
+real path. So be precise about both the probe and the outcome.
 """
 
 

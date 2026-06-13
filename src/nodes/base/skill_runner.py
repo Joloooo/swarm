@@ -171,6 +171,7 @@ VERDICT_PATTERN = re.compile(
     r"(?:\*\*VERDICT:?\*\*|##\s+VERDICT|##\s+Verdict)"
     r"(?:[\s\S]{0,160}?Class:\s*([\w-]+))?"
     r"(?:[\s\S]{0,200}?Surface:\s*(.+?)$)?"
+    r"(?:[\s\S]{0,200}?Probe run:\s*(yes|no))?"
     r"[\s\S]{0,200}?Outcome:\s*(confirmed|refuted|inconclusive)"
     r"(?:[\s\S]{0,160}?Confidence:\s*([0-9.]+))?"
     r"(?:[\s\S]{0,200}?Redirect:\s*(.+?)$)?"
@@ -286,10 +287,19 @@ def _extract_verdicts(
     if not last:
         return []
 
-    cls_raw, surface_raw, outcome_raw, conf_raw, redirect_raw, note_raw = last
+    cls_raw, surface_raw, probe_raw, outcome_raw, conf_raw, redirect_raw, note_raw = last
     outcome = (outcome_raw or "").strip().lower()
     if outcome not in _VERDICT_OUTCOME:
         return []
+    # The deciding-probe gate: a confirm/refute is only trustworthy if the
+    # worker actually ran the canonical test on the real surface. If it
+    # says "Probe run: no" (or omits it while claiming a strong outcome),
+    # downgrade to inconclusive — a worker that tested the wrong surface
+    # must not suppress (refute) or over-commit (confirm) a class. This is
+    # what stops a wrong-surface refute from burying the real answer.
+    probe_run = (probe_raw or "").strip().lower() == "yes"
+    if outcome in ("confirmed", "refuted") and not probe_run:
+        outcome = "inconclusive"
     vuln_class = (cls_raw or config_name or "").strip().lower()
     surface = " ".join((surface_raw or "").split()).strip()
     note = " ".join((note_raw or "").split()).strip()[:200]

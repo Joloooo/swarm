@@ -869,6 +869,7 @@ class SummarizerNode(BaseNode):
         # it never blocks the run.
         try:
             from src.llm.hypotheses import (
+                build_surface_canon,
                 routing_rules_from_specs,
                 signal_from_routing_dict,
                 synthesize_hypotheses,
@@ -892,11 +893,20 @@ class SummarizerNode(BaseNode):
                 update.get("canonical_findings")
                 or list(state.get("canonical_findings") or [])
             )
+            # LLM merge of duplicate/similar surfaces (Step 3) — the model
+            # groups "/sku_add.php sku" vs "…fields" vs "…parameters" into
+            # one sink so the hypothesis list stops fragmenting. Belief math
+            # stays deterministic; falls back to normalize_surface on failure.
+            surface_canon = await build_surface_canon(
+                signals=all_signals, model=model, run_id=run_id,
+                node_name=self.name,
+            )
             hypotheses = synthesize_hypotheses(
                 signals=all_signals,
                 canonical_findings=canonical_for_synth,
                 prior_hypotheses=list(state.get("hypotheses") or []),
                 extra_rules=skill_rules or None,
+                surface_canon=surface_canon,
             )
             if hypotheses:
                 update["hypotheses"] = hypotheses

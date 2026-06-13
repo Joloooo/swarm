@@ -59,6 +59,8 @@ technical names (SQL injection, SSRF, template injection) stay intact.
 
 from __future__ import annotations
 
+import json
+import logging
 import math
 import re
 from dataclasses import dataclass, replace
@@ -72,6 +74,8 @@ from src.state import (
     Signal,
     signal_key,
 )
+
+logger = logging.getLogger(__name__)
 
 # ── Belief tunables ───────────────────────────────────────────────────
 
@@ -500,8 +504,21 @@ def _required_action(
     return _DEFAULT_ACTION.get(vuln_class, (vuln_class, ""))
 
 
+def _apply_canon(raw: str, surface_canon: dict | None) -> str:
+    """Resolve a raw surface to its canonical key. Prefers the LLM-built
+    ``surface_canon`` map (which merges duplicate/similar surfaces — see
+    :func:`build_surface_canon`); falls back to the deterministic
+    :func:`normalize_surface` when no map entry exists."""
+    s = " ".join(str(raw or "").split())
+    if surface_canon:
+        hit = surface_canon.get(s) or surface_canon.get(s.lower())
+        if hit:
+            return hit
+    return normalize_surface(raw)
+
+
 def _finding_contributions(
-    findings: Iterable[Finding],
+    findings: Iterable[Finding], surface_canon: dict | None = None,
 ) -> dict[tuple[str, str], dict]:
     """Fold canonical findings into the hypothesis buckets. A demonstrated
     primitive confirms its hypothesis; a suspected finding adds belief."""
@@ -510,7 +527,7 @@ def _finding_contributions(
         cls = (getattr(f, "category", "") or "").strip().lower()
         if not cls:
             continue
-        surface = normalize_surface(getattr(f, "url", "") or "")
+        surface = _apply_canon(getattr(f, "url", "") or "", surface_canon)
         status = (getattr(f, "status", "") or "").strip().lower()
         primitive = (getattr(f, "primitive", "") or "").strip().lower()
         demonstrated = (
@@ -540,6 +557,7 @@ def synthesize_hypotheses(
     canonical_findings: list[Finding] | None = None,
     prior_hypotheses: list[Hypothesis] | None = None,
     extra_rules: Iterable[RoutingRule] | None = None,
+    surface_canon: dict | None = None,
 ) -> list[Hypothesis]:
     """Rebuild the ranked hypothesis list from the raw signal log + the
     canonical findings, carrying prior terminal states forward.
@@ -558,7 +576,7 @@ def synthesize_hypotheses(
     buckets: dict[tuple[str, str], dict] = {}
 
     for s in sigs:
-        surface = _surface_of(s)
+        surface = _apply_canon(getattr(s, "surface", "") or "", surface_canon)
         confirm = _is_confirm(s)
         for cls, w in _contributions(s, rules):
             cls = cls.strip().lower()
@@ -575,7 +593,8 @@ def synthesize_hypotheses(
                 b["has_confirm"] = True
 
     # fold canonical findings into the same buckets
-    for (cls, surface), fb in _finding_contributions(canonical_findings or []).items():
+    for (cls, surface), fb in _finding_contributions(
+        canonical_findings or [], surface_canon).items():
         b = buckets.setdefault((cls, surface), {
             "logodds": 0.0, "support": [], "contra": [],
             "has_primitive": False, "primitive": "", "attempts": [],
@@ -662,3 +681,112 @@ def synthesize_hypotheses(
 
     out.sort(key=lambda h: h.priority, reverse=True)
     return out[:MAX_HYPOTHESES]
+
+
+# ── LLM surface canonicalization (merge duplicate/similar surfaces) ────
+#
+# A regex can't reliably tell that "/sku_add.php sku", "/sku_add.php
+# fields" and "/sku_add.php parameters" are one sink — the trailing word
+# is free text. So instead of deriving the merge statically, we let the
+# model do what it is good at: group the surface descriptions that refer
+# to the same endpoint/sink. The belief MATH stays deterministic (this only
+# decides grouping), and ``normalize_surface`` remains the fallback if the
+# call fails, so synthesis always has a map.
+
+_SURFACE_CANON_SYSTEM = """\
+You merge duplicate descriptions of the same place in a web application
+security test. Test agents describe the same endpoint, parameter, or file
+area many different ways. Your only job is to GROUP the descriptions that
+refer to the SAME underlying surface and give each group one short, clean
+canonical label (prefer the URL path, then the parameter). Merge only when
+they clearly point at the same endpoint/parameter/file family; keep
+genuinely different surfaces apart. Output ONLY the JSON object asked for.
+"""
+
+
+def _extract_json_obj(text: str) -> dict | None:
+    """Pull the first JSON object out of an LLM response (tolerating fences)."""
+    if not text:
+        return None
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
+    candidate = fence.group(1) if fence else None
+    if candidate is None:
+        start = text.find("{")
+        if start == -1:
+            return None
+        depth = 0
+        for j in range(start, len(text)):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:j + 1]
+                    break
+    if not candidate:
+        return None
+    try:
+        obj = json.loads(candidate)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+async def build_surface_canon(
+    *, signals: list[Signal] | None, model, run_id: str | None = None,
+    node_name: str = "summarizer",
+) -> dict:
+    """Return a ``{raw_surface -> canonical_surface}`` map that merges
+    surfaces referring to the same place. LLM-proposed grouping with a
+    deterministic ``normalize_surface`` fallback for any unmapped or failed
+    case — pass the result to :func:`synthesize_hypotheses` as
+    ``surface_canon``."""
+    raws = sorted({
+        " ".join(str(getattr(s, "surface", "") or "").split())
+        for s in (signals or [])
+    } - {""})
+    if not raws:
+        return {}
+    fallback = {r: normalize_surface(r) for r in raws}
+    if len(raws) < 3 or model is None:
+        return fallback  # nothing to merge / no model — deterministic
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from src.llm.callbacks import make_call_config
+        cfg = make_call_config(run_id=run_id, agent_id="__surface_canon", node=node_name)
+        prompt = (
+            "Surface descriptions written by test agents (one per line):\n"
+            + "\n".join(f"- {r}" for r in raws[:120])
+            + "\n\nReturn ONLY:\n"
+            '{"groups": [{"canonical": "<short label, prefer the path>", '
+            '"members": ["<verbatim input>", ...]}]}\n'
+            "Every input must appear in exactly one group; a unique surface "
+            "is its own group of one."
+        )
+        resp = await model.ainvoke(
+            [SystemMessage(content=_SURFACE_CANON_SYSTEM), HumanMessage(content=prompt)],
+            config=cfg,
+        )
+        text = resp.content if isinstance(resp.content, str) else str(resp.content or "")
+        obj = _extract_json_obj(text)
+        groups = (obj or {}).get("groups")
+        if not isinstance(groups, list):
+            return fallback
+        out: dict[str, str] = {}
+        for g in groups:
+            if not isinstance(g, dict):
+                continue
+            canon = " ".join(str(g.get("canonical") or "").split())
+            members = g.get("members")
+            if not canon or not isinstance(members, list):
+                continue
+            for m in members:
+                ms = " ".join(str(m or "").split())
+                if ms:
+                    out[ms] = canon
+        for r in raws:  # anything the model dropped → deterministic fallback
+            out.setdefault(r, fallback[r])
+        return out
+    except Exception as e:  # noqa: BLE001 — canon must never break synthesis
+        logger.warning("surface canon LLM failed (%s) — deterministic fallback", e)
+        return fallback

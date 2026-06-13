@@ -1,10 +1,44 @@
 ---
 name: recon-ports
 description: >-
-  Use recon-ports when you have a bare target host or URL and no full TCP port map has been recorded yet, so the planner still only knows the one port that appeared in the given URL and has not seen the rest of the network surface. This is the default network-side first move of an engagement: dispatch it alongside the web/app recon pass so ports and services get mapped in parallel while the other pass works the homepage, forms, and directories. It is the network/service half of reconnaissance — it port-scans the host, detects the service behind each open port, and reports any non-web service (databases, object stores, message brokers, caches, admin daemons) as a new base URL the next agents should test. Strong signals to open it are ordinary responses that hint at a backend the front door does not expose — error pages, stack traces, or connection messages that mention a database (MySQL, PostgreSQL, Mongo, Redis), an object or blob store (S3, MinIO, buckets, presigned URLs), a message broker (RabbitMQ, Kafka, AMQP, MQTT), or a search engine (Elasticsearch, Solr); a redirect, Location header, hard-coded link, or JS config pointing at a second port such as 8080, 8443, or an admin panel on a high port; or an objective phrased as reaching data, dumps, dashboards, or storage that the visible app plainly does not own and that likely lives on a co-located service only a sweep reveals. Disambiguation: this pass only answers what is listening on the wire, so route elsewhere when the work is app-layer — the main app's pages, parameters, directories, cookies, and headers belong to web/app recon, not here; a value reflected into HTML is XSS, a database error from a query parameter is SQL injection, an id you can swap to read another record is IDOR, and an outbound-fetch parameter is SSRF; and once this skill has located a service, actually testing that database, bucket, or second web app is the next specialist's job, not this one's.
+  Use: Use recon-ports when you have a bare target host or URL and no full TCP port map has been
+  recorded yet, so the planner still only knows the one port that appeared in the given URL and has
+  not seen the rest of the network surface.
+  Signals: This is the default network-side first move of an engagement: dispatch it alongside the
+  web/app recon pass so ports and services get mapped in parallel while the other pass works the
+  homepage, forms, and directories. It is the network/service half of reconnaissance — it port-scans
+  the host, detects the service behind each open port, and reports any non-web service (databases,
+  object stores, message brokers, caches, admin daemons) as a new base URL the next agents should
+  test. Strong signals to open it are ordinary responses that hint at a backend the front door does
+  not expose — error pages, stack traces, or connection messages that mention a database (MySQL,
+  PostgreSQL, Mongo, Redis), an object or blob store (S3, MinIO, buckets, presigned URLs), a message
+  broker (RabbitMQ, Kafka, AMQP, MQTT), or a search engine (Elasticsearch, Solr); a redirect,
+  Location header, hard-coded link, or JS config pointing at a second port such as 8080, 8443, or an
+  admin panel on a high port; or an objective phrased as reaching data, dumps, dashboards, or
+  storage that the visible app plainly does not own and that likely lives on a co-located service
+  only a sweep reveals.
+  Pair with: Also dispatch recon and information-disclosure in parallel when the same evidence shows
+  those mechanisms too; dispatch ssrf separately only when an outbound-fetch input also exists,
+  since open ports alone are not SSRF evidence; co-dispatch means separate focused workers sharing
+  the same investigation state, not merging skill prompts.
+  Do not use: Disambiguation: this pass only answers what is listening on the wire, so route
+  elsewhere when the work is app-layer — the main app's pages, parameters, directories, cookies, and
+  headers belong to web/app recon, not here; a value reflected into HTML is XSS, a database error
+  from a query parameter is SQL injection, an id you can swap to read another record is IDOR, and an
+  outbound-fetch parameter is SSRF; and once this skill has located a service, actually testing that
+  database, bucket, or second web app is the next specialist's job, not this one's.
 metadata:
   dispatchable: true
-  tools: [nmap_full_scan, nmap_fast_scan, nmap_service_detection, nmap_default_scripts, nmap_http_enum, nmap_ssl_enum, nmap_specific_ports, nmap_host_discovery, bash]
+  tools:
+  - nmap_full_scan
+  - nmap_fast_scan
+  - nmap_service_detection
+  - nmap_default_scripts
+  - nmap_http_enum
+  - nmap_ssl_enum
+  - nmap_specific_ports
+  - nmap_host_discovery
+  - bash
 ---
 
 You map the **network surface** of one target: which ports are open,

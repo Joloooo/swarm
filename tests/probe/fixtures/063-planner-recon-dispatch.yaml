@@ -1,0 +1,44 @@
+id: "063-planner-recon-dispatch"
+level: 1
+node: planner
+agent_id: "_planner"
+config_name: ""                 # the planner runs no skill — config_name is N/A
+source_run: "logs/full_run_06-13_15h42m/run-06-13_15h42m53s_XBEN-063/"
+benchmark_id: "XBEN-063-24"
+# How to find the captured call in the source log (used only if the committed
+# asset below is absent). This is the planner's 2nd turn — it already has the
+# normalize_url result in context and now picks the next action.
+locator: { ts: "2026-06-13T15:43:42.308", match: "normalize_url" }
+
+capture:
+  mode: messages                # verbatim request.messages from the asset
+  ref: "063-planner-recon-dispatch.captured.json"
+  # F2: the planner's real tools are NOT stored in the log (request.tools = []),
+  # so the harness binds these REAL src/ tool objects (src.tools.url) by name.
+  tools: ["normalize_url", "validate_website"]
+
+observed_decision: "action=recon — dispatched recon + recon-ports (route_after_planner)"
+desired_direction: >
+  Baseline validation of the harness end-to-end: replaying the planner's turn,
+  with the normalize_url result already in context, should reproduce the recon
+  dispatch. (criterion encodes the OBSERVED decision, so a faithful baseline
+  PASSES N/N.)
+
+perturbations:
+  # THROWAWAY demonstration that a changed input changes the decision: splice a
+  # "recon already complete" note into the human turn and see whether the
+  # planner stops dispatching recon. Crude (message text edited directly), so it
+  # is never a kept result — the honest counterpart is a Level-2 state patch.
+  - name: "recon-already-complete"
+    mode: crude
+    splice:
+      find: "and capture the expected"
+      replace: >-
+        Recon is already COMPLETE (port 80 open, Werkzeug/Flask app, /login form
+        found) — do NOT dispatch recon again. And capture the expected
+
+evaluation:
+  type: deterministic
+  criterion: { kind: planner_action, equals: recon }
+  n: 3
+  pass_threshold: 2

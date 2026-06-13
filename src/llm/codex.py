@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
+import os
 import re
 import time
 from contextlib import aclosing, closing
@@ -38,6 +40,220 @@ CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
 AUTH_ISSUER = "https://auth.openai.com"
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 DEFAULT_CODEX_HOME = Path.home() / ".codex"
+
+_OPTIONAL_CACHE_REQUEST_KEYS = {"prompt_cache_retention", "prompt_cache_key"}
+_UNSUPPORTED_OPTIONAL_REQUEST_KEYS: set[str] = set()
+
+# Process-stable nonce folded into every prompt_cache_key. Two
+# SwarmAttacker sessions started in the same second against the same
+# benchmark would otherwise share a ``run_id`` (it is only timestamped to
+# the second), collide on the cache key, and evict each other's prefixes
+# on the backend. The pid differs between the two processes, so their keys
+# never collide. Stable for the life of the process, so it does not break
+# the within-session reuse the key exists to create.
+_PROCESS_CACHE_NONCE = f"p{os.getpid()}"
+
+# ``SWARM_CODEX_PROMPT_CACHE_KEY`` words that turn the per-conversation key
+# ON (no prefix). Any OTHER non-empty value is treated as an explicit
+# namespace prefix (which also turns it on). Everything else — unset, empty,
+# or an explicit disable word — leaves it OFF.
+_CACHE_KEY_ENABLE_WORDS = {"auto", "on", "1", "true", "yes", "enable", "enabled"}
+_CACHE_KEY_DISABLE_WORDS = {"off", "none", "0", "false", "no", "disable", "disabled"}
+
+
+def _resolve_prompt_cache_key(
+    override: str | None,
+    run_id: str | None,
+    agent_id: str | None,
+) -> str | None:
+    """Compute the per-conversation ``prompt_cache_key`` for one call.
+
+    On the standard OpenAI platform API, requests carrying the same
+    ``prompt_cache_key`` route to the same backend instance, so a worker's
+    growing prefix (and its ``__summary`` replay) stays pinned to one
+    instance's prefix cache instead of scattering and missing. This computes
+    such a key from ``(run_id, process, base agent_id)`` so that:
+
+    - every call a single worker makes shares one key;
+    - a worker's summariser call (``agent_id == "<worker>__summary"``)
+      resolves to the *worker's* key (the ``__summary`` suffix is stripped);
+    - two concurrent SwarmAttacker sessions never collide — different
+      ``run_id`` *and* pid keep their identical-looking ``recon`` prefixes on
+      separate keys.
+
+    OFF BY DEFAULT — and that is deliberate. The ChatGPT Codex subscription
+    backend (``chatgpt.com/backend-api/codex``) ACCEPTS ``prompt_cache_key``
+    (no 400, unlike ``prompt_cache_retention``) but does NOT honour it for
+    routing: a controlled paired probe (``tests/live/probe_prompt_cache.py``)
+    measured keyed vs un-keyed reuse at 51 % vs 58 % — no gain, slightly
+    negative within noise. So we leave it off unless explicitly enabled, to
+    avoid changing behaviour based on a parameter this backend ignores. The
+    plumbing stays so the probe can re-test if the backend ever starts
+    honouring it, or if a platform-API path (where it works) is added.
+
+    ``override`` is the raw ``SWARM_CODEX_PROMPT_CACHE_KEY`` value:
+
+    - unset / empty / a disable word (off / none / 0 / false / no /
+      disabled) -> ``None`` (no key — the default, == legacy behaviour);
+    - an enable word (auto / on / 1 / true / yes) -> auto key, no prefix;
+    - any other literal -> auto key namespaced under that literal prefix.
+
+    Returns ``None`` when keying is on but there is no identity to key on
+    (e.g. a direct ``_generate`` call in a unit test that bypasses LangChain
+    metadata): a constant key would wrongly pin unrelated calls together.
+    """
+    if not override:
+        return None
+    cleaned = override.strip()
+    low = cleaned.lower()
+    if not cleaned or low in _CACHE_KEY_DISABLE_WORDS:
+        return None
+    prefix = None if low in _CACHE_KEY_ENABLE_WORDS else cleaned
+
+    base = (agent_id or "").removesuffix("__summary").strip() or None
+    if not run_id and not base:
+        return None
+
+    key = f"{run_id or 'norun'}:{_PROCESS_CACHE_NONCE}:{base or 'noagent'}"
+    if prefix:
+        key = f"{prefix}:{key}"
+    return key
+
+
+def _stable_hash(value: Any) -> str:
+    """Short hash for comparing large request sections across logs."""
+    if isinstance(value, str):
+        raw = value
+    else:
+        raw = json.dumps(value, default=str, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _input_roles(input_items: list[dict]) -> dict[str, int]:
+    roles: dict[str, int] = {}
+    for item in input_items:
+        role = str(item.get("role") or item.get("type") or "?")
+        roles[role] = roles.get(role, 0) + 1
+    return roles
+
+
+def _tool_name(tool: dict) -> str:
+    if not isinstance(tool, dict):
+        return str(tool)[:80]
+    if tool.get("name"):
+        return str(tool.get("name"))
+    fn = tool.get("function")
+    if isinstance(fn, dict) and fn.get("name"):
+        return str(fn.get("name"))
+    return str(tool.get("type") or "?")
+
+
+def _request_cache_shape(body: dict[str, Any]) -> dict[str, Any]:
+    input_items = list(body.get("input") or [])
+    tools = list(body.get("tools") or [])
+    instructions = str(body.get("instructions") or "")
+    input_chars = len(json.dumps(input_items, default=str, ensure_ascii=False))
+    tools_chars = len(json.dumps(tools, default=str, ensure_ascii=False))
+    return {
+        "model": body.get("model"),
+        "body_keys": sorted(body.keys()),
+        "store": body.get("store"),
+        "stream": body.get("stream"),
+        "include": body.get("include") or [],
+        "instructions_chars": len(instructions),
+        "instructions_sha256": _stable_hash(instructions),
+        "input_items": len(input_items),
+        "input_roles": _input_roles(input_items),
+        "input_chars": input_chars,
+        "input_sha256": _stable_hash(input_items),
+        "tools_count": len(tools),
+        "tool_names": [_tool_name(t) for t in tools[:80]],
+        "tools_chars": tools_chars,
+        "tools_sha256": _stable_hash(tools),
+        "tool_choice": body.get("tool_choice"),
+        "reasoning": body.get("reasoning") or {},
+        "prompt_cache_key": body.get("prompt_cache_key"),
+        "prompt_cache_retention": body.get("prompt_cache_retention"),
+    }
+
+
+def _write_cache_shape_log(
+    context: dict[str, Any] | None,
+    body: dict[str, Any],
+    *,
+    event: str = "codex_request_shape",
+    note: str = "",
+) -> None:
+    """Persist the real Responses-API request shape for cache debugging."""
+    shape = _request_cache_shape(body)
+    ctx = dict(context or {})
+    run_id = ctx.get("run_id")
+    try:
+        from src.observability.writers import append_event
+
+        append_event(
+            run_id,
+            event,
+            agent_id=ctx.get("agent_id") or "",
+            node=ctx.get("node") or "",
+            lc_run_id=str(ctx.get("lc_run_id") or ""),
+            note=note,
+            cache_shape=shape,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from src.observability.writers import write_terminal_line
+
+        reasoning = shape.get("reasoning") or {}
+        write_terminal_line(
+            "[llm-cache-shape] "
+            f"agent={ctx.get('agent_id') or '?'} "
+            f"node={ctx.get('node') or '?'} "
+            f"model={shape.get('model') or '?'} "
+            f"keys={','.join(shape.get('body_keys') or [])} "
+            f"instr={shape.get('instructions_chars')}:{shape.get('instructions_sha256')} "
+            f"input_items={shape.get('input_items')} "
+            f"input_chars={shape.get('input_chars')}:{shape.get('input_sha256')} "
+            f"tools={shape.get('tools_count')}:{shape.get('tools_sha256')} "
+            f"tool_choice={shape.get('tool_choice') or '-'} "
+            f"reasoning_effort={reasoning.get('effort') or '-'} "
+            f"reasoning_summary={reasoning.get('summary') or '-'} "
+            f"cache_retention={shape.get('prompt_cache_retention') or '-'} "
+            f"cache_key={shape.get('prompt_cache_key') or '-'}"
+            + (f" note={note}" if note else "")
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _log_removed_request_key(
+    context: dict[str, Any] | None,
+    body: dict[str, Any],
+    *,
+    key: str,
+    error_text: str,
+) -> None:
+    if key in _OPTIONAL_CACHE_REQUEST_KEYS:
+        _UNSUPPORTED_OPTIONAL_REQUEST_KEYS.add(key)
+    note = f"removed unsupported request key {key}"
+    try:
+        from src.observability.writers import append_event
+
+        ctx = dict(context or {})
+        append_event(
+            ctx.get("run_id"),
+            "codex_request_key_removed",
+            agent_id=ctx.get("agent_id") or "",
+            node=ctx.get("node") or "",
+            lc_run_id=str(ctx.get("lc_run_id") or ""),
+            removed_key=key,
+            error_excerpt=error_text[:500],
+            cache_shape=_request_cache_shape(body),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    _write_cache_shape_log(context, body, event="codex_request_shape", note=note)
 
 
 # --- Token management ---
@@ -203,6 +419,9 @@ def stream_codex(
     max_output_tokens: int | None = None,
     reasoning_effort: str | None = None,
     reasoning_summary: str | None = None,
+    prompt_cache_retention: str | None = None,
+    prompt_cache_key: str | None = None,
+    cache_log_context: dict[str, Any] | None = None,
     timeout: float = 240.0,
 ) -> Iterator[dict[str, Any]]:
     """Stream SSE events from the Codex Responses API.
@@ -237,6 +456,18 @@ def stream_codex(
         body["temperature"] = temperature
     if max_output_tokens is not None:
         body["max_output_tokens"] = max_output_tokens
+    if (
+        prompt_cache_retention
+        and "prompt_cache_retention" not in _UNSUPPORTED_OPTIONAL_REQUEST_KEYS
+    ):
+        body["prompt_cache_retention"] = prompt_cache_retention
+    if (
+        prompt_cache_key
+        and "prompt_cache_key" not in _UNSUPPORTED_OPTIONAL_REQUEST_KEYS
+    ):
+        body["prompt_cache_key"] = prompt_cache_key
+
+    _write_cache_shape_log(cache_log_context, body)
 
     headers = {
         "Authorization": f"Bearer {tokens.access_token}",
@@ -252,6 +483,7 @@ def stream_codex(
     # gracefully fall back instead of erroring.
     removable_keys = [
         "temperature", "max_output_tokens", "tool_choice", "reasoning",
+        "prompt_cache_retention", "prompt_cache_key",
     ]
 
     try:
@@ -267,6 +499,12 @@ def stream_codex(
                                 logger.debug("Removing unsupported param '%s' and retrying", key)
                                 del body[key]
                                 removable_keys.remove(key)
+                                _log_removed_request_key(
+                                    cache_log_context,
+                                    body,
+                                    key=key,
+                                    error_text=resp.text,
+                                )
                                 removed = True
                                 break
                         if removed:
@@ -305,6 +543,9 @@ async def astream_codex(
     max_output_tokens: int | None = None,
     reasoning_effort: str | None = None,
     reasoning_summary: str | None = None,
+    prompt_cache_retention: str | None = None,
+    prompt_cache_key: str | None = None,
+    cache_log_context: dict[str, Any] | None = None,
     timeout: float = 240.0,
 ) -> Any:
     """Async stream SSE events from the Codex Responses API.
@@ -331,6 +572,18 @@ async def astream_codex(
         body["temperature"] = temperature
     if max_output_tokens is not None:
         body["max_output_tokens"] = max_output_tokens
+    if (
+        prompt_cache_retention
+        and "prompt_cache_retention" not in _UNSUPPORTED_OPTIONAL_REQUEST_KEYS
+    ):
+        body["prompt_cache_retention"] = prompt_cache_retention
+    if (
+        prompt_cache_key
+        and "prompt_cache_key" not in _UNSUPPORTED_OPTIONAL_REQUEST_KEYS
+    ):
+        body["prompt_cache_key"] = prompt_cache_key
+
+    _write_cache_shape_log(cache_log_context, body)
 
     headers = {
         "Authorization": f"Bearer {tokens.access_token}",
@@ -342,6 +595,7 @@ async def astream_codex(
 
     removable_keys = [
         "temperature", "max_output_tokens", "tool_choice", "reasoning",
+        "prompt_cache_retention", "prompt_cache_key",
     ]
 
     try:
@@ -357,6 +611,12 @@ async def astream_codex(
                                 logger.debug("Removing unsupported param '%s' and retrying", key)
                                 del body[key]
                                 removable_keys.remove(key)
+                                _log_removed_request_key(
+                                    cache_log_context,
+                                    body,
+                                    key=key,
+                                    error_text=resp.text,
+                                )
                                 removed = True
                                 break
                         if removed:
@@ -1095,6 +1355,18 @@ class ChatCodex(BaseChatModel):
     # by get_llm() in src/llm/provider.py.
     reasoning_effort: str | None = None
     reasoning_summary: str | None = None
+    # Optional OpenAI Responses prompt-cache controls. The ChatGPT Codex
+    # backend may reject these; the streaming layer removes unsupported
+    # optional keys on 400 and records the removal in the run logs.
+    prompt_cache_retention: str | None = None
+    # NOTE: this is NOT sent verbatim. It is the raw
+    # ``SWARM_CODEX_PROMPT_CACHE_KEY`` override; the effective per-call key
+    # is computed from it plus (run_id, pid, base agent_id) by
+    # ``_resolve_prompt_cache_key`` in ``_generate`` / ``_agenerate``.
+    # Default ``None`` (and any disable word) means NO key — the Codex
+    # subscription backend ignores the key for routing (measured), so it is
+    # opt-in via ``SWARM_CODEX_PROMPT_CACHE_KEY=auto``. See the resolver.
+    prompt_cache_key: str | None = None
     # Per-call httpx timeout (seconds). Set by ``get_llm`` from
     # ``config.budgets.llm_call_timeout_s``; flows through
     # ``_build_request_kwargs`` into stream_codex / astream_codex. Default 240
@@ -1193,6 +1465,12 @@ class ChatCodex(BaseChatModel):
             kwargs["reasoning_effort"] = self.reasoning_effort
         if self.reasoning_summary:
             kwargs["reasoning_summary"] = self.reasoning_summary
+        if self.prompt_cache_retention:
+            kwargs["prompt_cache_retention"] = self.prompt_cache_retention
+        # ``prompt_cache_key`` is intentionally NOT set here — it depends on
+        # the call's run_id / agent_id, which live in the run_manager
+        # metadata, not on the model instance. ``_generate`` / ``_agenerate``
+        # compute it via ``_resolve_prompt_cache_key`` and set it on ``req``.
         # Per-call timeout -> stream_codex / astream_codex's httpx client.
         kwargs["timeout"] = self.request_timeout_s
         # Note: temperature and max_tokens are not always supported by the
@@ -1220,6 +1498,25 @@ class ChatCodex(BaseChatModel):
         # the parent. See ``_build_reasoning_sink`` docstring.
         agent_id, lc_run_id = _identity_from_run_manager(run_manager)
         reasoning_sink = _build_reasoning_sink(agent_id, lc_run_id)
+        meta = getattr(run_manager, "metadata", None) or {}
+        cache_log_context = {
+            "run_id": meta.get("run_id"),
+            "agent_id": agent_id,
+            "node": meta.get("node"),
+            "lc_run_id": lc_run_id,
+        }
+        # Pin this conversation's calls (worker turns + its summariser call)
+        # to one backend cache instance. Without it the backend scatters a
+        # worker's growing prefix across instances and most calls miss; see
+        # ``_resolve_prompt_cache_key``. The streaming layer still drops the
+        # key on a 400, so a backend that rejects it degrades gracefully.
+        cache_key = _resolve_prompt_cache_key(
+            self.prompt_cache_key, meta.get("run_id"), agent_id,
+        )
+        if cache_key:
+            req["prompt_cache_key"] = cache_key
+        else:
+            req.pop("prompt_cache_key", None)
 
         for attempt in range(MAX_API_ATTEMPTS):
             try:
@@ -1233,7 +1530,13 @@ class ChatCodex(BaseChatModel):
                 # the next line, but PyPy / cycle-creating callbacks
                 # could defer that to GC. See ``_agenerate`` for the
                 # async-path counterpart where this is not optional.
-                with closing(stream_codex(tokens, **req)) as events:
+                with closing(
+                    stream_codex(
+                        tokens,
+                        **req,
+                        cache_log_context=cache_log_context,
+                    )
+                ) as events:
                     resp = parse_stream_to_response(
                         events, on_reasoning_delta=reasoning_sink,
                     )
@@ -1309,6 +1612,25 @@ class ChatCodex(BaseChatModel):
         # ``run_manager`` here instead of from a ContextVar.
         agent_id, lc_run_id = _identity_from_run_manager(run_manager)
         reasoning_sink = _build_reasoning_sink(agent_id, lc_run_id)
+        meta = getattr(run_manager, "metadata", None) or {}
+        cache_log_context = {
+            "run_id": meta.get("run_id"),
+            "agent_id": agent_id,
+            "node": meta.get("node"),
+            "lc_run_id": lc_run_id,
+        }
+        # Pin this conversation's calls (worker turns + its summariser call)
+        # to one backend cache instance. Without it the backend scatters a
+        # worker's growing prefix across instances and most calls miss; see
+        # ``_resolve_prompt_cache_key``. The streaming layer still drops the
+        # key on a 400, so a backend that rejects it degrades gracefully.
+        cache_key = _resolve_prompt_cache_key(
+            self.prompt_cache_key, meta.get("run_id"), agent_id,
+        )
+        if cache_key:
+            req["prompt_cache_key"] = cache_key
+        else:
+            req.pop("prompt_cache_key", None)
 
         for attempt in range(MAX_API_ATTEMPTS):
             try:
@@ -1331,7 +1653,13 @@ class ChatCodex(BaseChatModel):
                 # exit path (success, exception, break) so the httpx
                 # contexts unwind on the same task that opened them,
                 # while the loop is still healthy.
-                async with aclosing(astream_codex(tokens, **req)) as events:
+                async with aclosing(
+                    astream_codex(
+                        tokens,
+                        **req,
+                        cache_log_context=cache_log_context,
+                    )
+                ) as events:
                     resp = await aparse_stream_to_response(
                         events, on_reasoning_delta=reasoning_sink,
                     )

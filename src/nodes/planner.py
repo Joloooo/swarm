@@ -2081,6 +2081,12 @@ def _env_int(name: str, default: int) -> int:
 
 _HANDOFF_OVERFLOW_LIMIT = max(0, _env_int("SWARM_HANDOFF_OVERFLOW_LIMIT", 2))
 _HANDOFF_MAX_CONFIGS = max(1, _env_int("SWARM_HANDOFF_MAX_CONFIGS", 6))
+# How many hypothesis-driven configs the dispatch floor guarantees per
+# attack turn (the belief-driven "reserve"). The rest of the fan-out stays
+# the planner's own exploration picks — kept deliberately so a right-but-
+# unranked class can still surface (the synthesis ranking is not yet
+# trustworthy enough to dispatch top-K blind; see the 092 post-mortem).
+_HYPOTHESIS_FLOOR_LIMIT = max(0, _env_int("SWARM_HYPOTHESIS_FLOOR", 3))
 
 _HANDOFF_TECHNIQUE_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("sqli", ("sql", "union", "boolean", "time-based", "database", "query")),
@@ -2383,6 +2389,125 @@ def _attach_skill_handoff_context(
             if prior else "\n\n".join(blocks)
         )
     return routed_keys
+
+
+def _refuted_classes(state: SwarmGraphState) -> set[str]:
+    """Vuln classes the swarm has REFUTED everywhere (idea: "it is not me").
+
+    A class is net-refuted when it has a ``refuted`` hypothesis and NO
+    live ``committed``/``supported``/``confirmed`` one on any surface — i.e.
+    every probe of that class came back "not here". Those are dropped from
+    the planner's picks so it stops re-dispatching a class its own workers
+    disowned. Scoped conservatively (net, across all surfaces) so a
+    refutation on one endpoint never suppresses a live lead on another.
+    """
+    refuted: set[str] = set()
+    live: set[str] = set()
+    for h in (state.get("hypotheses") or []):
+        cls = (getattr(h, "vuln_class", "") or "").strip().lower()
+        st = getattr(h, "state", "")
+        if st == "refuted":
+            refuted.add(cls)
+        elif st in ("committed", "supported", "confirmed"):
+            live.add(cls)
+    return refuted - live
+
+
+def _ensure_hypothesis_floor(
+    decision: dict, state: SwarmGraphState,
+) -> list:
+    """Enforce belief-driven dispatch in CODE, not prose.
+
+    Two effects on the planner's chosen ``configs`` for an attack turn:
+
+    1. **Drop net-refuted classes** (:func:`_refuted_classes`) — the
+       owning skill said "it is not me", so stop re-dispatching it.
+    2. **Inject the top committed/supported hypotheses' required skills**
+       (committed first, then by priority), up to
+       ``_HYPOTHESIS_FLOOR_LIMIT`` and the shared ``_HANDOFF_MAX_CONFIGS``
+       cap — guaranteeing the highest-belief leads actually run instead of
+       relying on the planner to obey the advisory directive.
+
+    The remaining slots stay the planner's own exploration picks (the
+    reserve). Returns the hypotheses represented this turn so their
+    deciding-probe context can be attached to the dispatch.
+    """
+    if decision.get("action") != "attack":
+        return []
+    raw_configs = decision.get("configs") or []
+    if not isinstance(raw_configs, list):
+        raw_configs = []
+    configs = [str(c).strip() for c in raw_configs if str(c).strip()]
+
+    refuted = _refuted_classes(state)
+    if refuted:
+        configs = [c for c in configs if c.lower() not in refuted]
+
+    dispatchable = {name for name, _ in list_dispatchable_skills()}
+    candidates = [
+        h for h in (state.get("hypotheses") or [])
+        if getattr(h, "state", "") in ("committed", "supported")
+        and ((getattr(h, "required_skill", "") or getattr(h, "vuln_class", ""))
+             .strip().lower() in dispatchable)
+    ]
+    candidates.sort(key=lambda h: (
+        0 if getattr(h, "state", "") == "committed" else 1,
+        -int(getattr(h, "priority", 0)),
+    ))
+
+    selected = {c.lower() for c in configs}
+    represented: list = []
+    added = 0
+    for h in candidates:
+        skill = (getattr(h, "required_skill", "")
+                 or getattr(h, "vuln_class", "")).strip().lower()
+        if skill in selected:
+            represented.append(h)  # planner already chose it — attach context
+            continue
+        if added >= _HYPOTHESIS_FLOOR_LIMIT or len(configs) >= _HANDOFF_MAX_CONFIGS:
+            continue
+        configs.append(skill)
+        selected.add(skill)
+        represented.append(h)
+        added += 1
+
+    decision["configs"] = configs
+    return represented
+
+
+def _attach_hypothesis_context(pending: list[dict], hyps: list) -> None:
+    """Append each hypothesis's deciding probe to its matching dispatch
+    reason, so a worker dispatched to advance a hypothesis knows the exact
+    surface + technique to test and is reminded to return a VERDICT."""
+    if not pending or not hyps:
+        return
+    by_skill: dict[str, list] = {}
+    for h in hyps:
+        skill = (getattr(h, "required_skill", "")
+                 or getattr(h, "vuln_class", "")).strip().lower()
+        by_skill.setdefault(skill, []).append(h)
+
+    for item in pending:
+        skill = str(item.get("config_name") or "").strip().lower()
+        matches = by_skill.get(skill) or []
+        if not matches:
+            continue
+        blocks: list[str] = []
+        for h in matches[:2]:
+            blocks.append("\n".join([
+                "Hypothesis to advance (supervisor belief):",
+                f"- class: {getattr(h, 'vuln_class', '')}",
+                f"- surface: {getattr(h, 'surface', '') or '(target-wide)'}",
+                f"- state: {getattr(h, 'state', '')} "
+                f"(confidence {getattr(h, 'confidence', 0.0):.0%})",
+                f"- deciding probe: {getattr(h, 'required_technique', '') or 'confirm or refute this class here'}",
+                "- On exit, return a VERDICT (confirmed/refuted/inconclusive) "
+                "for this class + surface so the supervisor can recalibrate.",
+            ]))
+        prior = str(item.get("dispatch_reason") or "").strip()
+        item["dispatch_reason"] = (
+            prior + "\n\n" + "\n\n".join(blocks) if prior else "\n\n".join(blocks)
+        )
 
 
 def _tool_coverage_note(state: SwarmGraphState) -> str | None:
@@ -3420,6 +3545,22 @@ class PlannerNode(BaseNode):
                 if validated_summary is not None
                 else state.get("relevant_summary")
             )
+            # Belief-driven dispatch floor (enforced in code): drop
+            # net-refuted classes and guarantee the top committed/supported
+            # hypotheses' required skills run. Applied FIRST, against the
+            # planner's raw picks — fresh handoff evidence below may still
+            # re-add a class this dropped.
+            hypothesis_claims = _ensure_hypothesis_floor(decision, state)
+            if hypothesis_claims:
+                self.log.info(
+                    "hypothesis floor represented: %s",
+                    ", ".join(
+                        f"{getattr(h, 'vuln_class', '')}@"
+                        f"{getattr(h, 'surface', '') or '*'}"
+                        f"({getattr(h, 'state', '')})"
+                        for h in hypothesis_claims
+                    ),
+                )
             handoff_claims = _ensure_skill_handoff_floor(decision, state)
             if handoff_claims:
                 self.log.info(
@@ -3441,6 +3582,7 @@ class PlannerNode(BaseNode):
             routed_handoff_keys = _attach_skill_handoff_context(
                 pending, handoff_claims
             )
+            _attach_hypothesis_context(pending, hypothesis_claims)
             if not pending:
                 self.log.warning(
                     "planner: action=attack but no runnable configs after "

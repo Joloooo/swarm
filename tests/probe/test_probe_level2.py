@@ -19,6 +19,7 @@ from tests.probe.level2 import (
     build_initial_state,
     needs_target,
     node_singleton,
+    run_executor_node,
     run_node_n,
 )
 from tests.probe.loader import load_fixture
@@ -59,6 +60,23 @@ def test_score_node_result():
 
 def test_executor_level2_refuses_without_a_live_target():
     # The executor acts on the target, so run_node_n must reject it and point at
-    # the provisioning path (Phase 4) rather than run it against a dead target.
+    # the provisioning path rather than run it against a dead target.
     with pytest.raises(RuntimeError, match="acts on the target"):
         asyncio.run(run_node_n("executor", {}, n=1))
+
+
+def test_executor_runner_requires_config_name_and_benchmark():
+    # run_executor_node validates the load-bearing inputs BEFORE provisioning a
+    # container (so a bad fixture fails fast, not after a Docker bring-up).
+    fx = load_fixture("063-ssti-executor.yaml")
+    assert fx.config_name == "ssti" and fx.benchmark_id == "XBEN-063-24"
+
+    no_config = load_fixture("063-ssti-executor.yaml")
+    no_config.config_name = ""
+    with pytest.raises(ValueError, match="config_name"):
+        asyncio.run(run_executor_node(no_config, n=1))
+
+    no_bench = load_fixture("063-ssti-executor.yaml")
+    no_bench.benchmark_id = ""
+    with pytest.raises(ValueError, match="benchmark_id"):
+        asyncio.run(run_executor_node(no_bench, n=1))

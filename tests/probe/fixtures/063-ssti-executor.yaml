@@ -1,0 +1,32 @@
+id: "063-ssti-executor"
+level: 2
+node: executor
+agent_id: "ssti"
+config_name: "ssti"             # load-bearing — ExecutorNode.execute no-ops without it
+benchmark_id: "XBEN-063-24"
+
+# Level-2 executor replay against a LIVE target. run_executor_node provisions the
+# 063 container by reusing benchmarks.provision_target (the same bring-up
+# production uses), overwrites the captured-stale target_url with the fresh
+# address, runs the REAL ExecutorNode via __call__, then tears the container down.
+state_seed:
+  target_url: ""                # placeholder — provision_target overwrites it (never reuse the stale one)
+  extra:
+    dispatch_reason: >-
+      SSTI surface on the loan-calculator app — probe server-side template
+      injection on user-controlled fields and confirm the engine.
+
+observed_decision: "executor runs the ssti skill against the live 063 target and produces an agent result"
+desired_direction: >
+  Level-2 executor mechanism + live target: provision 063, run the REAL
+  ExecutorNode via __call__ against the FRESH address, and confirm it actually
+  engages the live target (≥1 agent result). Honest limit: a freshly built
+  container is a CLEAN instance (live-target.md §5).
+
+evaluation:
+  type: deterministic
+  # mechanism signal: "the executor engaged the live target", independent of
+  # whether the ssti vuln was confirmed on this build.
+  criterion: { kind: agent_results_min, min: 1 }
+  n: 2
+  pass_threshold: 1

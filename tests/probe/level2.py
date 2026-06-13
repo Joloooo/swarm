@@ -113,3 +113,48 @@ async def run_node_n(node_name: str, state: dict, *, n: int = 3) -> list[dict]:
         reset_process_state()
         out.append(await run_node_once(node_name, state))
     return out
+
+
+async def run_executor_node(fixture: Fixture, *, n: int = 2) -> list[dict]:
+    """Level-2 EXECUTOR replay against a LIVE target.
+
+    The executor acts on the world, so a faithful replay needs the benchmark
+    container up. We provision it by REUSING ``benchmarks.provision_target`` — the
+    exact bring-up production uses (build → loopback lease → port override →
+    bridge/loopback URL → flag set) — overwrite the captured-STALE ``target_url``
+    with the fresh address (reusing the old one replays a connection failure, not
+    reasoning — live-target.md §3), run the real ``ExecutorNode`` via ``__call__``
+    N times against the live target, and tear the container down on exit.
+
+    ``config_name`` is load-bearing: ``ExecutorNode.execute`` no-ops without the
+    skill identity. Note the honest limit: a freshly built container is a CLEAN
+    instance, so a decision that depended on a mid-run mutation is replayed against
+    a target that never saw it (live-target.md §5).
+    """
+    if not fixture.config_name:
+        raise ValueError(
+            "executor Level-2 needs fixture.config_name (the skill the executor "
+            "runs) — ExecutorNode.execute no-ops without it."
+        )
+    if not fixture.benchmark_id:
+        raise ValueError("executor Level-2 needs fixture.benchmark_id to provision a target.")
+
+    from benchmarks.provision import provision_target
+
+    results: list[dict] = []
+    async with provision_target(fixture.benchmark_id) as tgt:
+        state = build_initial_state(fixture)
+        state["config_name"] = fixture.config_name
+        # Overwrite the captured-stale address with the freshly provisioned one;
+        # refresh the flag set too (it is rebaked per build).
+        state["target_url"] = tgt.target_url
+        state["target_scope"] = tgt.target_scope
+        state["expected_flag"] = tgt.expected_flag
+        state["expected_flag_candidates"] = tgt.expected_flag_candidates
+        for _ in range(n):
+            # Critical between samples: clear the captured-flag global so a capture
+            # in sample K does not cancel sample K+1's first call. The executor's
+            # own ``finally`` tears down its shell session.
+            reset_process_state()
+            results.append(await run_node_once("executor", state))
+    return results

@@ -1,0 +1,93 @@
+id: "063-planner-ssti-dispatch"
+level: 1
+node: planner
+agent_id: "_planner"
+config_name: ""                 # the planner runs no skill — config_name is N/A
+source_run: "logs/full_run_06-13_23h46m/run-06-13_23h46m15s_XBEN-063/"
+benchmark_id: "XBEN-063-24"
+# Planner call at full_logs line 628 (ts 00:08:40). By this turn BOTH
+# input-validation dispatches are done. The real run never dispatched ssti — it
+# stayed anchored on the auth/session path to the token. 063's flag path IS ssti
+# (Jinja-built JSON + a blacklist/regex filter); the ssti specialist was never
+# dispatched in any wave.
+locator: { ts: "2026-06-14T00:08:40.180", match: "attack" }
+
+capture:
+  mode: messages                # verbatim request.messages from the asset
+  ref: "063-planner-ssti-dispatch.captured.json"
+  # F2: planner tools aren't in the log; bind the REAL src/ tool objects by name.
+  tools: ["normalize_url", "validate_website"]
+
+observed_decision: >
+  action=attack — dispatches auth-testing + recon + idor/sqli/business-logic/
+  input-validation/csrf across samples; `ssti` is NEVER in configs. CONTROL
+  reproduced this 0/5 (run_063_planner_ssti.py).
+
+desired_direction: >
+  The planner should dispatch the `ssti` specialist on the calculator endpoint
+  that transforms + reflects submitted values into its response.
+
+  ===== A/B LADDER RESULT (run_063_planner_ssti.py, n=5, real model) — a CLEAN
+  WIN that localizes the fix =====
+    CONTROL        ssti-dispatched 0/5   (anchored on auth/session)
+    PROMPT-NUDGE   ssti-dispatched 0/5   (a general planner sink-routing rule does nothing)
+    RESTORE-FACT   ssti-dispatched 0/5   (re-injecting the dropped reflected/filtered
+                                          raw fact is NOT enough on its own)
+    HYP-INJECT     ssti-dispatched 5/5   (surface ssti as an evidence-derived next
+                                          move + untried-skill entry)
+    RESTORE+HYP    ssti-dispatched 5/5
+
+  WHAT THIS PROVES. The planner is FAITHFUL to its curated hints, not to raw
+  facts or prompt rules. Diagnosis up the chain:
+    1. The SSTI tell is destroyed before the planner sees it. In this turn's full
+       context: template/jinja/reflect/blacklist/normaliz = 0 mentions. The
+       summarizer compressed the worker's "values normalized + rendered into the
+       response (term=١٢٣ -> "123", payment=1e309 -> inf) + principal blacklist"
+       down to "loan calculator logic flaws / parser inconsistencies".
+    2. The planner ALREADY has the rule ("a value reflected back into the response
+       is XSS or SSTI, not auth") in its system prompt — PROMPT-NUDGE adds more of
+       the same and changes nothing (0/5).
+    3. Restoring the raw fact (RESTORE-FACT) still loses 0/5: the curated
+       "evidence-derived next moves" + "untried suggested skills" notes are 100%
+       auth-anchored (every hint is auth-testing; one literally says "more
+       plausible than PHP deserialization"), and the planner follows those notes.
+    4. The ONLY thing that flips it (5/5) is surfacing ssti AS A HINT in those same
+       notes — symmetric to how the pipeline already maps the session cookie to an
+       auth-testing next-move.
+
+  IMPLIED FIX (the real engineering target, NOT shipped here): the worker-handoff
+  / summarizer stage that emits "evidence-derived next moves" and "untried
+  suggested skills" must map an endpoint that FILTERS input AND RENDERS a
+  transformed form of it into the response to an `ssti` next-move — the same
+  mechanism that currently maps the signed cookie to auth-testing. With that lead
+  present, the planner dispatches ssti reliably. (Worker-prompt and planner-prompt
+  fixes were both proven dead: see run_063_ssti_redirect.py 0/5->0/5 and
+  PROMPT-NUDGE/RESTORE-FACT 0/5 here.)
+
+  NON-OVERFIT: the injected hint is a mechanism-level CANDIDATE derived from
+  observed behavior ("consistent with a server-side template sink", "the deciding
+  ssti probe was never run on this surface") — it names no flag and never says
+  "the answer is ssti". The scorer checks ssti only because it is this surface's
+  correct co-located class.
+
+perturbations:
+  # The winning perturbation is HYP-INJECT (see run_063_planner_ssti.py for the
+  # exact evidence-move + untried-skill bullets it splices into the SYSTEM NOTE
+  # messages). Recorded here as the authoritative arm; the runner is the scorer.
+  - name: "hyp-inject (surface ssti as an evidence-derived/untried lead)"
+    mode: crude
+    splice:
+      find: "  • Top never-run suggested skills:"
+      replace: >-
+        • Top never-run suggested skills:
+              - ssti — template-injection deciding probe ({% %}/comment/alt-delimiter,
+              not just {{ }}) on the endpoint that reflects transformed input into its
+              response at GET /total_loan_payments principal/payment/term
+
+evaluation:
+  type: deterministic
+  # PASS = the parsed planner decision names the ssti skill in configs. CONTROL 0/5,
+  # HYP-INJECT 5/5. Authoritative scorer: run_063_planner_ssti.py (real _parse_decision).
+  criterion: { kind: regex, pattern: "ssti" }
+  n: 5
+  pass_threshold: 4

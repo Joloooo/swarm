@@ -51,6 +51,10 @@ def score_node_once(result: dict, criterion: dict) -> bool:
         ok = result.get("next_action") == criterion.get("equals")
     elif kind == "findings_min":
         ok = len(result.get("findings") or []) >= int(criterion.get("min", 1))
+    elif kind == "agent_results_min":
+        # "the executor actually engaged the live target" — robust mechanism
+        # signal independent of whether a vuln was found.
+        ok = len(result.get("agent_results") or []) >= int(criterion.get("min", 1))
     elif kind == "captured_flag":
         ok = bool(result.get("captured_flag")) or bool(result.get("flag_found"))
     else:

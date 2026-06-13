@@ -2085,9 +2085,40 @@ _HYPOTHESIS_FLOOR_LIMIT = max(0, _env_int("SWARM_HYPOTHESIS_FLOOR", 3))
 # target. Fewer, more-focused workers finish faster → the planner gets more
 # observation/replan cycles in the same wall-clock. The split is a SOFT
 # target: if one mode is short, the other backfills up to the cap; if there
-# are fewer than the cap total, all run (never force-filled to 6).
-_MAX_DISPATCH_PER_WAVE = max(1, _env_int("SWARM_MAX_DISPATCH", 6))
+# are fewer than the cap total, all run (never force-filled to the cap).
+#
+# The cap is TIME-PHASED off the same per-run wall clock the timeout countdown
+# uses (stamped at bench_start): for the first ``_DISPATCH_RAMP_S`` seconds the
+# tighter ``_MAX_DISPATCH_EARLY`` keeps early waves small so the picture forms
+# over more fast observe/replan cycles; after the ramp the cap opens up to
+# ``_MAX_DISPATCH_LATE`` for broader fan-out once promising leads exist. When
+# the run clock is unavailable (unit tests / decision replays) the late cap is
+# used, preserving the prior steady-state behaviour.
+_MAX_DISPATCH_LATE = max(1, _env_int("SWARM_MAX_DISPATCH", 6))
+_MAX_DISPATCH_EARLY = max(1, _env_int("SWARM_MAX_DISPATCH_EARLY", 4))
+_DISPATCH_RAMP_S = max(0, _env_int("SWARM_DISPATCH_RAMP_S", 600))
 _DISPATCH_MODE_HALF = max(1, _env_int("SWARM_DISPATCH_HALF", 3))
+
+
+def _current_dispatch_cap() -> int:
+    """Wave cap for the current point in the run: ``_MAX_DISPATCH_EARLY`` during
+    the first ``_DISPATCH_RAMP_S`` seconds, then ``_MAX_DISPATCH_LATE``.
+
+    Falls back to the late cap when the ramp is disabled, when early ≥ late, or
+    when the run clock has not been stamped (no benchmark in progress) — so
+    tests and decision replays keep the old single-cap behaviour.
+    """
+    if _DISPATCH_RAMP_S <= 0 or _MAX_DISPATCH_EARLY >= _MAX_DISPATCH_LATE:
+        return _MAX_DISPATCH_LATE
+    try:
+        from src.observability.live import run_elapsed_s
+
+        elapsed = run_elapsed_s()
+    except Exception:  # noqa: BLE001
+        elapsed = None
+    if elapsed is None:
+        return _MAX_DISPATCH_LATE
+    return _MAX_DISPATCH_EARLY if elapsed < _DISPATCH_RAMP_S else _MAX_DISPATCH_LATE
 
 _HANDOFF_TECHNIQUE_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("sqli", ("sql", "union", "boolean", "time-based", "database", "query")),
@@ -2562,8 +2593,8 @@ def _attach_hypothesis_context(pending: list[dict], hyps: list) -> None:
 
 
 def _balance_and_cap_dispatch(pending: list[dict]) -> list[dict]:
-    """Cap the wave at ``_MAX_DISPATCH_PER_WAVE`` with a soft prove/explore
-    split.
+    """Cap the wave at the current time-phased cap (see
+    :func:`_current_dispatch_cap`) with a soft prove/explore split.
 
     Aims for ~``_DISPATCH_MODE_HALF`` PROVE (hypothesis-driven) and
     ~``_DISPATCH_MODE_HALF`` EXPLORE workers, but flexes: if one mode is
@@ -2572,15 +2603,23 @@ def _balance_and_cap_dispatch(pending: list[dict]) -> list[dict]:
     cap just to fill it. PROVE items are those tagged by
     :func:`_attach_hypothesis_context`; everything else is EXPLORE.
     Original dispatch order is preserved.
+
+    The per-mode target is scaled down so it can never alone overflow a small
+    cap: with the early-phase cap of 4 it keeps ~2 PROVE + ~2 EXPLORE, not the
+    steady-state 3 + 3 (which would otherwise build 6 items before the cap
+    even applied). A final truncation guarantees the cap is never exceeded.
     """
-    if len(pending) <= _MAX_DISPATCH_PER_WAVE:
+    cap = _current_dispatch_cap()
+    if len(pending) <= cap:
         return pending
+    half = min(_DISPATCH_MODE_HALF, max(1, cap // 2))
     prove = [i for i in pending if i.get("mode") == "prove"]
     other = [i for i in pending if i.get("mode") != "prove"]
-    keep = prove[:_DISPATCH_MODE_HALF] + other[:_DISPATCH_MODE_HALF]
-    remaining = _MAX_DISPATCH_PER_WAVE - len(keep)
+    keep = prove[:half] + other[:half]
+    remaining = cap - len(keep)
     if remaining > 0:
-        keep += (prove[_DISPATCH_MODE_HALF:] + other[_DISPATCH_MODE_HALF:])[:remaining]
+        keep += (prove[half:] + other[half:])[:remaining]
+    keep = keep[:cap]
     keep_ids = {id(i) for i in keep}
     return [i for i in pending if id(i) in keep_ids]
 
@@ -3622,7 +3661,8 @@ class PlannerNode(BaseNode):
                 pending, handoff_claims
             )
             _attach_hypothesis_context(pending, hypothesis_claims)
-            # Soft 50/50 prove/explore balance + hard cap of 6 (see Step 4).
+            # Soft 50/50 prove/explore balance + time-phased hard cap
+            # (4 in the first 10 min, 6 after — see _current_dispatch_cap).
             pending = _balance_and_cap_dispatch(pending)
             _tag_explore_dispatches(pending)
             if not pending:

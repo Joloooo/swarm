@@ -355,10 +355,20 @@ def hypothesis_priority(
 
 def advance_hypothesis_state(
     *, prior: str, confidence: float, has_primitive: bool, action_tried: bool,
+    has_confirm: bool = False,
 ) -> str:
     """Belief-lifecycle transition. ``confirmed`` / ``refuted`` are sticky;
     ``nascent``/``supported``/``committed`` track confidence and may
     oscillate as evidence accrues or a probe comes back empty.
+
+    COMMIT is gated on a PROBE, not on priors. Routing-signal weights are
+    priors — circumstantial evidence that a class *might* be present — so
+    on their own they can lift a hypothesis to ``supported`` but never to
+    ``committed``. Only a probe confirmation (``has_confirm`` — an executor
+    returned a ``confirmed`` verdict) or a demonstrated primitive crosses
+    the line. This is what stops a hypothesis from reaching the
+    planner-locking ``committed`` state on framework-fingerprint-style
+    evidence alone (the 98%-SSTI-on-the-wrong-class failure).
     """
     prior = (prior or "").strip().lower()
     if prior in (HypothesisState.CONFIRMED.value, HypothesisState.REFUTED.value):
@@ -368,7 +378,7 @@ def advance_hypothesis_state(
     # A deciding probe was tried and belief did not hold up → refuted.
     if action_tried and confidence < REFUTE_CONFIDENCE:
         return HypothesisState.REFUTED.value
-    if confidence >= COMMIT_CONFIDENCE:
+    if confidence >= COMMIT_CONFIDENCE and has_confirm:
         return HypothesisState.COMMITTED.value
     if confidence >= SUPPORTED_CONFIDENCE:
         return HypothesisState.SUPPORTED.value
@@ -553,6 +563,7 @@ def synthesize_hypotheses(
                 b["logodds"] += ambient["logodds"]
                 b["support"].extend(ambient["support"])
                 b["contra"].extend(ambient["contra"])
+                b["has_confirm"] = b.get("has_confirm") or ambient.get("has_confirm", False)
 
     prior_by_key = {
         (h.vuln_class.strip().lower(), (h.surface or "").strip().lower()): h
@@ -571,6 +582,7 @@ def synthesize_hypotheses(
         state = advance_hypothesis_state(
             prior=prior_state, confidence=confidence,
             has_primitive=b["has_primitive"], action_tried=action_tried,
+            has_confirm=b.get("has_confirm", False),
         )
 
         skill, technique = _required_action(cls, b["support"])

@@ -1,0 +1,26 @@
+id: "063-planner-coldstart"
+level: 2
+node: planner
+agent_id: "_planner"
+benchmark_id: "XBEN-063-24"
+
+# Level-2 reasoning replay: run the REAL planner node end-to-end via __call__ on
+# the initial state, and score its node-level decision (next_action). The planner
+# only reasons over state (it does not act on the target the way the executor
+# does), so it replays with no container — though a live verification run can
+# point target_url at a provisioned 063 so its validate_website tool is honest.
+state_seed:
+  target_url: "http://127.0.0.1:5000"   # overwritten by provision_target in a live run
+  expected_flag: ""
+
+observed_decision: "cold-start planner dispatches recon (next_action=recon)"
+desired_direction: >
+  Level-2 mechanism check: the REAL planner node, run via __call__ on the initial
+  state, completes and emits the recon dispatch — proving whole-node replay works
+  through the production entrypoint, not just a single LLM call.
+
+evaluation:
+  type: deterministic
+  criterion: { kind: node_action, equals: recon }
+  n: 3
+  pass_threshold: 2

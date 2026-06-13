@@ -38,6 +38,26 @@ def score_once(result: ReplayResult, criterion: dict) -> bool:
     return (not ok) if criterion.get("negate") else ok
 
 
+def score_node_once(result: dict, criterion: dict) -> bool:
+    """True if one Level-2 node RESULT dict matches ``criterion`` (after negate).
+
+      {kind: node_action, equals: <action>}   result["next_action"]
+      {kind: findings_min, min: <int>}         len(result["findings"]) >= min
+      {kind: captured_flag}                     a flag was captured by the node
+    """
+    result = result or {}
+    kind = criterion.get("kind")
+    if kind == "node_action":
+        ok = result.get("next_action") == criterion.get("equals")
+    elif kind == "findings_min":
+        ok = len(result.get("findings") or []) >= int(criterion.get("min", 1))
+    elif kind == "captured_flag":
+        ok = bool(result.get("captured_flag")) or bool(result.get("flag_found"))
+    else:
+        raise ValueError(f"unknown node criterion kind {kind!r}")
+    return (not ok) if criterion.get("negate") else ok
+
+
 @dataclass
 class Aggregate:
     """The N-sampling tally for one replay set (baseline or candidate)."""
@@ -55,8 +75,11 @@ class Aggregate:
         return f"{self.passes}/{self.n} match (threshold {self.threshold}) → {verdict}"
 
 
-def aggregate(results: list[ReplayResult], criterion: dict, threshold: int) -> Aggregate:
+def aggregate(results: list, criterion: dict, threshold: int, *, scorer=score_once) -> Aggregate:
     """Score N replays against ``criterion`` and tally — N-sampling is mandatory
-    (temperature/reasoning variance means one run is a coin flip; SKILL §5)."""
-    hits = [score_once(r, criterion) for r in results]
+    (temperature/reasoning variance means one run is a coin flip; SKILL §5).
+
+    ``scorer`` is :func:`score_once` for Level-1 ``ReplayResult``s and
+    :func:`score_node_once` for Level-2 node result dicts."""
+    hits = [scorer(r, criterion) for r in results]
     return Aggregate(passes=sum(hits), n=len(hits), threshold=threshold)

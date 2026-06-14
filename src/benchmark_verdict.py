@@ -29,9 +29,9 @@ API = "api"    # codex/API or infra crash — the run never got a fair attempt
 # fair verdict" rather than "the agent tried and failed". ``str.startswith``
 # takes this tuple directly. ``benchmarks.xbow_runner`` records errors as
 # ``"{ExceptionType}: {msg}"``; every codex/provider error subclasses
-# ``CodexAPIError`` (so the type name starts with ``Codex``), refusals are
-# ``RefusalError``, and a hung docker build/up is ``phase '…' timeout``.
-_CRASH_MARKERS: tuple[str, ...] = ("Codex", "RefusalError", "phase '")
+# ``CodexAPIError`` (so the type name starts with ``Codex``), and a hung
+# docker build/up is ``phase '…' timeout``.
+_CRASH_MARKERS: tuple[str, ...] = ("Codex", "phase '")
 
 
 def format_duration(seconds: float | int | None) -> str:

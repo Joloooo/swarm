@@ -35,8 +35,9 @@ two tiers:
           alternative is total worker loss.
 
 On all-tiers-exhaust, re-raises the last refusal exception. The
-caller (``src/nodes/base/skill_runner.py:run_skill_agent``) catches it, logs to
-``refusals.jsonl``, and runs the post-crash flag salvage path.
+caller (``src/nodes/base/skill_runner.py:run_skill_agent``) catches it, surfaces it
+on the ``llm_error`` row of ``full_logs.jsonl``, and runs the post-crash flag
+salvage path.
 
 Non-refusal exceptions propagate unchanged so the existing
 crash-recovery / salvage path stays intact.

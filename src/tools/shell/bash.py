@@ -63,6 +63,7 @@ from src.tools.shell._common import (
     log_event as _log_event,
     truncate_output,
 )
+from src.nodes.base.flag_watcher import is_captured
 from src.tools.shell.manager import BashSession, get_shell_manager
 from src.tools.shell.safety import (
     check_attacker_host_safety,
@@ -71,6 +72,15 @@ from src.tools.shell.safety import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ``_wait_for_sentinel`` outcomes. A live subprocess (e.g. a 5-minute
+# gobuster) cannot be interrupted by the FlagWatcher callback — only this
+# poll loop can. ``_WAIT_CAPTURED`` lets a sibling worker's flag capture
+# abort the running command in ~0.5 s instead of waiting out its full
+# timeout. See ``_wait_for_sentinel``.
+_WAIT_SEEN = "seen"
+_WAIT_TIMEOUT = "timeout"
+_WAIT_CAPTURED = "captured"
 
 
 # Per-agent bash subprocess lifecycle (creation, registry, cleanup) lives
@@ -160,19 +170,34 @@ async def _wait_for_sentinel(
     sess: BashSession,
     sentinel: str,
     deadline: float,
-) -> bool:
+    *,
+    check_capture: bool = True,
+) -> str:
     """Read sess.proc.stdout line-by-line until the sentinel appears or deadline hits.
 
-    Returns True if the sentinel was seen, False on timeout.
+    Returns one of ``_WAIT_SEEN`` (command finished), ``_WAIT_TIMEOUT``
+    (deadline hit or bash died), or ``_WAIT_CAPTURED`` (a sibling worker
+    captured the flag mid-command — benchmark mode only).
     Lines that aren't the sentinel are dropped — the only thing the
     pipe is supposed to carry is bookkeeping. (If the agent's command
     accidentally echoes something here, it'll be ignored; the real
     output is in the .out file.)
     """
     while True:
+        # Stop-on-capture: in benchmark mode a sibling worker may capture
+        # the flag while THIS command (e.g. a multi-minute gobuster) is
+        # still running. The FlagWatcher callback fires only between LLM
+        # calls / after a tool returns — it cannot interrupt a live
+        # subprocess. Checking here (≤0.5 s cadence) lets us SIGINT the
+        # command promptly so the worker's next checkpoint exits, instead
+        # of waiting out the full timeout. ``is_captured()`` is always
+        # False outside benchmark mode, so this is a no-op for real audits.
+        if check_capture and is_captured():
+            return _WAIT_CAPTURED
+
         remaining = deadline - time.perf_counter()
         if remaining <= 0:
-            return False
+            return _WAIT_TIMEOUT
 
         # readline() blocks; wrap in wait_for so we honour the deadline.
         try:
@@ -185,11 +210,11 @@ async def _wait_for_sentinel(
 
         if not line:
             # EOF — the bash process died.
-            return False
+            return _WAIT_TIMEOUT
 
         text = line.decode("utf-8", errors="replace").rstrip("\r\n")
         if text == sentinel:
-            return True
+            return _WAIT_SEEN
         # Otherwise: incidental output on the pipe. Ignore.
 
 
@@ -247,16 +272,24 @@ async def _run_one(
         }
 
     # Wait for the sentinel.
-    seen = await _wait_for_sentinel(sess, sentinel, deadline)
-    timed_out = not seen
+    status = await _wait_for_sentinel(sess, sentinel, deadline)
+    timed_out = status != _WAIT_SEEN
+    captured = status == _WAIT_CAPTURED
 
     if timed_out:
+        # Capture-cancel and a real timeout both leave a live command we
+        # must SIGINT before reading its partial bookkeeping files.
         await _kill_running_command(sess)
         # Give the command a brief grace window to actually die so its
-        # bookkeeping files exist when we read them.
+        # bookkeeping files exist when we read them. Disable the capture
+        # check here — on the capture path is_captured() is still true and
+        # would short-circuit the window before the killed command flushes.
         try:
             await asyncio.wait_for(
-                _wait_for_sentinel(sess, sentinel, time.perf_counter() + 2.0),
+                _wait_for_sentinel(
+                    sess, sentinel, time.perf_counter() + 2.0,
+                    check_capture=False,
+                ),
                 timeout=2.5,
             )
         except asyncio.TimeoutError:
@@ -283,6 +316,7 @@ async def _run_one(
         "cwd": new_cwd or sess.cwd,
         "duration_ms": int((time.perf_counter() - t0) * 1000),
         "timed_out": timed_out,
+        "captured": captured,
     }
 
 

@@ -21,6 +21,7 @@ real sources. See :mod:`src.tools.web_recon.codex_search`.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -28,6 +29,11 @@ from langchain_core.messages import AIMessage, HumanMessage
 from src.graph import config
 from src.llm.callbacks import record_external_usage
 from src.nodes.base import BaseNode
+from src.nodes.base.flag_watcher import (
+    SiblingCapturedSignal,
+    get_captured_flag,
+    is_captured,
+)
 from src.refusals.detect import looks_like_refusal
 from src.refusals.vocabulary import filter_text
 from src.state import SwarmGraphState
@@ -43,6 +49,13 @@ from src.tools.web_recon.sources import infer_class, sources_for
 import os
 
 _CURATED_MAX_CHARS = int(os.getenv("SWARM_WEB_CURATED_MAX_CHARS", "30000"))
+
+# How often the in-flight web search polls the process-global capture flag
+# while its (uncancellable, hosted) Codex call is running. See
+# ``WebSearchNode._run_until_capture`` for why this node needs its own
+# stop-on-capture path instead of the FlagWatcherCallback the executor
+# workers get.
+_CAPTURE_POLL_INTERVAL_S = float(os.getenv("SWARM_WEB_CAPTURE_POLL_S", "2"))
 
 
 def _extract_query(state: SwarmGraphState) -> str | None:
@@ -117,7 +130,56 @@ class WebSearchNode(BaseNode):
                 )
         return res
 
+    async def _run_until_capture(self, coro):
+        """Run ``coro`` but abort it the moment a sibling captures the flag.
+
+        ``web_search`` is the one fan-out branch with no LangChain
+        ``FlagWatcherCallback`` — its hosted Codex ``web_search`` call
+        bypasses the callback path entirely (see ``record_external_usage``
+        note in :meth:`execute`). Without this, when the planner fans
+        ``web_search`` out ALONGSIDE executor workers and one of them
+        captures the flag, this node keeps running its full 1–2 min search.
+        Because the summarizer is a fan-in barrier, that delays the
+        ``route_after_summarizer → END`` transition by the whole search
+        duration — the run sits idle on a flag it already has.
+
+        Polling the process-global ``is_captured()`` and cancelling the
+        in-flight task gives ``web_search`` the same stop-on-capture
+        behaviour the executor workers get for free. Raises
+        :class:`SiblingCapturedSignal` on capture so :meth:`execute`'s
+        handler returns an empty update (no message), letting the barrier
+        complete fast.
+        """
+        task = asyncio.ensure_future(coro)
+        while True:
+            done, _ = await asyncio.wait(
+                {task}, timeout=_CAPTURE_POLL_INTERVAL_S
+            )
+            if task in done:
+                return task.result()
+            if is_captured():
+                task.cancel()
+                try:
+                    await task
+                except BaseException:  # noqa: BLE001 — cancellation cleanup
+                    pass
+                raise SiblingCapturedSignal(
+                    captured_flag=get_captured_flag(), agent_id="web_search",
+                )
+
     async def execute(self, state: SwarmGraphState) -> dict[str, Any]:
+        # Stop-on-capture, entry path: a sibling worker may have captured
+        # the flag between this node being dispatched and actually starting.
+        # ``BaseNode.__call__``'s ``state.captured_flag`` guard does NOT
+        # cover this — that snapshot is frozen at wave-dispatch time, so a
+        # same-wave capture is invisible to it. The module-global is live.
+        if is_captured():
+            self.log.info(
+                "web_search skipped — flag already captured by a sibling "
+                "worker; not starting a search the run will discard",
+            )
+            return {}
+
         query = _extract_query(state)
         if not query:
             return {"messages": [
@@ -139,7 +201,9 @@ class WebSearchNode(BaseNode):
         )
 
         try:
-            curated_sources = await self._fetch_curated(curated_urls)
+            curated_sources = await self._run_until_capture(
+                self._fetch_curated(curated_urls)
+            )
 
             # Curated markdown is passed to the model as extra context; the
             # query + context both go through the lossless vocab filter the
@@ -151,7 +215,9 @@ class WebSearchNode(BaseNode):
             safe_query, _ = filter_text(query)
             safe_context, _ = filter_text(extra_context) if extra_context else ("", 0)
 
-            result = await self._run_codex_search(safe_query, safe_context)
+            result = await self._run_until_capture(
+                self._run_codex_search(safe_query, safe_context)
+            )
             self.log.info(
                 "Codex web_search: searches=%d citations=%d refused=%s err=%s",
                 result.num_searches, len(result.citations),
@@ -206,6 +272,18 @@ class WebSearchNode(BaseNode):
             return {"messages": [AIMessage(content=(
                 f"[Web Search] No sources could be retrieved for this query ({note})."
             ))]}
+
+        except SiblingCapturedSignal as sig:
+            # A sibling captured the flag while this search was in flight.
+            # Exit with an empty update so the summarizer barrier completes
+            # immediately and ``route_after_summarizer`` can route to END.
+            # No message: the run is over, nothing here would be consumed.
+            self.log.info(
+                "web_search stopping early — flag captured by a sibling "
+                "worker (%s); cancelled in-flight search to unblock fan-in",
+                sig.captured_flag,
+            )
+            return {}
 
         except Exception as e:
             self.log.exception("Web search error: %s", e)

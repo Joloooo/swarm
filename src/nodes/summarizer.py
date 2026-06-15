@@ -893,21 +893,30 @@ class SummarizerNode(BaseNode):
                 update.get("canonical_findings")
                 or list(state.get("canonical_findings") or [])
             )
-            # LLM merge of duplicate/similar surfaces (Step 3) — the model
-            # groups "/sku_add.php sku" vs "…fields" vs "…parameters" into
-            # one sink so the hypothesis list stops fragmenting. Belief math
-            # stays deterministic; falls back to normalize_surface on failure.
-            surface_canon = await build_surface_canon(
-                signals=all_signals, model=model, run_id=run_id,
-                node_name=self.name,
-            )
-            hypotheses = synthesize_hypotheses(
-                signals=all_signals,
-                canonical_findings=canonical_for_synth,
-                prior_hypotheses=list(state.get("hypotheses") or []),
-                extra_rules=skill_rules or None,
-                surface_canon=surface_canon,
-            )
+            # Ablation: with hypothesis passing disabled (default off), skip the
+            # structured belief-fusion entirely — including the surface-canon
+            # LLM call that only feeds it — so the planner steers on raw findings
+            # instead of fused, evidence-bearing hypotheses, and no extra model
+            # call is spent.
+            from src.graph import config as _rt
+            if getattr(_rt.capability, "disable_hypothesis_passing", False):
+                hypotheses = []
+            else:
+                # LLM merge of duplicate/similar surfaces (Step 3) — the model
+                # groups "/sku_add.php sku" vs "…fields" vs "…parameters" into
+                # one sink so the hypothesis list stops fragmenting. Belief math
+                # stays deterministic; falls back to normalize_surface on failure.
+                surface_canon = await build_surface_canon(
+                    signals=all_signals, model=model, run_id=run_id,
+                    node_name=self.name,
+                )
+                hypotheses = synthesize_hypotheses(
+                    signals=all_signals,
+                    canonical_findings=canonical_for_synth,
+                    prior_hypotheses=list(state.get("hypotheses") or []),
+                    extra_rules=skill_rules or None,
+                    surface_canon=surface_canon,
+                )
             if hypotheses:
                 update["hypotheses"] = hypotheses
                 self.log.info(

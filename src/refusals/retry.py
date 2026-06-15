@@ -216,8 +216,28 @@ async def astream_with_refusal_retry(
     # anyway (regex substitution is cheap and lossless for technical
     # content) and gives tier-1 attempts the best chance from the
     # outset.
-    filtered_sys, sys_subs = filter_text(system_msg)
-    filtered_seed, seed_subs = filter_messages(seed_msgs)
+    # Ablation: with refusal handling disabled (default off), turn the whole
+    # recovery ladder into a single bare attempt — no preventive vocabulary
+    # rewrite, no same-model retries, no fallback-model swap. A refused call
+    # then simply fails (raises), which is exactly the "refusal handling off"
+    # condition the thesis measures. The caller's flag-salvage scan still runs
+    # on the partial trace (a genuinely captured flag must never be dropped),
+    # but no recovery is attempted.
+    from src.graph import config as _rt_cfg
+    _refusal_off = bool(
+        getattr(getattr(_rt_cfg, "capability", None),
+                "disable_refusal_handling", False)
+    )
+    if _refusal_off:
+        max_retries_per_tier = 0
+        fallback_agent_factory = None
+        fallback_model_label = None
+        start_on_fallback = False
+        filtered_sys, sys_subs = system_msg, []
+        filtered_seed, seed_subs = list(seed_msgs), []
+    else:
+        filtered_sys, sys_subs = filter_text(system_msg)
+        filtered_seed, seed_subs = filter_messages(seed_msgs)
     if sys_subs or seed_subs:
         log.info(
             "[%s] preventive vocab filter applied: %d sys + %d seed "

@@ -25,7 +25,7 @@ from pathlib import Path
 import yaml
 
 from src.nodes.base import AgentConfig
-from src.tools.registry import resolve_tools
+from src.tools.registry import list_tools, resolve_tools
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +140,30 @@ def _normalize_routing_signals(skill_name: str, md: dict) -> list[dict]:
             "all_groups": groups,
         })
     return out
+
+
+def generic_executor_config(config_name: str = "generic") -> AgentConfig:
+    """A skill-less executor config — used ONLY by the disable_skills ablation.
+
+    Every executor becomes one generic worker: the base executor prompt
+    (methodology + universal rules, via ``skip_base_prompt=False`` and an empty
+    skill body) plus EVERY registered tool, with no per-class skill knowledge.
+    Recon is unaffected — it builds its own configs through the normal loader
+    path. ``config_name`` is preserved for report grouping / logging so the
+    planner's dispatch labels still line up.
+    """
+    from src.graph import config
+
+    return AgentConfig(
+        agent_id=config_name or "generic",
+        methodology="generic",
+        config_name=config_name or "generic",
+        system_prompt="",  # no per-class knowledge; base prompt supplies method
+        tools=resolve_tools(list_tools()),  # every tool, not a curated subset
+        max_iterations=config.budgets.worker_max_iterations,
+        skip_base_prompt=False,  # keep the base executor prompt
+        phase="executor",
+    )
 
 
 def _build_config(skill_name: str, meta: dict, body: str) -> tuple[AgentConfig, str, bool]:

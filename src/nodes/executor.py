@@ -50,10 +50,19 @@ class ExecutorNode(BaseNode):
     async def execute(self, state: dict) -> dict:
         config_name = state.get("config_name", "")
 
-        config = self.load_skill(config_name)
-        if config is None:
-            self.log.warning("Skill not found: %s", config_name)
-            return {"agent_results": [], "active_agents": [], "findings": []}
+        # Ablation: with skills disabled (default off), every executor runs as
+        # one generic worker (base prompt + all tools, no per-class knowledge)
+        # regardless of which skill the planner dispatched. Recon is unaffected
+        # — it routes through ReconNode, not this gate.
+        from src.graph import config as _rt
+        if getattr(_rt.capability, "disable_skills", False):
+            from src.skills.loader import generic_executor_config
+            config = generic_executor_config(config_name)
+        else:
+            config = self.load_skill(config_name)
+            if config is None:
+                self.log.warning("Skill not found: %s", config_name)
+                return {"agent_results": [], "active_agents": [], "findings": []}
 
         self.log.info("[%s] Starting executor agent", config_name)
         result = await self.run_skill_agent(config, state)

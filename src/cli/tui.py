@@ -727,6 +727,8 @@ def _config_menu() -> None:
             return
         if action == "budgets":
             _budgets_submenu(cfg)
+        elif action == "capability":
+            _capability_submenu(cfg)
         elif action == "model_slug":
             _select_into(cfg, "model", "slug",
                          "Model:", config_store.MODEL_CHOICES)
@@ -767,6 +769,7 @@ def _config_top(cfg: dict[str, dict[str, Any]]) -> str | None:
         Choice(f"Web-search synth model   {cfg['model']['web_search_synth_model']}", value="web_synth_model"),
         Choice(f"Web-search synth effort  {cfg['model']['web_search_synth_reasoning_effort']}", value="web_synth_effort"),
         Choice(f"Verbosity    {cfg['verbosity']['mode']}",        value="verbosity"),
+        Choice(f"Capability…  {_capability_summary(cfg)}",        value="capability"),
         Choice("─" * 40,                                          value="__sep__", disabled="—"),
         Choice("Save & back",                                     value="save"),
         Choice("Discard & back",                                  value="discard"),
@@ -811,6 +814,60 @@ def _budgets_submenu(cfg: dict[str, dict[str, Any]]) -> None:
             # Ctrl-C on the input → cancel just this edit, keep menu open.
             continue
         cfg["budgets"][which] = int(new)
+
+
+# Human labels for the ablation switches, in the thesis ablation-table order.
+# Each flag, when ON, DISABLES that capability for the run.
+_CAPABILITY_KEYS: list[tuple[str, str]] = [
+    ("disable_prompting_techniques", "Prompting techniques (system-prompt standards)"),
+    ("disable_steering_directives",  "Steering directives ([SYSTEM NOTE] nudges)"),
+    ("disable_hypothesis_passing",   "Hypothesis passing (structured beliefs)"),
+    ("disable_refusal_handling",     "Refusal handling (recovery ladder)"),
+    ("disable_skills",               "Skills (per-class specialists)"),
+    ("disable_web_search",           "Web search (external lookup)"),
+]
+
+
+def _capability_summary(cfg: dict[str, dict[str, Any]]) -> str:
+    """One-line state for the config menu: how many capabilities are disabled."""
+    cap = cfg.get("capability", {})
+    n_off = sum(1 for key, _ in _CAPABILITY_KEYS if cap.get(key))
+    if n_off == 0:
+        return "all on (full system)"
+    off = ", ".join(
+        key.removeprefix("disable_") for key, _ in _CAPABILITY_KEYS if cap.get(key)
+    )
+    return f"{n_off} OFF: {off}"
+
+
+def _capability_submenu(cfg: dict[str, dict[str, Any]]) -> None:
+    """Toggle the ablation switches. Selecting a row flips disabled/enabled.
+
+    One ablation run = exactly one capability disabled. Leaving all enabled is
+    the full system. The values land in ``swarm-config.toml [capability]`` on
+    "Save & back" and are read by ``src/graph.py`` on the next run.
+    """
+    cap = cfg.setdefault("capability", {})
+    while True:
+        labels: list[Choice] = []
+        for key, label in _CAPABILITY_KEYS:
+            mark = "[DISABLED]" if cap.get(key) else "[ enabled ]"
+            labels.append(Choice(f"{mark}  {label}", value=key))
+        labels.append(Choice("─" * 44, value="__sep__", disabled="—"))
+        labels.append(Choice("← Back", value="__back__"))
+
+        n_off = sum(1 for key, _ in _CAPABILITY_KEYS if cap.get(key))
+        which = questionary.select(
+            f"Capability — turn a feature OFF to ablate it ({n_off} disabled). "
+            "Enter flips the highlighted one.",
+            choices=labels,
+            instruction="(Ctrl-C goes back)",
+        ).ask()
+        if which is None or which == "__back__":
+            return
+        if which == "__sep__":
+            continue
+        cap[which] = not bool(cap.get(which))
 
 
 def _select_into(

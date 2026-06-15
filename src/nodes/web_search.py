@@ -168,6 +168,15 @@ class WebSearchNode(BaseNode):
                 )
 
     async def execute(self, state: SwarmGraphState) -> dict[str, Any]:
+        # Ablation: with web search disabled (default off), the node is a no-op.
+        # This covers BOTH dispatch paths — the concurrent fan-out (already
+        # suppressed at the planner's research_query) and a standalone
+        # action="web_search" the planner might still emit — so the agent never
+        # gets external lookup, relying only on the model's knowledge + skills.
+        if getattr(config.capability, "disable_web_search", False):
+            self.log.info("web_search disabled by ablation flag — no-op")
+            return {}
+
         # Stop-on-capture, entry path: a sibling worker may have captured
         # the flag between this node being dispatched and actually starting.
         # ``BaseNode.__call__``'s ``state.captured_flag`` guard does NOT

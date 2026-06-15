@@ -2848,6 +2848,13 @@ class PlannerNode(BaseNode):
         if decision.get("action") != "report":
             return None
 
+        # Ablation: with web search disabled, this report-gate would only force
+        # a web_search the run can no longer act on (the node is a no-op), so
+        # skip the forcing entirely and let the report decision through — the
+        # agent simply has no external-lookup fallback in this configuration.
+        if getattr(getattr(config, "capability", None), "disable_web_search", False):
+            return None
+
         forced_so_far = int(state.get("forced_recoveries") or 0)
         if forced_so_far >= _MAX_FORCED_RECOVERIES:
             return None  # already used our budget; let report through
@@ -3709,7 +3716,10 @@ class PlannerNode(BaseNode):
                     if crawl_mode in crawl_policy.DETERMINISTIC_MODES
                     else None
                 )
-                if crawl is not None:
+                if websearch_off:
+                    # Ablation: never fan out a concurrent web_search branch.
+                    update["research_query"] = ""
+                elif crawl is not None:
                     self.log.info("%s", crawl.log_line())
                     update["research_query"] = crawl.query
                 else:

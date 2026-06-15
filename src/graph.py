@@ -245,6 +245,32 @@ config = SimpleNamespace(
         color     = _env_bool("SWARM_COLOR",     _stderr_is_tty()),
         show_http = _env_bool("SWARM_LIVE_HTTP", False),
     ),
+    # ── Ablation switches (see swarm-config.toml [capability]) ──
+    # Each turns OFF one capability so its contribution can be measured. ALL
+    # default false → the full system runs byte-identically; the gates next to
+    # each subsystem read these and no-op when their flag is false. SWARM_DISABLE_*
+    # env vars override a single flag for a one-off CLI/VM run without editing
+    # the toml.
+    capability=SimpleNamespace(
+        disable_prompting_techniques = _env_bool(
+            "SWARM_DISABLE_PROMPTING_TECHNIQUES",
+            _cfg["capability"]["disable_prompting_techniques"]),
+        disable_steering_directives  = _env_bool(
+            "SWARM_DISABLE_STEERING_DIRECTIVES",
+            _cfg["capability"]["disable_steering_directives"]),
+        disable_hypothesis_passing   = _env_bool(
+            "SWARM_DISABLE_HYPOTHESIS_PASSING",
+            _cfg["capability"]["disable_hypothesis_passing"]),
+        disable_refusal_handling     = _env_bool(
+            "SWARM_DISABLE_REFUSAL_HANDLING",
+            _cfg["capability"]["disable_refusal_handling"]),
+        disable_skills               = _env_bool(
+            "SWARM_DISABLE_SKILLS",
+            _cfg["capability"]["disable_skills"]),
+        disable_web_search           = _env_bool(
+            "SWARM_DISABLE_WEB_SEARCH",
+            _cfg["capability"]["disable_web_search"]),
+    ),
 )
 
 
@@ -272,6 +298,10 @@ def describe_config() -> str:
         + "\n\nVerbosity:\n"
         + "\n".join(
             f"  {k:<10s} = {v}" for k, v in vars(config.verbosity).items()
+        )
+        + "\n\nCapability (ablation switches; all-false = full system):\n"
+        + "\n".join(
+            f"  {k:<32s} = {v}" for k, v in vars(config.capability).items()
         )
     )
 

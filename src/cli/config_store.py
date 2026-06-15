@@ -62,6 +62,11 @@ _SECTION_COMMENTS = {
     "budgets":   "Planner / worker / LLM budgets.",
     "model":     "Model slug + Codex reasoning controls.",
     "verbosity": "Console verbosity: silent | compact | verbose.",
+    "capability": (
+        "Ablation switches — turn OFF one agent capability to measure its\n"
+        "contribution. ALL default false = full system, byte-identical. Flip\n"
+        "one to true for an ablation run (see `swarm` -> Capability)."
+    ),
 }
 
 

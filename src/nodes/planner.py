@@ -3176,8 +3176,19 @@ class PlannerNode(BaseNode):
         # repeatedly with no findings, surface a SYSTEM NOTE so the LLM
         # picks a different action this turn instead of dispatching the
         # same useless attack again.
+        # Ablation gates (default off → full system, byte-identical).
+        # ``steer_off`` suppresses the run-state steering nudges below; the
+        # evidence digest is KEPT regardless, so the planner is deprived of
+        # steering, not blinded. ``websearch_off`` additionally suppresses the
+        # web-search lead / crawl nudges (the web_search node itself is gated in
+        # src/nodes/web_search.py and the research_query in this file's attack
+        # branch).
+        _cap = getattr(config, "capability", None)
+        steer_off = bool(getattr(_cap, "disable_steering_directives", False))
+        websearch_off = bool(getattr(_cap, "disable_web_search", False))
+
         warning = self.detect_repetition(state)
-        if warning:
+        if warning and not steer_off:
             self.log.warning("loop check fired: %s", warning)
             prior_messages.append(
                 HumanMessage(content=f"[SYSTEM NOTE] {warning}")
@@ -3220,7 +3231,7 @@ class PlannerNode(BaseNode):
         # mode: proving a primitive then wandering off it. Injected FIRST so
         # it frames the decision. Self-suppresses only on flag capture.
         primitive_note = _unconverted_primitive_directive(state)
-        if primitive_note:
+        if primitive_note and not steer_off:
             self.log.info(
                 "unconverted-primitive directive: %s",
                 primitive_note.replace("\n", " | ")[:300],
@@ -3233,7 +3244,7 @@ class PlannerNode(BaseNode):
         # Yields to the primitive directive above (confirmed beats
         # committed), so it only fires when no proven primitive is live.
         hypothesis_note = _hypothesis_directive(state)
-        if hypothesis_note:
+        if hypothesis_note and not steer_off:
             self.log.info(
                 "hypothesis directive: %s",
                 hypothesis_note.replace("\n", " | ")[:300],
@@ -3241,7 +3252,7 @@ class PlannerNode(BaseNode):
             prior_messages.append(HumanMessage(content=hypothesis_note))
 
         service_note = _colocated_service_directive(state)
-        if service_note:
+        if service_note and not steer_off:
             self.log.info(
                 "co-located service directive: %s",
                 service_note.replace("\n", " | ")[:300],
@@ -3263,28 +3274,32 @@ class PlannerNode(BaseNode):
         # mechanisms do not confound the A/B measurement. Baseline (mode 1)
         # keeps the prior nudge-only behaviour as the control.
         crawl_mode = crawl_policy.normalize_mode(state.get("crawl_mode"))
-        if crawl_mode == crawl_policy.BASELINE:
-            lead_note = _unexploited_lead_directive(state)
-            if lead_note:
-                self.log.info(
-                    "unexploited-lead research directive: %s",
-                    lead_note.replace("\n", " | ")[:300],
+        # The lead / crawl nudges are both steering AND web-search related, so
+        # they are suppressed by either ablation. ``crawl_mode`` itself is still
+        # computed (the attack branch's select_crawl_query reads it).
+        if not steer_off and not websearch_off:
+            if crawl_mode == crawl_policy.BASELINE:
+                lead_note = _unexploited_lead_directive(state)
+                if lead_note:
+                    self.log.info(
+                        "unexploited-lead research directive: %s",
+                        lead_note.replace("\n", " | ")[:300],
+                    )
+                    prior_messages.append(HumanMessage(content=lead_note))
+            elif crawl_mode in (crawl_policy.TOOL_DESC, crawl_policy.ALL):
+                # Mode 6 (description self-trigger) and Mode 9 (all-on) both inject
+                # the rich when-to-use description. In Mode 6 it is the ONLY
+                # mechanism (no deterministic firing). In Mode 9 the deterministic
+                # triggers ALSO fire at the attack branch, so the planner can both
+                # self-route and be auto-fired — each crawl stays attributable (a
+                # deterministic fire emits a CRAWL-FIRE tag, a self-routed one does
+                # not).
+                prior_messages.append(
+                    HumanMessage(content=crawl_policy.web_search_when_to_use_note())
                 )
-                prior_messages.append(HumanMessage(content=lead_note))
-        elif crawl_mode in (crawl_policy.TOOL_DESC, crawl_policy.ALL):
-            # Mode 6 (description self-trigger) and Mode 9 (all-on) both inject
-            # the rich when-to-use description. In Mode 6 it is the ONLY
-            # mechanism (no deterministic firing). In Mode 9 the deterministic
-            # triggers ALSO fire at the attack branch, so the planner can both
-            # self-route and be auto-fired — each crawl stays attributable (a
-            # deterministic fire emits a CRAWL-FIRE tag, a self-routed one does
-            # not).
-            prior_messages.append(
-                HumanMessage(content=crawl_policy.web_search_when_to_use_note())
-            )
 
         handoff_note = _skill_handoff_note(state)
-        if handoff_note:
+        if handoff_note and not steer_off:
             self.log.info(
                 "cross-skill handoff note: %s",
                 handoff_note.replace("\n", " | ")[:300],
@@ -3292,7 +3307,7 @@ class PlannerNode(BaseNode):
             prior_messages.append(HumanMessage(content=handoff_note))
 
         evidence_note = _high_confidence_next_moves_note(state)
-        if evidence_note:
+        if evidence_note and not steer_off:
             self.log.info(
                 "evidence-derived next-move note: %s",
                 evidence_note.replace("\n", " | ")[:300],
@@ -3300,7 +3315,7 @@ class PlannerNode(BaseNode):
             prior_messages.append(HumanMessage(content=evidence_note))
 
         tool_note = _tool_coverage_note(state)
-        if tool_note:
+        if tool_note and not steer_off:
             self.log.info(
                 "tool-coverage note: %s",
                 tool_note.replace("\n", " | ")[:300],
@@ -3312,7 +3327,7 @@ class PlannerNode(BaseNode):
         # ``suggested_skill`` that has never run, surface it explicitly. This is
         # additive and never suppresses persistence on the current line.
         floor_note = _untried_skill_floor_directive(state)
-        if floor_note:
+        if floor_note and not steer_off:
             self.log.info(
                 "untried-skill floor directive: %s",
                 floor_note.replace("\n", " | ")[:300],
@@ -3326,7 +3341,7 @@ class PlannerNode(BaseNode):
         # if a primitive is unconverted, that one owns the turn and this
         # stays silent (see _diversify_when_stuck_directive's precedence).
         diversify_note = _diversify_when_stuck_directive(state)
-        if diversify_note:
+        if diversify_note and not steer_off:
             self.log.info(
                 "diversify-when-stuck directive: %s",
                 diversify_note.replace("\n", " | ")[:300],
@@ -3339,7 +3354,7 @@ class PlannerNode(BaseNode):
         # planner does not re-dispatch a dead surface. Informational, lowest
         # priority — appended last.
         exhausted_note = _exhausted_ledger_note(state)
-        if exhausted_note:
+        if exhausted_note and not steer_off:
             self.log.info(
                 "exhausted-ledger note: %s",
                 exhausted_note.replace("\n", " | ")[:300],

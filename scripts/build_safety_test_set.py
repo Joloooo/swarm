@@ -79,11 +79,23 @@ def main():
     idx = load_index()
     confirmed = [r for r in idx if r["confirmed_primary_refusal"]]
     swap_needed = [r for r in confirmed if r["trajectory"]["reached_fallback"]]
+    # Survived the FIRST same-model retry (refused attempts 1 AND 2, i.e. reached
+    # the 3rd attempt): the 348 that went to fallback PLUS the 66 the 2nd retry
+    # then cleared. This is the population for the safety-technique replay, whose
+    # control group is production retry #2 itself (= those 66, ~16% of 414).
+    survived_retry1 = [
+        r for r in confirmed
+        if r["trajectory"]["reached_fallback"]
+        or (r["trajectory"].get("rescued_by") == "primary-retry"
+            and r["trajectory"].get("rescue_attempt") == 3)
+    ]
 
     all_path = os.path.join(OUT, "refusals_all_598.jsonl")
     swap_path = os.path.join(OUT, "refusals_swap_needed_348.jsonl")
+    sr1_path = os.path.join(OUT, "refusals_survived_retry1_414.jsonl")
     n_all, n_all_req = write(all_path, confirmed)
     n_swap, n_swap_req = write(swap_path, swap_needed)
+    n_sr1, n_sr1_req = write(sr1_path, survived_retry1)
 
     readme = f"""# Safety-test working set
 
@@ -95,6 +107,7 @@ requests the classifier actually refused. Regenerate with
 |---|---|---|---|
 | `refusals_all_598.jsonl` | {n_all} | {n_all_req} | Every request refused on the first try (the full corpus). |
 | `refusals_swap_needed_348.jsonl` | {n_swap} | {n_swap_req} | The hard tail: survived all 3 same-model retries, only cleared after the swap to gpt-5.4. Test new techniques here -- this is where retrying did NOT work. |
+| `refusals_survived_retry1_414.jsonl` | {n_sr1} | {n_sr1_req} | Survived the 1st same-model retry (refused attempts 1 & 2). The 348 + the 66 the 2nd retry then cleared. Test population for the safety-technique replay; its control group is production retry #2 (the 66 it cleared, ~16%). |
 
 Each line: `id`, `benchmark`, `skill`, `run`, `production_trajectory`,
 `first_error_msg`, `source_log`, and `request` (the full
@@ -109,6 +122,7 @@ it on the primary model, and record whether it still refuses.
 
     print(f"wrote {os.path.relpath(all_path, ROOT)}  ({n_all} records, {n_all_req} with payload)")
     print(f"wrote {os.path.relpath(swap_path, ROOT)}  ({n_swap} records, {n_swap_req} with payload)")
+    print(f"wrote {os.path.relpath(sr1_path, ROOT)}  ({n_sr1} records, {n_sr1_req} with payload)")
     print(f"wrote {os.path.relpath(os.path.join(OUT, 'README.md'), ROOT)}")
 
 

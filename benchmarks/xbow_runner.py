@@ -1251,16 +1251,17 @@ async def main_async(args) -> int:
     try:
         from src.graph import describe_config
         from src.llm.provider import current_default_config
-        # Resolve the absolute log dir for the FIRST bench; subsequent
-        # benches each get their own dir but the banner is one-shot.
-        first_log_dir = (
-            str((run_dir(make_run_id(benchmark_id=ids[0]))).resolve())
-            if ids else None
-        )
+        # Show the log ROOT — every bench writes its own ``run-<id>/``
+        # subdir under here. We deliberately do NOT call
+        # ``run_dir(make_run_id(...))`` for this: ``run_dir`` creates the
+        # directory as a side effect and ``make_run_id`` stamps a fresh
+        # timestamp, so building a banner path that way left an orphan
+        # empty ``run-…/`` folder one second off from the real one that
+        # ``run_one`` creates when the bench actually starts.
         model_info = current_default_config()
         LIVE.startup_banner(
             model_info=model_info,
-            log_dir=first_log_dir,
+            log_dir=str(LOGS_ROOT.resolve()),
             bench_ids=list(ids),
             budgets_text=describe_config(),
         )

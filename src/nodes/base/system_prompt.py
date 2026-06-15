@@ -1,70 +1,3 @@
-"""System prompt assembly for worker agents.
-
-Every worker the swarm dispatches gets a system prompt built here. The
-prompt is composed from a small set of building blocks, sorted into
-three audiences:
-
-  1. **Universal** — every worker, regardless of phase.
-
-       - ``IDENTITY_PREAMBLE``: one neutral identity line.
-       - ``NARRATION_RULES``: quality bar for the ``reasoning`` field
-         every tool call requires.
-       - ``SCOPE_RULES``: stay-in-scope discipline (operator safety).
-       - ``TOOL_USAGE_RULES``: targeted commands, focus on summaries,
-         no DoS.
-       - ``FINDING_SCHEMA``: the structured ``**FINDING:**`` /
-         ``## Finding`` field schema the parsers in
-         ``src/nodes/base/skill_runner.py`` recognise.
-
-  2. **Executor-only** — appended for workers whose phase is
-     ``"executor"`` (the default for every dispatchable attack skill).
-
-       - ``METHODOLOGY_RULES``: payload escalation, "WHY did it fail",
-         per-finding evidence.
-       - ``DEMONSTRATED_STANDARD``: what "complete" means by vuln class.
-       - ``DIVERSITY_RULES``: brainstorm categories before iterating.
-       - ``COMMON_CHECKLIST_DISCIPLINE``: common classes may get one
-         evidence-matched smoke test, but repeated budget needs proof.
-       - ``TRANSFORMATION_HYPOTHESIS``: payload-vs-sink reasoning when
-         every variant returns the same response.
-       - ``SEVERITY_RULES``: CRITICAL / HIGH / MEDIUM / LOW / INFO.
-       - ``FINDING_CATEGORY_GUIDANCE``: mechanism-not-symptom rules for
-         picking the right ``Category`` field on a finding.
-
-  3. **Recon-only** — appended for workers whose phase is ``"recon"``.
-
-       - ``RECON_FINDINGS_HINT``: a short note on what kinds of findings
-         a discovery agent can legitimately file (versions with known
-         CVEs, exposed configs, default admin panels) versus what
-         requires the executor (every probe-based class).
-
-``STEALTH_RULES`` gets appended on top of any of the three audiences
-when the planner has marked ``stealth_level >= 1``. ``BENCHMARK_GUIDANCE``
-is appended for EXECUTOR workers only when the run is a benchmark
-(``is_benchmark`` True). The blunt "scan responses for ``FLAG{...}``"
-phrasing was removed on 2026-05-14 because it was the single strongest
-"this is a CTF" cue the Codex cyber_policy classifier keys on; the
-2026-05-31 re-introduction uses a playful "hidden token / the app is
-the referee" framing that reads as a test-task instead. The planner
-still owns flag submission (``action="submit_flag"`` verified by
-``src/edges/routing.py:route_after_planner``); the addendum only
-teaches executors to submit-and-read and to act on the target's own
-corrective hints rather than judging success in a local browser.
-
-The public assembly functions are :func:`get_universal_prompt`,
-:func:`get_executor_prompt`, :func:`get_recon_prompt`, and the
-back-compat alias :func:`get_base_prompt`. The worker runner in
-``src/nodes/base/skill_runner.py`` calls :func:`_build_system_message`,
-which dispatches on ``config.phase``.
-
-IMPORTANT: keep the language oriented around "testing" / "validation"
-/ "audit". Phrases like "penetration testing", "offensive", "red
-team", or "exploit the target" trip provider safety classifiers even
-when the engagement is fully authorised. See the Skill Vocabulary
-Policy in ``CLAUDE.md`` for the full table — and ``src/refusals/
-vocabulary.py`` for its runtime regex enforcement.
-"""
-
 from __future__ import annotations
 
 
@@ -803,15 +736,33 @@ def get_executor_prompt(stealth_level: int = 0) -> str:
 
     Used by ``_build_system_message`` when ``config.phase == "executor"``,
     which is the default for every dispatchable attack skill.
+
+    Ablation: when ``config.capability.disable_prompting_techniques`` is set,
+    the five "prompting standards" blocks (exhaustion, diversity, enumeration,
+    common-checklist, transformation hypothesis) are dropped, leaving the
+    universal blocks + the basic methodology/tactical structure. Default off,
+    so a normal run includes every block.
     """
-    parts = _universal_parts(stealth_level) + [
-        METHODOLOGY_RULES,
-        DEMONSTRATED_STANDARD,
+    # The prompting-standards block (thesis Sec. "Prompting Standards"). Removed
+    # as a group for the no-prompting-techniques ablation.
+    standards = [
         EXHAUSTION_DISCIPLINE,
         DIVERSITY_RULES,
         ENUMERATION_DISCIPLINE,
         COMMON_CHECKLIST_DISCIPLINE,
         TRANSFORMATION_HYPOTHESIS,
+    ]
+    try:
+        from src.graph import config as _rt
+        if getattr(_rt.capability, "disable_prompting_techniques", False):
+            standards = []
+    except Exception:  # noqa: BLE001 — never let the gate break prompt assembly
+        pass
+
+    parts = _universal_parts(stealth_level) + [
+        METHODOLOGY_RULES,
+        DEMONSTRATED_STANDARD,
+        *standards,
         BEHAVIOR_MODEL_RULES,
         SEVERITY_RULES,
         FINDING_CATEGORY_GUIDANCE,

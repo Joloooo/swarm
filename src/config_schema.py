@@ -72,6 +72,37 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "verbosity": {
         "mode": "compact",
     },
+    # Ablation switches — each turns OFF one capability of the agent so its
+    # contribution can be measured (see the thesis ablation study). EVERY flag
+    # defaults to ``false``: with the whole table at its defaults the full
+    # system runs byte-identically, so a normal run is never affected. Flip one
+    # to ``true`` (by hand or via the `swarm` -> Capability menu) to run that
+    # ablation. The matching gates live next to each subsystem and read
+    # ``config.capability.*`` from ``src/graph.py``.
+    "capability": {
+        # Drop the static system-prompt standards (diversity-over-depth,
+        # transformation hypothesis, tested-vs-tested-enough, anti-bias
+        # checklist + enumeration) from every executor prompt.
+        "disable_prompting_techniques": False,
+        # Stop injecting the run-state [SYSTEM NOTE] steering nudges into the
+        # planner (loop / primitive / hypothesis-lock / diversify / …). The
+        # evidence digest is KEPT, so the planner is deprived of steering, not
+        # blinded.
+        "disable_steering_directives": False,
+        # Skip structured-hypothesis synthesis in the summarizer; the planner
+        # then steers on raw findings instead of fused, evidence-bearing beliefs.
+        "disable_hypothesis_passing": False,
+        # Bypass the safety-refusal recovery ladder (preventive vocabulary
+        # rewrite + same-model retries + fallback-model swap). A refused call
+        # simply fails.
+        "disable_refusal_handling": False,
+        # Every executor runs as one generic worker (base prompt + all tools)
+        # instead of a named, per-class skill. Recon is unaffected.
+        "disable_skills": False,
+        # The planner can no longer reach the web-search node; the agent relies
+        # only on the model's own knowledge and the skills.
+        "disable_web_search": False,
+    },
 }
 
 # Valid values for the enum knobs. ``resolve()`` rejects anything else (a

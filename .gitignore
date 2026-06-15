@@ -13,6 +13,10 @@ swarm-config.toml
 benchmarks/all_xben_24.txt
 benchmarks/run_queue.txt
 
+# Refusal corpus: full request payloads (~100 MB) are regenerable from logs/
+# via scripts/extract_refusal_corpus.py. The index + stats ARE committed.
+benchmarks/refusal_corpus/payloads/
+
 # Per-run loopback IP leases (benchmarks/loopback.py) — transient, host-local.
 benchmarks/.loopback_leases/
 

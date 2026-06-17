@@ -1,19 +1,23 @@
-"""One-command fan-out: divide the XBEN benchmark set across N terminals.
+"""One-command fan-out: run the XBEN benchmark set across N terminals.
 
 This automates the manual workflow of "open ~20 terminal windows, paste a
-slice of the benchmark list into each, hit Enter". It splits the benchmark
-list into N contiguous slices and launches one terminal session per slice,
-each running the xbow_runner over its slice.
+slice of the benchmark list into each, hit Enter". By default it puts the whole
+benchmark list into ONE shared work-queue and launches N terminal sessions that
+each PULL the next pending benchmark when they're free — so a session that draws
+easy benches keeps working instead of idling while a slow lane grinds for hours
+(dynamic load-balancing). ``--static`` restores the legacy fixed-slice split.
 
 Everything from one run is collected under a single **campaign directory**,
 ``logs/<campaign>/``, so a parallel sweep is as tidy as the manual
 ``logs/1_full_run`` folder used to be:
 
     logs/<campaign>/
-        slices/slice_NN.txt     the ids handed to each session
+        queue.json              shared pending/running/done work-queue (default)
+        workers                 number of worker sessions launched
+        slices/slice_NN.txt     legacy: ids per session (only with --static)
         run-*/                  every per-run log dir (via SWARM_LOGS_ROOT)
         results/<id>.json       one verdict per benchmark (via SWARM_RESULTS_DIR)
-        .done/slice_NN          marker each session touches when it finishes
+        .done/worker_NN         marker each session touches when it exits
         summary.json/.txt       written by benchmarks/campaign_report
 
 Each session is a fully independent OS process: its own PID, its own
@@ -51,6 +55,7 @@ Re-print a finished (or in-flight) campaign any time::
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -168,16 +173,18 @@ def inherited_swarm_env() -> dict[str, str]:
     }
 
 
-def runner_cmd(slice_path: Path, campaign: Path, marker: str,
+def runner_cmd(source: str, campaign: Path, marker: str,
                runner_flags: list[str]) -> str:
-    """Shell command one session runs for its slice.
+    """Shell command one session runs.
 
-    Forwards the parent's ``SWARM_*`` env (model config + Codex account),
-    then sets SWARM_LOGS_ROOT + SWARM_RESULTS_DIR so the session's logs and
-    results land under the campaign dir, then touches a done-marker AFTER
-    the runner exits (``;`` not ``&&`` so the marker is written even if the
-    run errors). Everything is shell-quoted, so spaces in paths/values are
-    safe inside the AppleScript / tmux command string.
+    ``source`` is the already-shell-quoted runner source flag — either
+    ``--queue '<campaign>'`` (dynamic pull, the default) or
+    ``--list-file '<slice>'`` (legacy static). Forwards the parent's
+    ``SWARM_*`` env (model config + Codex account), sets SWARM_LOGS_ROOT +
+    SWARM_RESULTS_DIR so the session's logs and results land under the campaign
+    dir, then touches a done-marker AFTER the runner exits (``;`` not ``&&`` so
+    the marker is written even if the run errors). Everything is shell-quoted,
+    so spaces in paths/values are safe inside the AppleScript / tmux command.
     """
     flags = " ".join(runner_flags)
     forwarded = "".join(
@@ -189,9 +196,48 @@ def runner_cmd(slice_path: Path, campaign: Path, marker: str,
         f"SWARM_LOGS_ROOT={_shquote(str(campaign))} "
         f"SWARM_RESULTS_DIR={_shquote(str(campaign / 'results'))} "
         f"uv run python -m benchmarks.xbow_runner "
-        f"--list-file {_shquote(str(slice_path))} {flags} ; "
+        f"{source} {flags} ; "
         f"touch {_shquote(str(campaign / '.done' / marker))}"
     )
+
+
+def _recorded_ids(campaign: Path) -> set[str]:
+    """Benchmark ids this campaign already has a result file for (for --resume)."""
+    rd = campaign / "results"
+    ids: set[str] = set()
+    if rd.is_dir():
+        for p in rd.glob("*.json"):
+            try:
+                row = json.loads(p.read_text(encoding="utf-8"))
+                ids.add(row.get("benchmark_id") or p.stem)
+            except (OSError, json.JSONDecodeError):
+                ids.add(p.stem)
+    return ids
+
+
+def materialize_queue_campaign(
+    campaign: Path, ids: list[str], *,
+    done_ids: set[str], n_workers: int, resume: bool,
+) -> None:
+    """Create the campaign dirs and seed the shared work-queue.
+
+    Writes ``queue.json`` (pending = ``ids`` minus already-done), the
+    ``workers`` count file the dashboard waits on, and a clean ``.done`` dir.
+    On a fresh run old ``results`` are cleared; on ``--resume`` they are kept and
+    become the ``done`` set, so anything without a result file (including a
+    crashed session's in-flight bench) is re-queued automatically.
+    """
+    from benchmarks import work_queue
+    (campaign / "results").mkdir(parents=True, exist_ok=True)
+    (campaign / ".done").mkdir(parents=True, exist_ok=True)
+    for old in (campaign / ".done").iterdir():
+        if old.is_file():
+            old.unlink()
+    if not resume:
+        for old in (campaign / "results").glob("*.json"):
+            old.unlink()
+    work_queue.init_queue(campaign, ids, done_ids=list(done_ids))
+    (campaign / "workers").write_text(f"{n_workers}\n", encoding="utf-8")
 
 
 def launch_osascript(cmds: list[str], stagger: float) -> None:
@@ -257,6 +303,7 @@ def launch_campaign(
     silent: bool = False,
     build: bool = False,
     resume: bool = False,
+    static: bool = False,
     wait: bool = True,
     interval: float = 5.0,
     dry_run: bool = False,
@@ -288,8 +335,8 @@ def launch_campaign(
             file=sys.stderr,
         )
 
-    slices = split_contiguous(ids, jobs)
     name = campaign_name(name)
+    campaign = LOGS_ROOT / name
 
     # Verbosity: by default pass NO flag, so each window's runner derives
     # its mode from the forwarded ``SWARM_VERBOSITY`` env (the swarm-config
@@ -303,28 +350,53 @@ def launch_campaign(
         runner_flags = []
     if not build:
         runner_flags.append("--skip-build")
-    if resume:
-        runner_flags.append("--resume")
     # Pace every window against the selected Codex account's 5-hour limit,
-    # same as the sequential picker path (src/cli/runner.py). Each window
-    # guards its own slice: before starting a benchmark it waits if 5-hour
-    # usage is ≥ the threshold (default 90%), so a fan-out doesn't keep
-    # firing benchmarks straight into the rate limit. (A slice of exactly
-    # one benchmark self-disables the guard — nothing to pace between.)
+    # same as the sequential picker path (src/cli/runner.py). Each window waits
+    # before starting a benchmark if 5-hour usage is ≥ the threshold (default
+    # 90%), so a fan-out doesn't keep firing benchmarks straight into the limit.
     runner_flags.append("--usage-guard")
 
-    print(f"campaign: logs/{name}")
-    print(f"{len(ids)} benchmarks → {len(slices)} sessions "
-          f"({'tmux' if tmux else 'Terminal windows'}):")
-    for k, s in enumerate(slices):
-        print(f"  slice {k:02d}: {len(s):2d}  {s[0]}..{s[-1]}")
+    if static:
+        # Legacy fixed contiguous slices: each session owns a disjoint lane and
+        # runs it in order. No rebalancing — kept behind --static for parity.
+        if resume:
+            runner_flags.append("--resume")
+        slices = split_contiguous(ids, jobs)
+        print(f"campaign: logs/{name}  (static slices)")
+        print(f"{len(ids)} benchmarks → {len(slices)} sessions "
+              f"({'tmux' if tmux else 'Terminal windows'}):")
+        for k, s in enumerate(slices):
+            print(f"  slice {k:02d}: {len(s):2d}  {s[0]}..{s[-1]}")
+        slice_paths = slice_paths_for(campaign, len(slices))
+        cmds = [
+            runner_cmd(f"--list-file {_shquote(str(p))}", campaign,
+                       f"slice_{k:02d}", runner_flags)
+            for k, p in enumerate(slice_paths)
+        ]
+    else:
+        # Default: one shared work-queue, N sessions PULL from it. A session
+        # that finishes early grabs the next pending bench instead of idling
+        # while a slow lane grinds — dynamic load-balancing. --resume is handled
+        # by the queue (pending = ids minus already-recorded), so it is NOT
+        # forwarded to the runner.
+        done_ids = _recorded_ids(campaign) if resume else set()
+        pending = [i for i in ids if i not in done_ids]
+        n_workers = max(1, min(jobs, len(pending))) if pending else 0
+        print(f"campaign: logs/{name}  (shared queue)")
+        print(f"{len(pending)} benchmark(s) → 1 shared queue · {n_workers} "
+              f"worker session(s) pulling "
+              f"({'tmux' if tmux else 'Terminal windows'})")
+        if done_ids:
+            print(f"  resume: {len(done_ids)} already recorded, skipped")
+        cmds = [
+            runner_cmd(f"--queue {_shquote(str(campaign))}", campaign,
+                       f"worker_{k:02d}", runner_flags)
+            for k in range(n_workers)
+        ]
 
-    campaign = LOGS_ROOT / name
-    slice_paths = slice_paths_for(campaign, len(slices))
-    cmds = [
-        runner_cmd(p, campaign, f"slice_{k:02d}", runner_flags)
-        for k, p in enumerate(slice_paths)
-    ]
+    if not cmds:
+        print("nothing to run (all benchmarks already recorded).")
+        return campaign
 
     if dry_run:
         print("\ndry-run — commands that WOULD launch (no files written):")
@@ -339,7 +411,13 @@ def launch_campaign(
     from benchmarks import loopback
     loopback.ensure_pool()
 
-    materialize_campaign(campaign, slices, resume=resume)
+    if static:
+        materialize_campaign(campaign, slices, resume=resume)
+    else:
+        materialize_queue_campaign(
+            campaign, ids, done_ids=done_ids,
+            n_workers=len(cmds), resume=resume,
+        )
 
     if tmux:
         launch_tmux(cmds, stagger)
@@ -386,8 +464,11 @@ def main() -> None:
     ap.add_argument("--build", action="store_true",
                     help="let each runner build images (default --skip-build)")
     ap.add_argument("--resume", action="store_true",
-                    help="pass --resume so each slice skips ids already recorded "
-                         "in this campaign (re-launch after some windows died)")
+                    help="skip ids already recorded in this campaign and re-queue "
+                         "anything left unfinished (re-launch after windows died)")
+    ap.add_argument("--static", action="store_true",
+                    help="legacy mode: pre-split into fixed contiguous slices "
+                         "instead of the dynamic shared queue (no rebalancing)")
     ap.add_argument("--no-wait", action="store_true",
                     help="spawn the sessions but don't turn this terminal into "
                          "the live dashboard (report later with campaign_report)")
@@ -416,6 +497,7 @@ def main() -> None:
         silent=args.silent,
         build=args.build,
         resume=args.resume,
+        static=args.static,
         wait=not args.no_wait,
         interval=args.interval,
         dry_run=args.dry_run,

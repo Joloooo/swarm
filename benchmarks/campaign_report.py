@@ -57,22 +57,43 @@ def done_dir(campaign: Path) -> Path:
     return campaign / ".done"
 
 
-def expected_ids(campaign: Path) -> list[str]:
-    """All benchmark ids assigned to this campaign, read from slices/.
+def _queue_ids(campaign: Path) -> list[str]:
+    """All ids in the shared work-queue (pending + running + done), if present.
 
-    Falls back to whatever results exist if there is no slices dir (so a
-    campaign report still works when pointed at an ad-hoc results folder).
-    Order preserved, de-duplicated.
+    Queue-mode campaigns (the default fan-out) have no slice files — the work
+    list lives in ``queue.json``. Returns [] for a static/legacy campaign.
     """
+    from benchmarks.work_queue import queue_path
+    qp = queue_path(campaign)
+    if not qp.exists():
+        return []
+    try:
+        q = json.loads(qp.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    out: list[str] = []
+    out += list(q.get("pending") or [])
+    out += list(q.get("running") or {})   # dict → its keys (the ids)
+    out += list(q.get("done") or [])
+    return out
+
+
+def expected_ids(campaign: Path) -> list[str]:
+    """All benchmark ids in this campaign. Order preserved, de-duplicated.
+
+    Source priority: the shared ``queue.json`` (dynamic fan-out), then
+    ``slices/`` (legacy static fan-out), then whatever ``results/`` exist (an
+    ad-hoc results folder).
+    """
+    ids: list[str] = _queue_ids(campaign)
     sd = slices_dir(campaign)
-    ids: list[str] = []
-    if sd.is_dir():
+    if not ids and sd.is_dir():
         for f in sorted(sd.glob("slice_*.txt")):
             for raw in f.read_text().splitlines():
                 line = raw.split("#", 1)[0].strip()
                 if line:
                     ids.append(line)
-    if not ids:  # ad-hoc dir with no slices — infer from result files
+    if not ids:  # ad-hoc dir — infer from result files
         ids = [p.stem for p in sorted(results_dir(campaign).glob("*.json"))]
     seen: set[str] = set()
     out: list[str] = []
@@ -83,15 +104,25 @@ def expected_ids(campaign: Path) -> list[str]:
     return out
 
 
-def slice_count(campaign: Path) -> int:
-    """Number of sessions the campaign was split into (slice files)."""
+def worker_count(campaign: Path) -> int:
+    """Number of worker sessions this campaign launched.
+
+    Queue mode records it in a ``workers`` file (the pullers aren't tied to
+    fixed slices); a legacy static campaign infers it from its slice files.
+    """
+    wf = campaign / "workers"
+    if wf.exists():
+        try:
+            return int(wf.read_text().strip())
+        except (ValueError, OSError):
+            pass
     return len(list(slices_dir(campaign).glob("slice_*.txt")))
 
 
 def done_count(campaign: Path) -> int:
-    """Number of sessions that have finished (markers touched)."""
+    """Number of worker sessions that have finished (markers touched)."""
     dd = done_dir(campaign)
-    return len(list(dd.glob("slice_*"))) if dd.is_dir() else 0
+    return len([p for p in dd.iterdir() if p.is_file()]) if dd.is_dir() else 0
 
 
 def collect(campaign: Path) -> dict[str, dict]:
@@ -161,7 +192,7 @@ def summarize(campaign: Path) -> dict:
             "missing": len(buckets["missing"]),
             "recorded": len(results),
         },
-        "slices": {"total": slice_count(campaign), "done": done_count(campaign)},
+        "workers": {"total": worker_count(campaign), "done": done_count(campaign)},
         "pass": buckets["pass"],
         "fail": buckets["fail"],
         "crash": buckets["crash"],
@@ -198,7 +229,7 @@ def _fmt_ids(
 def render(summary: dict) -> str:
     """Pretty multi-line report (also what gets saved to summary.txt)."""
     t = summary["totals"]
-    sl = summary["slices"]
+    sl = summary["workers"]
     tm = summary["timing"]
     bar = "═" * 70
 
@@ -214,7 +245,7 @@ def render(summary: dict) -> str:
         bar,
         f" Campaign {summary['campaign']}",
         bar,
-        f" {t['total']} benchmarks · {sl['total']} slices "
+        f" {t['total']} benchmarks · {sl['total']} workers "
         f"({sl['done']}/{sl['total']} finished)",
         f" agent-time Σ{agent_h:.1f}h · median {tm['median_s'] / 60:.1f}m · "
         f"max {tm['max_s'] / 60:.1f}m",
@@ -249,22 +280,22 @@ def write_summary(campaign: Path, summary: dict) -> tuple[Path, Path]:
 
 def _tick_line(campaign: Path) -> str:
     s = summarize(campaign)
-    t, sl = s["totals"], s["slices"]
+    t, sl = s["totals"], s["workers"]
     return (
-        f"  slices {sl['done']}/{sl['total']} · "
+        f"  workers {sl['done']}/{sl['total']} · "
         f"benchmarks {t['recorded']}/{t['total']} · "
         f"✓{t['pass']} ✗{t['fail']} ~{t['crash']}"
     )
 
 
 def wait_for_done(campaign: Path, *, interval: float = 5.0) -> bool:
-    """Block until every slice has finished, ticking progress to stderr.
+    """Block until every worker session has finished, ticking progress to stderr.
 
-    Returns True if all slices finished, False if interrupted (Ctrl-C) or
-    there are no slice markers to wait on. Either way the caller should
+    Returns True if all workers finished, False if interrupted (Ctrl-C) or
+    there are no worker markers to wait on. Either way the caller should
     still render whatever results exist.
     """
-    total = slice_count(campaign)
+    total = worker_count(campaign)
     if total == 0:
         return False
     is_tty = sys.stderr.isatty()
@@ -311,7 +342,7 @@ def main() -> None:
                     help="the logs/<campaign>/ directory to report on")
     ap.add_argument("--no-wait", action="store_true",
                     help="report immediately on current state instead of "
-                         "waiting for unfinished slices")
+                         "waiting for unfinished workers")
     ap.add_argument("--interval", type=float, default=5.0,
                     help="seconds between progress ticks while waiting (default 5)")
     args = ap.parse_args()

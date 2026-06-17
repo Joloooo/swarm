@@ -45,6 +45,11 @@ from src.nodes.base.flag_watcher import (
     is_captured,
     reset_captured,
 )
+from src.llm.hibernation import (
+    enable_hibernation,
+    paused_seconds,
+    reset_hibernation,
+)
 from src.llm.rate_limit_signal import (
     get_rate_limit_error,
     is_rate_limited,
@@ -807,6 +812,42 @@ def _record_findings(result: dict, agent_state: dict) -> None:
     result["findings_by_severity"] = _findings_breakdown(findings)
 
 
+async def _drive_with_pausable_timeout(coro, timeout: float) -> None:
+    """Like ``asyncio.wait_for`` but the clock FREEZES during a usage-cap park.
+
+    A plain ``wait_for`` keeps counting while a worker hibernates on the usage
+    cap, so a multi-hour park would blow the agent's wall-clock budget. Here the
+    effective deadline is ``timeout + paused_seconds()`` and is re-evaluated on a
+    short poll: while a park is open, ``paused_seconds()`` grows in real time, so
+    the deadline advances in lockstep with elapsed time and never expires
+    mid-park. Once the park ends, the budget stops growing and the timer resumes.
+
+    Raises :class:`asyncio.TimeoutError` (same as ``wait_for``) when the agent's
+    *active* time exceeds ``timeout``, so ``run_one``'s timeout handler is
+    unchanged. With no hibernation, ``paused_seconds()`` stays 0 and this behaves
+    exactly like ``wait_for`` (modulo the poll granularity).
+    """
+    poll = float(os.getenv("SWARM_RUN_TIMEOUT_POLL_S", "10"))
+    task = asyncio.ensure_future(coro)
+    start = time.monotonic()
+    try:
+        while True:
+            remaining = (timeout + paused_seconds()) - (time.monotonic() - start)
+            if remaining <= 0:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+                raise asyncio.TimeoutError
+            done, _ = await asyncio.wait({task}, timeout=min(remaining, poll))
+            if task in done:
+                return task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+
+
 async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
     flag = expected_flag(benchmark_id)
     started = time.time()
@@ -845,6 +886,13 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
     # flag left set by a previous bench in this process, so this bench is only
     # marked crashed if ITS OWN run hits the limit. See src/llm/rate_limit_signal.py.
     reset_rate_limited()
+    # Hibernation: in benchmark mode, a usage-cap hit parks the in-flight agent
+    # until the cap resets instead of crashing the run (see src/llm/hibernation.py).
+    # Enable it for this (benchmark) path — real audits leave it off so they
+    # never silently hang — and clear the per-bench park accumulator so this
+    # bench's frozen-timer budget starts from zero.
+    enable_hibernation(True)
+    reset_hibernation()
 
     result: dict = {
         "benchmark_id": benchmark_id,
@@ -949,7 +997,7 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
             ):
                 agent_state = snapshot
 
-        await asyncio.wait_for(_drive_graph(), timeout=RUN_TIMEOUT_S)
+        await _drive_with_pausable_timeout(_drive_graph(), RUN_TIMEOUT_S)
 
         # Verdict: did the planner submit a verified flag?
         #
@@ -1039,7 +1087,13 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         # Running it here in the finally keeps teardown AFTER the timeout /
         # late-capture harvest in the except blocks above, exactly as before.
         await stack.aclose()
-        result["duration_s"] = round(time.time() - started, 1)
+        # Report ACTIVE agent time: subtract any usage-cap hibernation so a
+        # multi-hour park does not masquerade as a multi-hour solve time (and
+        # does not skew the campaign timing stats). Matches the frozen-timer
+        # budget — paused time is not work. paused_seconds() is the banked total
+        # here (all holds released by now).
+        result["duration_s"] = round(max(0.0, time.time() - started - paused_seconds()), 1)
+        result["hibernated_s"] = round(paused_seconds(), 1)
     # Rate-limit safety net: if any LLM call this bench hit a Codex rate-limit
     # / quota error (process-global signal set in src/llm/codex.py) and we did
     # NOT capture a flag, record it as a crash even if some node swallowed the

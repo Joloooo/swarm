@@ -63,7 +63,6 @@ from src.observability import (
     install_jsonl_log_handler,
     make_run_id,
     run_dir,
-    set_sweep_log_file,
     set_terminal_log_file,
     terminal_log_path,
 )
@@ -770,8 +769,8 @@ def _container_bridge_target(benchmark_id: str) -> str | None:
 
 
 # Canonical severity order — drives the ordering of the breakdown shown in
-# the end-of-bench line and stored in summary.json. Matches Severity in
-# src/state.py (critical → info).
+# the end-of-bench line and the per-benchmark verdict record. Matches Severity
+# in src/state.py (critical → info).
 _SEVERITY_ORDER = ("critical", "high", "medium", "low", "info")
 
 
@@ -1329,16 +1328,12 @@ async def main_async(args) -> int:
     except Exception:  # noqa: BLE001 — banner failure must not stop the run
         pass
 
-    # Sweep-level log sink — persists the per-bench verdict blocks
-    # ("◆ XBEN-… ✓ FLAG FOUND …") and the final "Summary: N pass …" line,
-    # which the per-run sink (displayed_terminal_logs.log, cleared between
-    # benches) never captures because they are emitted with no per-run sink
-    # attached. Lands in logs/sweep_<ts>.log.
-    sweep_log_path = LOGS_ROOT / f"sweep_{time.strftime('%m-%d_%Hh%Mm%Ss')}.log"
-    set_sweep_log_file(sweep_log_path)
-
+    # Sweep-level log sink intentionally NOT attached. It used to persist a
+    # campaign-wide sweep_<ts>.log duplicating each bench's verdict line (which
+    # the per-run displayed_terminal_logs.log already keeps) plus the final
+    # "Summary: N pass" line (which summary.txt records). It was pure clutter in
+    # multi-worker sweeps, so it is no longer written.
     LIVE.runner_message(f"running {len(ids)} benchmark(s)")
-    LIVE.runner_message(f"sweep log → {sweep_log_path}")
 
     # Usage guard: pace a multi-benchmark sweep against the selected Codex
     # account's 5-hour limit (None for a single-benchmark run). See
@@ -1465,8 +1460,6 @@ async def main_async(args) -> int:
         f"Summary: {summary['pass']} pass, {summary['fail']} fail, "
         f"{summary['crash']} crash / {total} total"
     )
-    LIVE.runner_message(f"sweep log saved → {sweep_log_path}")
-    set_sweep_log_file(None)
     if aborted:
         LIVE.runner_message(
             "sweep aborted early by the usage guard (remaining benchmarks "

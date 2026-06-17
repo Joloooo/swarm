@@ -11,13 +11,17 @@ crashed, or never reported.
 
 Layout it reads under ``<campaign>/``::
 
-    slices/slice_NN.txt     the benchmark ids assigned to each session
-    results/<id>.json       one verdict file per benchmark (write_jsonl)
-    .done/slice_NN          marker touched when a session's slice exits
-    run-*/                  per-run log dirs (not read here, just colocated)
+    slices/slice_NN.txt     the benchmark ids assigned to each session (static)
+    results/<id>.json       one verdict file per benchmark (write_jsonl) —
+                            TRANSIENT: swept once the campaign finishes
+    .done/slice_NN          marker touched when a session's slice exits —
+                            TRANSIENT: swept once the campaign finishes
+    run-*/                  per-run log dirs (kept; the lasting record)
 
-Writes ``<campaign>/summary.json`` (machine-readable, for the thesis) and
-``<campaign>/summary.txt`` (the rendered table).
+Writes ``<campaign>/summary.txt`` (the rendered table — the kept artifact).
+On a confirmed-complete campaign it then removes the transient ``results/``
+and ``.done/`` dirs, leaving only the run dirs + ``summary.txt`` behind.
+(``summary.json`` is no longer written — nothing consumed it.)
 
 Standalone usage — re-print any past campaign at any time::
 
@@ -33,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -268,14 +273,16 @@ def render(summary: dict) -> str:
     return "\n".join(lines)
 
 
-def write_summary(campaign: Path, summary: dict) -> tuple[Path, Path]:
-    """Persist summary.json + summary.txt into the campaign dir."""
+def write_summary(campaign: Path, summary: dict) -> Path:
+    """Persist the human-readable ``summary.txt`` into the campaign dir.
+
+    The machine-readable ``summary.json`` is no longer written — nothing read
+    it, and ``summary.txt`` is the kept thesis artifact. Returns the txt path.
+    """
     campaign.mkdir(parents=True, exist_ok=True)
-    json_path = campaign / "summary.json"
     txt_path = campaign / "summary.txt"
-    json_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     txt_path.write_text(render(summary) + "\n", encoding="utf-8")
-    return json_path, txt_path
+    return txt_path
 
 
 def _tick_line(campaign: Path) -> str:
@@ -325,13 +332,34 @@ def watch_and_report(campaign: Path, *, wait: bool = True, interval: float = 5.0
     campaign = campaign.expanduser().resolve()
     if not campaign.is_dir():
         sys.exit(f"campaign dir not found: {campaign}")
-    if wait:
-        wait_for_done(campaign, interval=interval)
+
+    # Idempotency: a finished campaign has had its results/ + .done/ swept
+    # (see below) and keeps only summary.txt. Re-reporting it must NOT rebuild
+    # from the now-absent results/ — that would clobber the real summary.txt
+    # with an all-missing one. Print the kept summary and return untouched.
+    txt = campaign / "summary.txt"
+    if not results_dir(campaign).exists() and txt.exists():
+        print(txt.read_text(encoding="utf-8"))
+        print(f"\n(already finished — {txt})")
+        return {}
+
+    finished = wait_for_done(campaign, interval=interval) if wait else False
     summary = summarize(campaign)
-    json_path, txt_path = write_summary(campaign, summary)
+    txt_path = write_summary(campaign, summary)
     print(render(summary))
-    print(f"\nsaved → {json_path}")
-    print(f"saved → {txt_path}")
+    print(f"\nsaved → {txt_path}")
+
+    # On a confirmed-complete campaign, sweep the transient run-state dirs:
+    # results/<bid>.json (per-bench IPC for the live dashboard + resume) and
+    # .done/ (worker-exit markers). Their data is now folded into summary.txt
+    # and the run dirs, so they are pure clutter once the run is over. Only
+    # when the wait actually completed — a --no-wait snapshot or a Ctrl-C'd
+    # wait leaves them so an in-flight campaign keeps its resume/IPC state.
+    if finished:
+        for d in (results_dir(campaign), done_dir(campaign), slices_dir(campaign)):
+            if d.exists():
+                shutil.rmtree(d, ignore_errors=True)
+
     return summary
 
 

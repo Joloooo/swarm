@@ -1285,11 +1285,18 @@ async def main_async(args) -> int:
         ids = load_list_file(args.list_file)
     elif args.bench:
         ids = [args.bench]
+    elif args.queue:
+        # Dynamic pull mode: the actual dispatch claims live from the shared
+        # queue. ``ids`` here is only a startup-banner snapshot of what is
+        # currently pending campaign-wide — this worker will run whatever
+        # subset it manages to claim, not this whole list.
+        from benchmarks import work_queue
+        ids = work_queue.list_pending(args.queue)
     else:
-        LIVE.runner_message("specify --bench <id> or --daily", level="error")
+        LIVE.runner_message("specify --bench <id>, --daily, --list-file or --queue", level="error")
         return 2
 
-    if args.resume:
+    if args.resume and not args.queue:
         done = load_recorded_ids(skip_errors=args.retry_errors)
         original_count = len(ids)
         ids = [bid for bid in ids if bid not in done]
@@ -1341,17 +1348,10 @@ async def main_async(args) -> int:
     summary = {"pass": 0, "fail": 0, "crash": 0}
     aborted = False
 
-    for bid in ids:
-        # Pace the sweep BEFORE starting this benchmark. On a usage-check
-        # failure the guard retries, then raises UsageGuardAbort — we stop the
-        # sweep rather than run blind into the rate limit.
-        if guard is not None:
-            try:
-                guard()
-            except Exception as exc:  # noqa: BLE001 — UsageGuardAbort etc. → stop
-                LIVE.runner_message(f"usage guard: {exc}", level="error")
-                aborted = True
-                break
+    # The per-benchmark unit of work, shared by the fixed-list loop and the
+    # dynamic queue loop below: run it, write its jsonl, classify once, mirror
+    # the verdict into the picker marks, and emit the end-of-bench verdict line.
+    async def _run_and_record(bid: str) -> None:
         r = await run_one(bid, skip_build=args.skip_build)
         try:
             path = write_jsonl(r)
@@ -1416,9 +1416,54 @@ async def main_async(args) -> int:
             except Exception:  # noqa: BLE001 — observability must not break the sweep
                 pass
 
+    def _paced() -> bool:
+        """Run the usage guard before a bench; False (and abort) if it stops us.
+
+        On a usage-check failure the guard retries, then raises UsageGuardAbort —
+        we stop rather than run blind into the rate limit.
+        """
+        nonlocal aborted
+        if guard is None:
+            return True
+        try:
+            guard()
+            return True
+        except Exception as exc:  # noqa: BLE001 — UsageGuardAbort etc. → stop
+            LIVE.runner_message(f"usage guard: {exc}", level="error")
+            aborted = True
+            return False
+
+    if args.queue:
+        # Dynamic pull: claim the next pending bench, run it, mark it done,
+        # repeat. When the queue drains, reclaim any crashed peer's in-flight
+        # bench (requeue_dead keys on a dead PID, never a time threshold, so a
+        # legitimately hibernating run is left alone) before exiting — so a dead
+        # session's work is retried by a live worker rather than lost.
+        import socket
+        from benchmarks import work_queue
+        pid, host = os.getpid(), socket.gethostname()
+        while True:
+            if not _paced():
+                break
+            bid = work_queue.claim_next_pending(args.queue, pid=pid, worker=host)
+            if bid is None:
+                if work_queue.requeue_dead(args.queue) == 0:
+                    break
+                continue
+            try:
+                await _run_and_record(bid)
+            finally:
+                work_queue.mark_done(args.queue, bid)
+    else:
+        for bid in ids:
+            if not _paced():
+                break
+            await _run_and_record(bid)
+
+    total = summary["pass"] + summary["fail"] + summary["crash"]
     LIVE.runner_message(
         f"Summary: {summary['pass']} pass, {summary['fail']} fail, "
-        f"{summary['crash']} crash / {len(ids)} total"
+        f"{summary['crash']} crash / {total} total"
     )
     LIVE.runner_message(f"sweep log saved → {sweep_log_path}")
     set_sweep_log_file(None)
@@ -1440,6 +1485,11 @@ def main() -> None:
                    help="run the daily-15 list (benchmarks/daily_15.txt)")
     g.add_argument("--list-file", type=Path,
                    help="run benchmark IDs from a custom text file")
+    g.add_argument("--queue", type=Path, metavar="CAMPAIGN_DIR",
+                   help="pull benchmarks dynamically from a shared campaign "
+                        "queue (benchmarks/work_queue.py) instead of a fixed "
+                        "list — used by launch_split's concurrent fan-out so "
+                        "free workers grab the next pending bench")
     ap.add_argument("--skip-build", action="store_true",
                     help="skip 'make build' (use already-built images)")
     ap.add_argument("--resume", action="store_true",

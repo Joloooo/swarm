@@ -227,6 +227,12 @@ def requeue_dead(campaign: Path) -> int:
         return len(dead)
 
 
+def list_pending(campaign: Path) -> list[str]:
+    """Snapshot of the currently-pending ids (for a startup banner / preview)."""
+    with _queue_lock(campaign):
+        return list(_load(campaign)["pending"])
+
+
 def stats(campaign: Path) -> dict[str, int]:
     """``{"pending", "running", "done", "total"}`` counts for the dashboard."""
     with _queue_lock(campaign):

@@ -1370,7 +1370,7 @@ async def main_async(args) -> int:
             # benchmark that previously passed/failed — that's how you spot runs
             # that need re-running. Best-effort — must never break the sweep.
             try:
-                bench_results.record(bid, status)
+                bench_results.record(bid, status, r.get("duration_s"))
             except Exception:  # noqa: BLE001 — triage write must not stop the sweep
                 logger.exception("[%s] triage mark update failed", bid)
 

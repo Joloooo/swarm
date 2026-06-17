@@ -399,9 +399,10 @@ def _pick_bench() -> tuple[list[str], int] | None:
         return None
 
     results = bench_results.load()
-    # Last-run solve time per benchmark, read once from the result logs (old
-    # runs included). Shown dim next to each ✓/✗/~ mark.
-    durations = bench_results.load_last_durations()
+    # Last-run solve time per benchmark, read from the same bench_results.json
+    # entry as the ✓/✗/~ mark — verdict and time describe the one run, so they
+    # appear and disappear together. Shown dim next to each mark.
+    durations = bench_results.load_durations()
     queue: list[str] = []        # ordered run/selection set, built with r / a.
     state = {
         "cursor": 0,             # flat index into ``ids`` of the pointed-at cell.

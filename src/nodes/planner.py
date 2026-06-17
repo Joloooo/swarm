@@ -688,6 +688,37 @@ def _looks_transient(err: Exception) -> bool:
     return any(h in name or h in msg for h in _TRANSIENT_HINTS)
 
 
+def _is_rate_limit_error(err: BaseException) -> bool:
+    """True if ``err`` is (or wraps) a Codex usage-cap / rate-limit / quota error.
+
+    The planner uses this to END the run cleanly as a ~crash on a cap-hit,
+    rather than bouncing to ``report`` — which loops back through the planner
+    (the report is rejected in benchmark mode without ``budget_exhausted``) and
+    burns the whole iteration budget on instant 429-failed calls, mislabelling
+    an infrastructure stop as a genuine ``MAX_PLANNER_ITERS`` failure. See
+    ``tests/FAILURES.md`` (2026-06-17) for the run this was diagnosed from.
+    """
+    try:
+        from src.llm.codex import (
+            CodexQuotaExceededError,
+            CodexRateLimitError,
+            CodexUsageLimitError,
+        )
+        if isinstance(
+            err,
+            (CodexRateLimitError, CodexQuotaExceededError, CodexUsageLimitError),
+        ):
+            return True
+    except Exception:  # noqa: BLE001 — never let the import break error handling
+        pass
+    msg = str(err).lower()
+    return (
+        "usage_limit_reached" in msg
+        or "rate limit" in msg
+        or "returned 429" in msg
+    )
+
+
 # ── relevant_summary validation ────────────────────────────────────────
 #
 # Per-key caps for ``state["relevant_summary"]``. The schema, prompted
@@ -2994,6 +3025,7 @@ class PlannerNode(BaseNode):
             CodexInvalidPromptError,
             CodexQuotaExceededError,
             CodexContextWindowError,
+            CodexUsageLimitError,
         )
         from src.llm.callbacks import make_call_config
         from src.llm.provider import LLMConfig as _LLMConfig, Provider as _Provider
@@ -3069,7 +3101,8 @@ class PlannerNode(BaseNode):
         )
 
         max_attempts = 3
-        for attempt in range(max_attempts):
+        attempt = 0
+        while True:
             try:
                 result, _attempts, _tier = await astream_with_refusal_retry(
                     agent_factory=_primary_factory,
@@ -3085,24 +3118,78 @@ class PlannerNode(BaseNode):
                     mode="ainvoke",
                 )
                 return result or {"messages": []}
+            except CodexUsageLimitError as e:
+                # ChatGPT-subscription usage cap (5h / weekly): a TIMED WAIT,
+                # not a failure. Park the planner in place until the cap resets
+                # and retry the SAME call — WITHOUT consuming a transient
+                # attempt — so a mid-run cap pauses-and-resumes. This mirrors
+                # the worker path in ``src/llm/codex._agenerate``. Without it the
+                # cap propagated to ``execute`` and bounced to ``report``,
+                # looping the planner until MAX_PLANNER_ITERS and mislabelling
+                # the infra stop as a genuine fail (tests/FAILURES.md 2026-06-17).
+                from src.llm.hibernation import (
+                    hibernate_until_reset,
+                    hibernation_enabled,
+                )
+                if hibernation_enabled():
+                    await hibernate_until_reset(
+                        getattr(e, "resets_at", None),
+                        getattr(e, "resets_in_seconds", None),
+                        agent_id="_planner",
+                        log=self.log,
+                    )
+                    continue
+                # Not hibernating (real audit, or hibernation disabled): flag the
+                # run rate-limited so the runner records it as ~crash (re-run),
+                # never a fake fail, then propagate.
+                from src.llm.rate_limit_signal import signal_rate_limited
+                signal_rate_limited(f"{type(e).__name__}: {e}")
+                raise
             except non_retryable:
                 raise
             except (CodexAPIError, Exception) as e:  # noqa: BLE001
-                if attempt == max_attempts - 1:
+                attempt += 1
+                if attempt >= max_attempts:
                     raise
                 if not _looks_transient(e):
                     raise
-                delay = 2.0 * (attempt + 1)
+                delay = 2.0 * attempt
                 self.log.warning(
                     "Supervisor transient failure on attempt %d/%d "
                     "(%s) — sleeping %.1fs and retrying: %s",
-                    attempt + 1, max_attempts, type(e).__name__, delay,
+                    attempt, max_attempts, type(e).__name__, delay,
                     str(e)[:200],
                 )
                 await asyncio.sleep(delay)
-        raise RuntimeError("planner retry loop exited without result")
+
+    def _halt_on_rate_limit(self, err: BaseException, iters: int) -> dict:
+        """End the run cleanly when a Codex usage-cap / rate-limit reaches the
+        planner and could not be parked (hibernation off, or the park path did
+        not engage).
+
+        Flags the run rate-limited so ``xbow_runner`` records it as ~crash
+        (re-run) instead of a fake fail, and routes straight to ``report`` via
+        ``budget_exhausted`` so the planner does NOT bounce-and-loop. The dead
+        429 turn is NOT counted against the iteration budget (``iters - 1``) —
+        a failed call is not a planner decision. Without this the cap burned the
+        whole budget on instant 429 retries and the run died with a misleading
+        MAX_PLANNER_ITERS message (tests/FAILURES.md 2026-06-17).
+        """
+        from src.llm.rate_limit_signal import signal_rate_limited
+        signal_rate_limited(f"{type(err).__name__}: {err}")
+        return {
+            "planner_iters": max(0, iters - 1),
+            "next_action": "report",
+            "budget_exhausted": True,
+            "messages": [AIMessage(content=(
+                "Run halted: Codex usage / rate limit reached. Marking the run "
+                "for re-run rather than burning the planner budget on retries."
+            ))],
+        }
 
     async def execute(self, state: SwarmGraphState) -> dict:
+        from src.llm.rate_limit_signal import is_rate_limited
+
         iters = state.get("planner_iters", 0) + 1
 
         # Pull the run_id once so every LLM call below logs into the
@@ -3407,6 +3494,8 @@ class PlannerNode(BaseNode):
             )
         except Exception as e:
             self.log.exception("Supervisor planner failed: %s", e)
+            if _is_rate_limit_error(e) or is_rate_limited():
+                return self._halt_on_rate_limit(e, iters)
             return {
                 "planner_iters": iters,
                 "next_action": "report",
@@ -3450,6 +3539,8 @@ class PlannerNode(BaseNode):
                 )
             except Exception as e:
                 self.log.exception("Supervisor retry failed: %s", e)
+                if _is_rate_limit_error(e) or is_rate_limited():
+                    return self._halt_on_rate_limit(e, iters)
                 return {
                     "planner_iters": iters,
                     "next_action": "report",

@@ -15,10 +15,12 @@ Everything from one run is collected under a single **campaign directory**,
         queue.json              shared pending/running/done work-queue (default)
         workers                 number of worker sessions launched
         slices/slice_NN.txt     legacy: ids per session (only with --static)
-        run-*/                  every per-run log dir (via SWARM_LOGS_ROOT)
+        run-*/                  every per-run log dir (via SWARM_LOGS_ROOT) — kept
         results/<id>.json       one verdict per benchmark (via SWARM_RESULTS_DIR)
+                                — transient: swept when the campaign finishes
         .done/worker_NN         marker each session touches when it exits
-        summary.json/.txt       written by benchmarks/campaign_report
+                                — transient: swept when the campaign finishes
+        summary.txt             written by benchmarks/campaign_report (kept)
 
 Each session is a fully independent OS process: its own PID, its own
 loopback IP leased from ``benchmarks/.loopback_leases/`` (so targets don't

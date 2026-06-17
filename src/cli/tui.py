@@ -243,7 +243,7 @@ def _show_codex_usage() -> None:
 _MAX_COLS = 4
 _GAP = 2             # blank columns between grid cells
 # Width kept after each label for its trailing annotation — whichever is
-# shown: the " [NNN]" per-slice run-order number (selected) or the last-run
+# shown: the " [NNN]" dispatch-order number (selected) or the last-run
 # solve time " (Xm Ys)" (unselected). 10 covers " (20m 00s)".
 _SUFFIX_RESERVE = 10
 
@@ -256,22 +256,12 @@ _QUEUE_PREVIEW = 8
 # at rest; a selected benchmark takes its slice colour instead (see below).
 _TAG_STYLE = "fg:ansibrightblue"
 
-# Per-slice colours for the run sequence(s). The selected set runs as
-# ``concurrency`` contiguous slices (each its own Terminal window, each running
-# its benchmarks in sequence), so each slice is drawn in its own colour with
-# its own 1..N numbering: concurrency 1 → one green sequence; 2 → green +
-# yellow; more → cycle this list. Red is excluded (it's the ✗ fail mark), and
-# adjacent slices always differ since slices take consecutive colours.
-_SLICE_COLORS = (
-    "ansigreen", "ansiyellow", "ansicyan", "ansimagenta", "ansiblue",
-    "ansibrightgreen", "ansibrightyellow", "ansibrightcyan",
-    "ansibrightmagenta", "ansibrightblue",
-)
-
-
-def _slice_color(slice_idx: int) -> str:
-    """The colour name for slice ``slice_idx`` (cycles :data:`_SLICE_COLORS`)."""
-    return _SLICE_COLORS[slice_idx % len(_SLICE_COLORS)]
+# Colour for a benchmark that is selected to run. The selected set goes into ONE
+# shared work-queue that ``concurrency`` worker sessions PULL from — there are no
+# fixed per-window lanes any more — so the whole selection is one colour with a
+# single 1..N dispatch-order number (``[1]`` is claimed first). Green; red is
+# reserved for the ✗ fail mark.
+_QUEUE_STYLE = "ansigreen"
 
 
 # Max width of a grid label. Tag lists run up to ~68 chars for the few
@@ -312,7 +302,7 @@ def _cell_segments(
     base: str,
     tags_str: str,
     result: str | None,
-    slice_info: tuple[int, int] | None,
+    order: int | None,
     duration_s: float | None,
     is_cursor: bool,
     content_w: int,
@@ -321,14 +311,14 @@ def _cell_segments(
 
     The ✓/✗/~ result mark is coloured. The label is the id base (``XBEN-004-``)
     plus its vulnerability ``tags_str`` (``xss``). A benchmark that is selected
-    for a run carries ``slice_info`` = ``(slice_index, position_in_slice)``:
-    the whole label is drawn in that slice's colour with a ``[position]``
-    suffix, so each concurrent slice reads as its own coloured 1..N sequence.
-    An unselected benchmark keeps a default-coloured base with its tags in
-    :data:`_TAG_STYLE`, followed by its last run's solve time ``(Xm Ys)`` in
-    dim when ``duration_s`` is known (the slice ``[position]`` takes that slot
-    while selected). The whole cell is reverse-video when it is the pointed-at
-    benchmark, so the cursor reads as a highlighted bar.
+    for a run carries ``order`` = its 1-based place in the shared dispatch
+    queue: the whole label is drawn in the queue colour with a ``[order]``
+    suffix (``[1]`` is claimed first). An unselected benchmark keeps a
+    default-coloured base with its tags in :data:`_TAG_STYLE`, followed by its
+    last run's solve time ``(Xm Ys)`` in dim when ``duration_s`` is known (the
+    ``[order]`` number takes that slot while selected). The whole cell is
+    reverse-video when it is the pointed-at benchmark, so the cursor reads as a
+    highlighted bar.
     """
     if result == bench_results.OK:
         segs = [("fg:ansigreen bold", "✓"), ("", " ")]
@@ -338,11 +328,11 @@ def _cell_segments(
         segs = [("fg:ansiyellow bold", "~"), ("", " ")]
     else:
         segs = [("", "  ")]
-    if slice_info is not None:
-        # Selected → whole label + position in the slice's colour.
-        style = f"fg:{_slice_color(slice_info[0])} bold"
+    if order is not None:
+        # Selected → whole label + dispatch-order number, in the queue colour.
+        style = f"fg:{_QUEUE_STYLE} bold"
         segs.append((style, base + tags_str))
-        segs.append((style, f" [{slice_info[1]}]"))
+        segs.append((style, f" [{order}]"))
     else:
         segs.append(("", base))
         if tags_str:
@@ -370,8 +360,8 @@ def _pick_bench() -> tuple[list[str], int] | None:
               immediately). ✓ solved, ✗ genuinely failed, ~ (yellow)
               codex/API or infra crash with no fair attempt.
       ``r`` — select / unselect the highlighted benchmark. The selected set
-              runs as ``concurrency`` contiguous slices, each drawn in its own
-              colour with its own 1..N run-order numbering.
+              goes into one shared queue that ``concurrency`` worker sessions
+              pull from; each bench is numbered ``[N]`` in dispatch order.
       ``a`` — select all / unselect all (toggle).
       ``f`` — select every ✗-failed benchmark / unselect (toggle) — handy for
               re-running just the failures.
@@ -443,25 +433,16 @@ def _pick_bench() -> tuple[list[str], int] | None:
         """Keep concurrency in 1..selected so it can never exceed the set."""
         state["concurrency"] = max(1, min(state["concurrency"], _sel_count()))
 
-    def _slice_map() -> dict[str, tuple[int, int]]:
-        """``{bench_id: (slice_index, position_in_slice)}`` for the selection.
+    def _queue_order_map() -> dict[str, int]:
+        """``{bench_id: dispatch_position}`` (1-based) for the selection.
 
-        Splits the queue into ``concurrency`` contiguous slices using the SAME
-        function the campaign launcher uses (``launch_split.split_contiguous``),
-        so the coloured sequences shown here are exactly the windows that will
-        run. Position is 1-based within each slice. Empty when nothing is
-        selected. Cheap (≤104 items), recomputed each render so it tracks
-        ``r``/``a``/``c`` live.
+        The selected set goes into one shared work-queue (FIFO: the launcher
+        seeds ``pending`` in this order and workers pop the front), so the
+        number shown is simply each bench's place in line — ``[1]`` is claimed
+        first. Empty when nothing is selected; recomputed each render so it
+        tracks ``r``/``a`` live.
         """
-        if not queue:
-            return {}
-        from benchmarks.launch_split import split_contiguous
-        conc = max(1, min(state["concurrency"], len(queue)))
-        out: dict[str, tuple[int, int]] = {}
-        for slice_idx, sl in enumerate(split_contiguous(queue, conc)):
-            for pos, bid in enumerate(sl, 1):
-                out[bid] = (slice_idx, pos)
-        return out
+        return {bid: pos for pos, bid in enumerate(queue, 1)}
 
     def _move(dr: int, dc: int) -> None:
         rows, cols = _dims()
@@ -487,8 +468,8 @@ def _pick_bench() -> tuple[list[str], int] | None:
         n_fail = marks.count(bench_results.FAIL)
         n_api = marks.count(bench_results.API)
         n_none = n - n_ok - n_fail - n_api
-        # The selection split into coloured slices, computed once per render.
-        smap = _slice_map()
+        # The selection's dispatch order (queue position), computed per render.
+        qmap = _queue_order_map()
         list_sel = len(queue) <= _QUEUE_PREVIEW   # list ids vs. count in header
         out: list[tuple[str, str]] = [
             ("bold", "Which benchmark(s) do you want to run?"),
@@ -525,8 +506,8 @@ def _pick_bench() -> tuple[list[str], int] | None:
                 out.append(("fg:ansibrightgreen bold", f"selected: {len(queue)} of {n}"))
                 out.append((
                     "fg:ansibrightgreen",
-                    f"  → split into {max(1, min(state['concurrency'], len(queue)))} "
-                    f"coloured slice(s)\n",
+                    f"  → 1 shared queue, pulled by "
+                    f"{max(1, min(state['concurrency'], len(queue)))} worker(s)\n",
                 ))
         else:
             out.append(("fg:ansibrightblack",
@@ -562,7 +543,7 @@ def _pick_bench() -> tuple[list[str], int] | None:
                 out.extend(_cell_segments(
                     base, _capped_tags(base, ",".join(tags)),
                     results.get(bench_id),
-                    smap.get(bench_id), durations.get(bench_id),
+                    qmap.get(bench_id), durations.get(bench_id),
                     i == state["cursor"], content_w,
                 ))
                 if c != cols - 1:

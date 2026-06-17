@@ -861,6 +861,20 @@ def _classify_response_failed(error: dict | None) -> CodexStreamError:
         return CodexContextWindowError(msg)
     if code == "insufficient_quota":
         return CodexQuotaExceededError(msg)
+    # The ChatGPT-subscription weekly / 5-hour usage cap arrives as a
+    # ``response.failed`` event whose discriminator is ``type`` —
+    # ``{"type":"usage_limit_reached", "resets_in_seconds": ...}`` — with an
+    # EMPTY ``code``. So the code-keyed checks here miss it and it falls through
+    # to the generic *retryable* ``CodexStreamError`` below. That never trips the
+    # rate-limit signal (src/llm/rate_limit_signal.py), gets pointlessly retried
+    # against a cap that won't clear for hours, and — when a worker swallows the
+    # eventual error — leaves the run recorded as an ordinary ``fail`` instead of
+    # a ``~`` crash. It is a usage cap, not a transient throttle, so treat it as
+    # the (non-retryable) quota error it is: the run aborts at once, the signal
+    # fires, and classify() marks it crashed. (A transient per-minute
+    # ``rate_limit_exceeded`` stays retryable below — that one CAN recover.)
+    if error.get("type") == "usage_limit_reached" or code == "usage_limit_reached":
+        return CodexQuotaExceededError(msg)
     if code == "usage_not_included":
         return CodexUsageNotIncludedError(msg)
     if code == "cyber_policy":

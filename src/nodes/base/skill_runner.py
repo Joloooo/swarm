@@ -1754,6 +1754,21 @@ async def _run_skill_agent_impl(
     _no_progress_mw = NoProgressNudgeMiddleware(
         agent_id=config.agent_id, log=node.log,
     )
+    # Ablation: the no-progress nudge re-injects the DIVERSITY_RULES /
+    # TRANSFORMATION_HYPOTHESIS guidance in-loop when a worker plateaus on
+    # byte-identical outputs, so it IS a prompting technique delivered
+    # dynamically. When prompting techniques are ablated, drop it too —
+    # otherwise a stuck worker is still rescued by the exact guidance the
+    # no-prompting-techniques row is meant to remove, which would
+    # under-measure the effect precisely where the technique matters most.
+    # Read via the module object (not ``from src.graph import config``) for
+    # the same import-cycle reason noted at the fallback factory below.
+    from src import graph as _graph_module
+    _prompting_off = bool(getattr(
+        getattr(_graph_module.config, "capability", None),
+        "disable_prompting_techniques", False,
+    ))
+    _middleware = [] if _prompting_off else [_no_progress_mw]
 
     # Per-dispatch progressive-disclosure tool: when this skill ships
     # reference files (src/skills/<name>/references/*.md), bind a scoped
@@ -1780,7 +1795,7 @@ async def _run_skill_agent_impl(
             model=llm,
             tools=_run_tools,
             system_prompt=sys_prompt,
-            middleware=[_no_progress_mw],
+            middleware=_middleware,
         )
 
     # Tier-2 fallback factory — only wired when the primary provider
@@ -1820,7 +1835,7 @@ async def _run_skill_agent_impl(
                 model=fb_llm,
                 tools=_run_tools,
                 system_prompt=sys_prompt,
-                middleware=[_no_progress_mw],
+                middleware=_middleware,
             )
 
         fallback_factory = _fallback_agent_factory

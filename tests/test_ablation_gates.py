@@ -44,7 +44,11 @@ CAP_FLAGS = [
 
 
 def test_capability_defaults_all_false():
-    cap = resolve()["capability"]
+    # The FACTORY defaults must be all-false (full system) — this is the
+    # invariant that protects an unconfigured 100-VM run. Read DEFAULTS, not
+    # resolve(): the live swarm-config.toml may legitimately set a flag while
+    # an ablation is being run, and that must not fail this guarantee.
+    cap = DEFAULTS["capability"]
     assert sorted(cap) == sorted(CAP_FLAGS)
     assert all(v is False for v in cap.values()), cap
 
@@ -54,9 +58,12 @@ def test_defaults_table_matches_flag_list():
 
 
 def test_graph_exposes_capability_namespace():
+    # Confirm the namespace is exposed with every flag as a bool. Does NOT
+    # assert the values are false — that depends on the live toml, which an
+    # active ablation may have set (see test_capability_defaults_all_false).
     from src.graph import config
     for flag in CAP_FLAGS:
-        assert getattr(config.capability, flag) is False
+        assert isinstance(getattr(config.capability, flag), bool)
 
 
 @pytest.mark.parametrize("flag,envvar", [
@@ -195,6 +202,7 @@ def test_run_only_gates_are_wired():
     """Steering + hypothesis gates sit inside large node methods that need a
     live run to exercise behaviourally; at minimum assert each flag is read in
     its own module so the wiring can never be silently removed."""
+    import src.nodes.base.skill_runner as skill_runner
     import src.nodes.base.system_prompt as sp
     import src.nodes.executor as ex
     import src.nodes.planner as planner
@@ -209,3 +217,6 @@ def test_run_only_gates_are_wired():
     assert "disable_web_search" in inspect.getsource(ws)
     assert "disable_skills" in inspect.getsource(ex)
     assert "disable_prompting_techniques" in inspect.getsource(sp)
+    # The prompting-techniques ablation must ALSO drop the no-progress nudge,
+    # which re-injects the same diversity/transformation guidance in-loop.
+    assert "disable_prompting_techniques" in inspect.getsource(skill_runner)

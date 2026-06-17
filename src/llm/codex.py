@@ -743,6 +743,29 @@ class CodexQuotaExceededError(CodexStreamError):
     code = "insufficient_quota"
 
 
+class CodexUsageLimitError(CodexQuotaExceededError):
+    """ChatGPT-subscription weekly / 5-hour usage cap ("usage_limit_reached").
+
+    A subclass of the quota error so it still trips the rate-limit signal and
+    classifies as a crash when NOT hibernating. Unlike a hard quota, it RESETS
+    at a known time (carried here from the error event), so a benchmark run can
+    park until then and retry instead of failing — see
+    :mod:`src.llm.hibernation`.
+    """
+    code = "usage_limit_reached"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        resets_at: float | int | None = None,
+        resets_in_seconds: float | int | None = None,
+    ):
+        super().__init__(message)
+        self.resets_at = resets_at
+        self.resets_in_seconds = resets_in_seconds
+
+
 class CodexCyberPolicyError(CodexStreamError):
     """Cyber-policy refusal. NOT retryable — the request itself is
     blocked. Caller may want to rephrase / re-emphasize authorization."""
@@ -874,7 +897,11 @@ def _classify_response_failed(error: dict | None) -> CodexStreamError:
     # fires, and classify() marks it crashed. (A transient per-minute
     # ``rate_limit_exceeded`` stays retryable below — that one CAN recover.)
     if error.get("type") == "usage_limit_reached" or code == "usage_limit_reached":
-        return CodexQuotaExceededError(msg)
+        return CodexUsageLimitError(
+            msg,
+            resets_at=error.get("resets_at"),
+            resets_in_seconds=error.get("resets_in_seconds"),
+        )
     if code == "usage_not_included":
         return CodexUsageNotIncludedError(msg)
     if code == "cyber_policy":
@@ -1646,7 +1673,11 @@ class ChatCodex(BaseChatModel):
         else:
             req.pop("prompt_cache_key", None)
 
-        for attempt in range(MAX_API_ATTEMPTS):
+        # A ``while`` (not ``for``) so a usage-cap hibernation can retry the
+        # SAME call without consuming one of the MAX_API_ATTEMPTS transient
+        # retries — ``attempt`` only advances on a genuine retryable failure.
+        attempt = 0
+        while True:
             try:
                 # ``aclosing`` is the real fix here. ``astream_codex``
                 # is an async generator holding open ``async with
@@ -1690,7 +1721,26 @@ class ChatCodex(BaseChatModel):
                         e._swarm_request = req  # type: ignore[attr-defined]
                     except (AttributeError, TypeError):
                         pass
-                if not e.retryable or attempt == MAX_API_ATTEMPTS - 1:
+                # Usage-cap hibernation: a ChatGPT-subscription usage cap is a
+                # timed wait, not a failure. In benchmark mode park in place
+                # until it resets and retry the SAME call — the agent resumes
+                # mid-step with no re-priming (no extra tokens). Does NOT consume
+                # a retry attempt. Off for real audits → falls through to the
+                # crash path below. See src/llm/hibernation.py.
+                if isinstance(e, CodexUsageLimitError):
+                    from src.llm.hibernation import (
+                        hibernate_until_reset,
+                        hibernation_enabled,
+                    )
+                    if hibernation_enabled():
+                        await hibernate_until_reset(
+                            getattr(e, "resets_at", None),
+                            getattr(e, "resets_in_seconds", None),
+                            agent_id=agent_id,
+                            log=logger,
+                        )
+                        continue
+                if not e.retryable or attempt >= MAX_API_ATTEMPTS - 1:
                     if isinstance(e, (CodexRateLimitError, CodexQuotaExceededError)):
                         # A rate-limit (429) or quota-exhausted error is now
                         # propagating to the caller. Flag it process-globally so
@@ -1708,6 +1758,7 @@ class ChatCodex(BaseChatModel):
                     delay, e.code, str(e)[:200],
                 )
                 await asyncio.sleep(delay)
+                attempt += 1
 
         lc_tool_calls = []
         for tc in resp.tool_calls:

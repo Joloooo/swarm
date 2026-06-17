@@ -384,7 +384,11 @@ def set_terminal_log_file(path: Path | None) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     _TERMINAL_LOG_FILE = path
-    _TERMINAL_ANSI_LOG_FILE = path.with_suffix(".ansi.log")
+    # ANSI sink intentionally disabled: the raw-colour ``*.ansi.log`` was a
+    # byte-for-byte duplicate of the plain ``*.log`` (minus the escape codes)
+    # that nothing consumed and only cluttered every run dir. Keep the plain
+    # log only. (Left as ``None`` so the tee loops in write_terminal_* skip it.)
+    _TERMINAL_ANSI_LOG_FILE = None
 
 
 def get_terminal_log_file() -> Path | None:
@@ -411,7 +415,8 @@ def set_sweep_log_file(path: Path | None) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     _SWEEP_LOG_FILE = path
-    _SWEEP_ANSI_LOG_FILE = path.with_suffix(".ansi.log")
+    # ANSI sink disabled — see set_terminal_log_file. Plain sweep log only.
+    _SWEEP_ANSI_LOG_FILE = None
 
 
 def get_sweep_log_file() -> Path | None:

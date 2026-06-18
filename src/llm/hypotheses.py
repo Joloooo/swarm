@@ -217,47 +217,6 @@ ROUTING_RULES: tuple[RoutingRule, ...] = (
 )
 
 
-def routing_rules_from_specs(specs: Iterable[dict]) -> list[RoutingRule]:
-    """Build :class:`RoutingRule` objects from the loader's normalized
-    signal specs (see ``src.skills.loader.list_skill_signal_specs``).
-
-    Each spec is ``{"name", "vuln_class", "weight", "all_groups"}`` where
-    ``all_groups`` is a list of marker groups — the signal fires only when
-    every group has at least one marker present, so a spec can require a
-    co-occurrence (template tokens AND a rejection word). Malformed specs
-    are skipped rather than raised, so one bad frontmatter entry cannot
-    take the synthesis pass offline.
-    """
-    out: list[RoutingRule] = []
-    for spec in specs or []:
-        if not isinstance(spec, dict):
-            continue
-        vuln_class = str(spec.get("vuln_class") or "").strip().lower()
-        if not vuln_class:
-            continue
-        groups_raw = spec.get("all_groups") or []
-        groups: list[tuple[str, ...]] = []
-        for g in groups_raw:
-            markers = tuple(
-                str(m).strip().lower() for m in (g or []) if str(m).strip()
-            )
-            if markers:
-                groups.append(markers)
-        if not groups:
-            continue
-        try:
-            weight = float(spec.get("weight", 0.7))
-        except (TypeError, ValueError):
-            weight = 0.7
-        out.append(RoutingRule(
-            name=str(spec.get("name") or f"{vuln_class}-signal"),
-            vuln_class=vuln_class,
-            weight=weight,
-            all_groups=tuple(groups),
-        ))
-    return out
-
-
 def combine_routing_rules(
     skill_rules: Iterable[RoutingRule] | None,
 ) -> tuple[RoutingRule, ...]:

@@ -25,14 +25,6 @@ description: >-
   Do not use: Do not dispatch when the described input surface is absent, when the value is only
   stored or echoed without reaching this skill's mechanism, or when another specialist's sink
   explains the evidence more directly.
-metadata:
-  dispatchable: true
-  tools:
-  - bash
-  - nmap_specific_ports
-  - nmap_ssl_enum
-  - sslscan_full
-  - testssl_full
 ---
 
 You are a cryptography and transport security testing specialist. Your job is

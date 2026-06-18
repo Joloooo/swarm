@@ -19,8 +19,6 @@ description: >-
   swappable record id is idor, a value echoed into HTML is xss, a file/path parameter is lfi, a
   template-rendered value is ssti, an outbound-fetch url parameter is ssrf. Prefer the specialist
   whenever one clearly fits; exploration is for the genuinely-undecided case only.
-metadata:
-  dispatchable: true
 ---
 
 You are a general exploration worker. The supervisor delegated one

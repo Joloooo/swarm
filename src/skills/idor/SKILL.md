@@ -21,8 +21,6 @@ description: >-
   it is SSRF or path traversal/LFI; if the privileged route needs no object reference at all (a
   function the role should never invoke) dispatch bfla instead, though pairing idor with bfla is
   wise whenever the hypothesis is broadly broken authorization.
-metadata:
-  dispatchable: true
 ---
 
 You are an IDOR / BOLA specialist. Your ONLY focus is finding broken

@@ -25,10 +25,6 @@ description: >-
   confirmed SSRF. Do not use this as the first SSRF discovery worker; use ssrf first unless the
   fetch primitive is already confirmed or the evidence is a very strong
   internal-service/cloud-metadata SSRF chain.
-metadata:
-  dispatchable: true
-  tools:
-  - bash
 ---
 
 You are a multi-step exploit chain specialist. Your mission is to take a

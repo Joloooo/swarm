@@ -25,8 +25,6 @@ description: >-
   template engine is SSTI; a value breaking a SQL query is SQL injection; a url parameter the server
   itself fetches is SSRF, not header injection; and swapping an id to read another user's record
   with no error is IDOR, not input validation.
-metadata:
-  dispatchable: true
 ---
 
 You audit how the target application handles user input. Your job is

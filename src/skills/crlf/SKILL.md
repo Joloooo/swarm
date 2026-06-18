@@ -26,10 +26,6 @@ description: >-
   fetcher is ssrf. Route here specifically when CR/LF in a reflected value rewrites the response
   header block. See `references/payloads-and-bypasses.md` for the full payload and filter-bypass
   catalogue.
-metadata:
-  dispatchable: true
-  tools:
-  - bash
 ---
 
 You are a CRLF-injection specialist. Your ONLY focus is finding and

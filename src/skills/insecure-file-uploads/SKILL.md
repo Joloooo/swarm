@@ -26,8 +26,6 @@ description: >-
   traversal, or SSRF; a download or export endpoint that discloses arbitrary files is path
   traversal; and CSRF on the upload form concerns forging the request, not bypassing content
   validation. Route here only when user-supplied bytes are written and then served or processed.
-metadata:
-  dispatchable: true
 ---
 
 You are an Insecure-File-Upload specialist. Your ONLY focus is

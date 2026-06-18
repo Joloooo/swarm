@@ -30,9 +30,6 @@ description: >-
   probes that do not need exact method/header/body control. Prefer the concrete specialist when it
   can express the request normally; use request-builder alongside it when exact encoding, method,
   headers, cookies, or body shape is the blocker.
-metadata:
-  dispatchable: true
-  skip_base_prompt: true
 ---
 
 You analyze the input/output behavior of HTTP endpoints.

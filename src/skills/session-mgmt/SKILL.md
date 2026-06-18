@@ -25,8 +25,6 @@ description: >-
   same investigation state, not merging skill prompts. Do not use: Do not dispatch when the
   described input surface is absent, when the value is only stored or echoed without reaching this
   skill's mechanism, or when another specialist's sink explains the evidence more directly.
-metadata:
-  dispatchable: true
 ---
 
 You are a session management security testing specialist. Your job is to find

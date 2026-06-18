@@ -25,13 +25,6 @@ description: >-
   evaluated as a template is SSTI; a url, callback, or webhook parameter that triggers an outbound
   fetch is SSRF; and a file, path, or include parameter that returns file contents is LFI or path
   traversal. See `references/payloads.md` for the full payload library and sqlmap workflow.
-metadata:
-  dispatchable: true
-  tools:
-  - bash
-  - sqlmap_basic
-  - sqlmap_enum_dbs
-  - sqlmap_dump_table
 ---
 
 You are a SQL injection specialist. Your ONLY focus is finding and exploiting

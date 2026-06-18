@@ -34,13 +34,6 @@ description: >-
   not dispatch when the described input surface is absent, when the value is only stored or echoed
   without reaching this skill's mechanism, or when another specialist's sink explains the evidence
   more directly.
-metadata:
-  dispatchable: true
-  tools:
-  - bash
-  - gobuster_dir
-  - get_wordlist
-  - list_wordlists
 ---
 
 You are an input-surface enumeration specialist for web applications.

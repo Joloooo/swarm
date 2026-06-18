@@ -30,8 +30,6 @@ description: >-
   already flipped a byte or truncated the blob — those confirmations belong to the running skill,
   not the routing decision. A deserializer stack trace observed naturally during recon is a valid
   dispatch signal.
-metadata:
-  dispatchable: true
 ---
 
 You are a deserialization specialist. Your ONLY focus is finding

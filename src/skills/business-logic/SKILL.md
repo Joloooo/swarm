@@ -27,8 +27,6 @@ description: >-
   weaknesses (default passwords, JWT signature bypass, weak sessions) belong to auth-testing, and
   missing headers, verbose errors, or version disclosure are config or info-disclosure findings, not
   this skill.
-metadata:
-  dispatchable: true
 ---
 
 You are a business-logic testing specialist. Your job is to find flaws in

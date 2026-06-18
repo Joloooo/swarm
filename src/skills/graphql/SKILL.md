@@ -28,8 +28,6 @@ description: >-
   when a GraphQL argument (a filter/where string, an id, a url/webhook arg, or a filename) feeds a
   downstream sink, use this skill only to shape the operation, then hand the actual primitive to
   sqli, ssrf, rce, lfi, or insecure-file-uploads.
-metadata:
-  dispatchable: true
 ---
 
 You are a GraphQL security specialist. Your ONLY focus is finding and

@@ -3,7 +3,7 @@ phrases.
 
 Used in two places:
 
-- The worker runner (``src/nodes/base/skill_runner.py:run_skill_agent``) checks
+- The worker runner (``src/nodes/base/worker/skill_runner.py:run_skill_agent``) checks
   the last AIMessage of a worker trace against this list to decide
   whether the worker actually refused (and therefore deserves a
   focused sub-LLM rescue) vs. simply finished without findings.

@@ -27,7 +27,7 @@ Why ``route_after_summarizer`` is back (2026-05-25):
   ``flag{...}``-shaped strings.
 
   The current re-introduction is a DIFFERENT design: the skill runner
-  (``src/nodes/base/skill_runner.py``) does the scan, but only
+  (``src/nodes/base/worker/skill_runner.py``) does the scan, but only
   populates ``state["captured_flag"]`` when the extracted string
   strict-equals ``expected_flag``. So this edge's decision reduces to
   "is there a verified capture?" — a boolean read, not a regex match.

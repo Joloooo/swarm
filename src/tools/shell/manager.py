@@ -276,7 +276,7 @@ class ShellManager:
         """Kill this agent's tmux session AND bash subprocess. Idempotent.
 
         Called from the worker finally-block in
-        ``src/nodes/base/skill_runner.py`` so per-worker resources are
+        ``src/nodes/base/worker/skill_runner.py`` so per-worker resources are
         freed the moment the worker finishes (success, exception,
         salvage, or refusal). Without this, sessions accumulate across
         one long graph run that dispatches many workers.

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, ToolMessage
 
-from src.nodes.base.skill_runner import (
+from src.nodes.base.worker.salvage import (
     _refusal_marker_is_real,
     _salvage_primitive_from_trace,
 )

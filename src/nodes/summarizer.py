@@ -711,7 +711,7 @@ class SummarizerNode(BaseNode):
             return {}
 
         # Termination-on-capture is now driven by ``state.captured_flag``
-        # (set by ``src/nodes/base/skill_runner.py`` on the success
+        # (set by ``src/nodes/base/worker/skill_runner.py`` on the success
         # path when a worker's tool output contained a ``flag{...}``
         # substring that strict-equals ``expected_flag``). The
         # ``route_after_summarizer`` conditional edge reads that field
@@ -868,7 +868,7 @@ class SummarizerNode(BaseNode):
         # them yet). The synthesis pass is deterministic and LLM-free, so
         # it never blocks the run.
         try:
-            from src.llm.hypotheses import (
+            from src.nodes.base.hypotheses import (
                 build_surface_canon,
                 signal_from_routing_dict,
                 synthesize_hypotheses,
@@ -931,7 +931,7 @@ class SummarizerNode(BaseNode):
 
         # Capture the recon worker's summary once, into
         # ``state["recon_summary"]``. The seed builder in
-        # ``src/nodes/base/skill_runner.py:_format_recon_summary``
+        # ``src/nodes/base/worker/skill_runner.py:_format_recon_summary``
         # renders it as "## Application map" for every subsequent
         # worker so they don't re-walk the application.
         #

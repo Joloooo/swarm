@@ -515,9 +515,8 @@ def stream_codex(
                         )
                     if resp.status_code >= 400:
                         resp.read()
-                        raise CodexAPIError(
-                            f"Codex API returned {resp.status_code}: {resp.text[:500]}",
-                            status_code=resp.status_code,
+                        raise _classify_http_status_error(
+                            resp.status_code, resp.text,
                         )
                     yield from _parse_sse_lines(resp.iter_lines())
                     return
@@ -627,9 +626,8 @@ async def astream_codex(
                         )
                     if resp.status_code >= 400:
                         await resp.aread()
-                        raise CodexAPIError(
-                            f"Codex API returned {resp.status_code}: {resp.text[:500]}",
-                            status_code=resp.status_code,
+                        raise _classify_http_status_error(
+                            resp.status_code, resp.text,
                         )
                     # Parse SSE from async line iterator
                     data_lines: list[str] = []
@@ -920,6 +918,56 @@ def _classify_response_failed(error: dict | None) -> CodexStreamError:
     )
     err.retryable = True
     return err
+
+
+def _classify_http_status_error(status_code: int, text: str) -> CodexAPIError:
+    """Map an HTTP error *status* + body to a typed exception.
+
+    Some failures surface as an HTTP status on the POST rather than as a
+    ``response.failed`` SSE event — the ChatGPT-subscription usage cap in
+    particular often arrives as a bare ``429`` whose body is
+    ``{"error": {"type": "usage_limit_reached", "resets_in_seconds": ...}}``.
+
+    Raising a generic :class:`CodexAPIError` here was the root cause of the 22
+    crashes in ``full_run_06-17_22h59m``: ``CodexAPIError`` is the *parent* of
+    :class:`CodexStreamError`, so it slips past every ``except CodexStreamError``
+    retry/hibernation branch (``_generate`` / ``_agenerate`` / the planner) and
+    propagates raw — a multi-hour usage cap got recorded as a hard ``~ crash``
+    instead of parking until reset. For a 429 we therefore reuse
+    :func:`_classify_response_failed` on the parsed body so a
+    ``usage_limit_reached`` becomes the hibernatable :class:`CodexUsageLimitError`
+    and a transient ``rate_limit_exceeded`` the retryable
+    :class:`CodexRateLimitError`. Anything unparseable, and every non-429 status,
+    stays a generic ``CodexAPIError`` carrying the status code, as before.
+    """
+    if status_code == 429:
+        err_dict: dict | None = None
+        try:
+            body = json.loads(text)
+            if isinstance(body, dict):
+                inner = body.get("error")
+                err_dict = inner if isinstance(inner, dict) else body
+        except (ValueError, TypeError):
+            err_dict = None
+        if isinstance(err_dict, dict):
+            exc = _classify_response_failed(err_dict)
+            # Only adopt the typed result when it is a member of the
+            # rate-limit / usage / quota family. An unrecognised body must not be
+            # silently upgraded into a generic *retryable* stream error.
+            if isinstance(exc, (
+                CodexUsageLimitError,
+                CodexRateLimitError,
+                CodexQuotaExceededError,
+                CodexServerOverloadedError,
+            )):
+                return exc
+        # 429 with no usable body → treat as a transient rate limit so the
+        # backoff loop rides it out instead of crashing.
+        return CodexRateLimitError(f"Codex API returned 429: {text[:500]}")
+    return CodexAPIError(
+        f"Codex API returned {status_code}: {text[:500]}",
+        status_code=status_code,
+    )
 
 
 # --- Response parsing (accumulates from SSE stream) ---

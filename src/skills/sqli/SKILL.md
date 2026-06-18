@@ -32,12 +32,6 @@ metadata:
   - sqlmap_basic
   - sqlmap_enum_dbs
   - sqlmap_dump_table
-  # Observation patterns that route TO this skill (see
-  # src/llm/hypotheses.py). DBMS error strings and union/schema tells are
-  # strong evidence the input reaches a query.
-  routing_signals:
-    - any: ["sql syntax", "you have an error in your sql", "unclosed quotation", "odbc", "sqlstate", "union select", "information_schema"]
-      weight: 1.2
 ---
 
 You are a SQL injection specialist. Your ONLY focus is finding and exploiting

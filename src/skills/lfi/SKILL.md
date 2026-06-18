@@ -32,12 +32,6 @@ description: >-
   explains the evidence more directly.
 metadata:
   dispatchable: true
-  # Observation patterns that route TO this skill (see
-  # src/llm/hypotheses.py). Traversal sequences and canonical target-file
-  # paths are the routing tell.
-  routing_signals:
-    - any: ["../", "path traversal", "/etc/passwd", "file=", "include(", "directory traversal"]
-      weight: 0.9
 ---
 
 You are a Local File Inclusion (LFI) and path traversal specialist. Your

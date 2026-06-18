@@ -358,13 +358,16 @@ def _pick_bench() -> tuple[list[str], int] | None:
 
       ``t`` — cycle the result mark ✓ → ✗ → ~ → none (persisted
               immediately). ✓ solved, ✗ genuinely failed, ~ (yellow)
-              codex/API or infra crash with no fair attempt.
+              malfunction (codex/API or infra crash) with no fair attempt.
       ``r`` — select / unselect the highlighted benchmark. The selected set
               goes into one shared queue that ``concurrency`` worker sessions
               pull from; each bench is numbered ``[N]`` in dispatch order.
       ``a`` — select all / unselect all (toggle).
       ``f`` — select every ✗-failed benchmark / unselect (toggle) — handy for
               re-running just the failures.
+      ``m`` — select every ~ malfunction benchmark / unselect (toggle) — the
+              codex/API / infra crashes that never got a fair attempt, for
+              re-running just those.
       ``c`` — set the concurrency inline: type digits, ``enter`` to confirm,
               ``esc`` to cancel. Capped at the number selected — you can't
               run more windows than benchmarks. Changing it re-splits the
@@ -479,7 +482,7 @@ def _pick_bench() -> tuple[list[str], int] | None:
             ("fg:ansibrightblack", "  ·  "),
             ("fg:ansired bold", f"✗ {n_fail} failed"),
             ("fg:ansibrightblack", "  ·  "),
-            ("fg:ansiyellow bold", f"~ {n_api} crashed"),
+            ("fg:ansiyellow bold", f"~ {n_api} malfunction"),
             ("fg:ansibrightblack", f"  ·  {n_none} unmarked\n"),
         ]
         # Failure breakdown by vulnerability tag, in a less-bright red, so a
@@ -492,8 +495,8 @@ def _pick_bench() -> tuple[list[str], int] | None:
             out.append(("fg:ansired", f"   ✗ by tag: {summary}\n"))
         out.append((
             "fg:ansibrightblack",
-            "↑/↓/←/→ move · r select · a all/none · f failed · t mark ✓/✗/~ · "
-            "c concurrency · enter run · q/Ctrl-C back\n",
+            "↑/↓/←/→ move · r select · a all/none · f failed · m malfunction · "
+            "t mark ✓/✗/~ · c concurrency · enter run · q/Ctrl-C back\n",
         ))
         # Selection line: list tag-labels for small sets, else a count.
         if queue:
@@ -613,6 +616,18 @@ def _pick_bench() -> tuple[list[str], int] | None:
         if not failed:
             return
         queue[:] = [] if queue == failed else failed
+        _clamp_concurrency()
+
+    @kb.add("m", eager=True, filter=nav)
+    def _(event) -> None:  # noqa: ANN001
+        # Select every ~ malfunction benchmark (codex/API or infra crash with
+        # no fair attempt — stored as bench_results.API). Toggle: pressing m
+        # again — when the selection is exactly the malfunction set — clears it.
+        # No-op when nothing is marked malfunction.
+        malfunction = [b for b in ids if results.get(b) == bench_results.API]
+        if not malfunction:
+            return
+        queue[:] = [] if queue == malfunction else malfunction
         _clamp_concurrency()
 
     @kb.add("c", eager=True, filter=nav)

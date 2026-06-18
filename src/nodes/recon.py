@@ -19,8 +19,21 @@ import dataclasses
 
 from langchain_core.messages import AIMessage
 
-from src.nodes.base import BaseNode
+from src.nodes.base import BaseNode, Skill
 from src.state import SwarmGraphState
+from src.tools.registry import resolve_tools
+
+
+# ── The recon node's dispatch surface ──
+# The reconnaissance dimensions this node fans out into, same shape as the
+# executor's SKILLS map. Recon workers own no vuln-class (they only discover
+# surface and redirect, never refute), so every entry sets owns=frozenset().
+DEFAULT_TOOLS = ("bash",)
+
+RECON_SKILLS: dict[str, Skill] = {
+    'recon': Skill(tools=('fetch_page', 'get_wordlist', 'gobuster_dir', 'list_wordlists', 'nikto_scan', 'read_file'), owns=frozenset()),
+    'recon-ports': Skill(tools=('nmap_default_scripts', 'nmap_fast_scan', 'nmap_full_scan', 'nmap_host_discovery', 'nmap_http_enum', 'nmap_service_detection', 'nmap_specific_ports', 'nmap_ssl_enum'), owns=frozenset()),
+}
 
 
 class ReconNode(BaseNode):
@@ -38,9 +51,16 @@ class ReconNode(BaseNode):
                 ],
             }
 
-        # The recon node owns the recon framing: force the recon phase on
-        # whatever skill it runs, so skills no longer carry a ``phase`` field.
-        recon_config = dataclasses.replace(recon_config, phase="recon")
+        # The recon node owns the recon framing and the dimension's tool set:
+        # force the recon phase and stamp the skill's tools + owned-classes (the
+        # dispatch surface lives in RECON_SKILLS, not the SKILL.md frontmatter).
+        spec = RECON_SKILLS.get(config_name, Skill())
+        recon_config = dataclasses.replace(
+            recon_config,
+            phase="recon",
+            tools=resolve_tools([*DEFAULT_TOOLS, *spec.tools]),
+            owned_classes=spec.owns,
+        )
 
         self.log.info("[%s] Starting recon agent", config_name)
         result = await self.run_skill_agent(recon_config, state)

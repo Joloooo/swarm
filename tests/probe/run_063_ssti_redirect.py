@@ -104,7 +104,11 @@ def _score(text: str):
 
     from src.nodes.base.skill_runner import _extract_verdicts
 
-    sigs = _extract_verdicts([AIMessage(content=text)], "input-validation", "input-validation")
+    # input-validation owns a multi-class set (mirrors
+    # EXECUTOR_SKILLS["input-validation"].owns); pass it so the replay matches
+    # production, where the executor node stamps owned_classes onto the config.
+    _iv_owns = frozenset({"lfi", "rce", "crlf", "xxe", "insecure-file-uploads"})
+    sigs = _extract_verdicts([AIMessage(content=text)], "input-validation", "input-validation", _iv_owns)
     verdict = next((s for s in sigs if getattr(s, "source", "") == "executor_verdict"
                     and getattr(s, "kind", "") in ("confirm", "refute", "observation")), None)
     outcome = "none"

@@ -52,6 +52,7 @@ import logging
 import re
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
@@ -86,6 +87,20 @@ from src.nodes.base.system_prompt import (
 # Back-compat alias: the old private name was ``_looks_like_refusal``.
 _looks_like_refusal = looks_like_refusal
 
+
+# ── Skill — a node's per-skill dispatch spec ──
+# Each dispatching node (ExecutorNode, ReconNode) owns a ``SKILLS`` map of
+# ``{skill name -> Skill}``. Presence in that map is what makes a skill
+# dispatchable on that node; in ``execute`` the node stamps the spec's tools
+# and owned-classes onto the AgentConfig it loaded — the same way ReconNode
+# already stamps ``phase="recon"``. SKILL.md frontmatter therefore carries no
+# dispatch metadata: only ``name`` + ``description`` + the prompt body.
+@dataclass(frozen=True)
+class Skill:
+    tools: tuple[str, ...] = ()  # extra tools beyond the node's DEFAULT_TOOLS
+    owns: frozenset[str] | None = None  # refutable vuln-classes: None = own name-class, frozenset() = none, {..} = exactly those
+    skip_base_prompt: bool = False  # True → SKILL.md body is the whole prompt
+
 __all__ = [
     "AgentConfig",
     "BENCHMARK_PROGRESS_FOOTER",
@@ -95,6 +110,7 @@ __all__ = [
     "JSON_FINDINGS_PATTERN",
     "REFUSAL_PATTERNS",
     "SEVERITY_MAP",
+    "Skill",
     "_extract_findings",
     "_findings_from_json",
     "_findings_from_markdown",

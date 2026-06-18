@@ -14,30 +14,18 @@ def _prompting_techniques_disabled() -> bool:
         return False
 
 
-def _universal_parts(stealth_level: int) -> list[str]:
-    # Shared chunks every worker prompt (recon, executor, planner) starts with.
-    parts = [IDENTITY_PREAMBLE, NARRATION_RULES, SCOPE_RULES, TOOL_USAGE_RULES, FINDING_SCHEMA]
-    if stealth_level >= 1:
-        parts.append(STEALTH_RULES)
-    return parts
-
-
 def build_prompt(phase: str = "executor", stealth_level: int = 0) -> str:
-    # The one assembler. "universal" = shared blocks only (planner); "recon" adds
-    # the recon findings hint; anything else (executor) adds the full methodology tail.
-    parts = _universal_parts(stealth_level)
-    if phase == "recon":
-        parts.append(RECON_FINDINGS_HINT)
-    elif phase != "universal":
-        standards = [] if _prompting_techniques_disabled() else [
-            EXHAUSTION_DISCIPLINE, DIVERSITY_RULES, ENUMERATION_DISCIPLINE,
-            COMMON_CHECKLIST_DISCIPLINE, TRANSFORMATION_HYPOTHESIS,
-        ]
-        parts += [
-            METHODOLOGY_RULES, DEMONSTRATED_STANDARD, *standards, BEHAVIOR_MODEL_RULES,
-            SEVERITY_RULES, FINDING_CATEGORY_GUIDANCE, VERDICT_SCHEMA, FINDING_NOVELTY_RULE,
-        ]
-    return "\n\n".join(parts)
+    # Assemble a phase's prompt from PHASE_BLOCKS (defined at the BOTTOM of this
+    # file — the manifest lists the block constants, so it must come after them;
+    # build_prompt reads it at call time, so the forward reference is fine).
+    # Ablation drops the _STANDARDS subset; STEALTH_RULES is inserted right after
+    # the universal head when a WAF/IDS has been tripped.
+    blocks = list(PHASE_BLOCKS[phase])
+    if stealth_level >= 1:
+        blocks.insert(len(_UNIVERSAL), STEALTH_RULES)
+    if _prompting_techniques_disabled():
+        blocks = [b for b in blocks if b not in _STANDARDS]
+    return "\n\n".join(blocks)
 
 
 def _build_system_message(
@@ -661,3 +649,20 @@ RCE, SSRF, command injection, deserialization). Recon's job for those classes is
 — "this form has an ``id`` parameter; dispatch the sqli skill" — not to file the finding. The
 executor agent confirms the mechanism end-to-end.
 """
+
+
+# ── What each phase's prompt is made of (read top-to-bottom) ──────────────
+# Defined at the bottom: these lists reference the block constants above, so they
+# must come after them. build_prompt (top of file) reads PHASE_BLOCKS at call time,
+# so the forward reference is fine.
+_UNIVERSAL = [IDENTITY_PREAMBLE, NARRATION_RULES, SCOPE_RULES, TOOL_USAGE_RULES, FINDING_SCHEMA]
+_STANDARDS = [EXHAUSTION_DISCIPLINE, DIVERSITY_RULES, ENUMERATION_DISCIPLINE,
+              COMMON_CHECKLIST_DISCIPLINE, TRANSFORMATION_HYPOTHESIS]   # dropped by ablation
+_EXECUTOR = [METHODOLOGY_RULES, DEMONSTRATED_STANDARD, *_STANDARDS, BEHAVIOR_MODEL_RULES,
+             SEVERITY_RULES, FINDING_CATEGORY_GUIDANCE, VERDICT_SCHEMA, FINDING_NOVELTY_RULE]
+
+PHASE_BLOCKS = {
+    "universal": _UNIVERSAL,
+    "recon": _UNIVERSAL + [RECON_FINDINGS_HINT],
+    "executor": _UNIVERSAL + _EXECUTOR,
+}

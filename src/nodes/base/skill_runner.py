@@ -1749,8 +1749,8 @@ async def _run_skill_agent_impl(
     # on byte-identical tool outputs and only re-surfaces the existing
     # DIVERSITY_RULES guidance — it never stops the worker, so it is
     # safe in both benchmark and real-pentest mode. See
-    # ``src/nodes/base/no_progress.py``.
-    from src.nodes.base.no_progress import NoProgressNudgeMiddleware
+    # ``src/nodes/base/nudges.py``.
+    from src.nodes.base.nudges import NoProgressNudgeMiddleware
     _no_progress_mw = NoProgressNudgeMiddleware(
         agent_id=config.agent_id, log=node.log,
     )
@@ -2344,13 +2344,13 @@ async def _run_skill_agent_impl(
             #   2. make ONE forced wrap-up call asking the worker to stop
             #      and summarize its own work + emit any not-yet-written
             #      findings.
-            # See src/nodes/base/graceful_wrapup.py for the rationale.
+            # See src/nodes/base/nudges.py for the rationale.
             node.log.warning(
                 "[%s] reached its step budget (%s) — forcing a graceful "
                 "wrap-up instead of discarding the run.",
                 config.agent_id, str(e)[:160],
             )
-            from src.nodes.base.graceful_wrapup import force_wrapup_summary
+            from src.nodes.base.nudges import force_wrapup_summary
 
             own_findings = _extract_findings(partial_messages, config.agent_id)
             wrapup_msg = await force_wrapup_summary(

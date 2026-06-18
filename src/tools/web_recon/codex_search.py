@@ -242,6 +242,25 @@ async def codex_web_search(
             codex.CodexAPIError,
         ) as e:
             last_exc = e
+            # Usage cap (ChatGPT-subscription 5h / weekly): a timed wait, not a
+            # failure. In benchmark mode park until it resets and retry the SAME
+            # search — mirrors the worker/planner path in ``src.llm.codex`` /
+            # ``src.nodes.planner`` so a mid-run cap pauses the web_search node
+            # instead of degrading it to an empty result (or, before the typing
+            # fix in codex._classify_http_status_error, crashing the run).
+            if isinstance(e, codex.CodexUsageLimitError):
+                from src.llm.hibernation import (
+                    hibernate_until_reset,
+                    hibernation_enabled,
+                )
+                if hibernation_enabled():
+                    await hibernate_until_reset(
+                        getattr(e, "resets_at", None),
+                        getattr(e, "resets_in_seconds", None),
+                        agent_id="web_search",
+                        log=log,
+                    )
+                    continue
             non_retryable_quota = isinstance(e, codex.CodexQuotaExceededError)
             last_attempt = attempt >= _WS_RL_MAX_ATTEMPTS - 1
             if non_retryable_quota or last_attempt:

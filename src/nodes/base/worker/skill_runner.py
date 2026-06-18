@@ -154,14 +154,14 @@ async def _run_skill_agent_impl(
     # None when empty, so cold first dispatches start cold (back-compat).
     seed_parts: list[str] = []
 
-    # Ablation gates, read once. Steering directives and prompting techniques reach
-    # the worker through THIS briefing too — not only via the planner and the standing
-    # system prompt — so the same flags must bite here. Only the imperative wrappers
-    # are gated; the plumbing they wrap (findings, recon map, hypothesis rows, the
-    # dispatch reason) is communication between nodes and is never dropped.
+    # Ablation gate, read once. The prompting-techniques ablation reaches the worker
+    # through THIS briefing too — not only via the planner and the standing system
+    # prompt — so it must bite here as well. It now also covers the run-state steering
+    # wrappers (the paper folds steering into prompting techniques: one flag). Only the
+    # imperative wrappers are dropped; the plumbing they wrap (findings, recon map,
+    # hypothesis rows, the dispatch reason) is communication between nodes and stays.
     from src import graph as _graph_module
     _cap = getattr(_graph_module.config, "capability", None)
-    _steer_off = bool(getattr(_cap, "disable_steering_directives", False))
     _prompting_off = bool(getattr(_cap, "disable_prompting_techniques", False))
 
     skill_catalogue_block = _format_skill_context_catalogue(config.config_name)
@@ -180,7 +180,7 @@ async def _run_skill_agent_impl(
     if relevant_block:
         seed_parts.append(relevant_block)
 
-    hypotheses_block = _format_hypotheses(state, steer_off=_steer_off)
+    hypotheses_block = _format_hypotheses(state, steer_off=_prompting_off)
     if hypotheses_block:
         seed_parts.append(hypotheses_block)
 
@@ -207,15 +207,15 @@ async def _run_skill_agent_impl(
     if prior_history:
         seed_parts.append(prior_history)
 
-    dispatch_block = _format_dispatch_reason(state, steer_off=_steer_off)
+    dispatch_block = _format_dispatch_reason(state, steer_off=_prompting_off)
     if dispatch_block:
         seed_parts.append(dispatch_block)
 
     # Closing kickoff — "begin now, do not re-test what's already done" — is run-state
-    # STEERING (what to do next given the context above), so it drops under
-    # disable_steering_directives. The worker still starts: it has its skill prompt and
-    # all the plumbing; it just is not told to prioritise or skip anything.
-    if seed_parts and not _steer_off:
+    # STEERING (what to do next given the context above), so it drops under the
+    # prompting-techniques ablation. The worker still starts: it has its skill prompt
+    # and all the plumbing; it just is not told to prioritise or skip anything.
+    if seed_parts and not _prompting_off:
         seed_parts.append(
             "Begin testing now. Build on the context above; do not "
             "re-discover what's already mapped or re-probe what's "
@@ -306,12 +306,12 @@ async def _run_skill_agent_impl(
         agent_id=config.agent_id, log=node.log,
     )
     # Ablation: the nudge re-injects DIVERSITY_RULES / TRANSFORMATION_HYPOTHESIS in
-    # loop, so it IS a dynamically-delivered prompting technique; and it only fires
-    # from run state (a plateau of byte-identical tool outputs), so it is also
-    # steering. It belongs to BOTH categories — drop it if EITHER ablation is set,
-    # else a stuck worker is still rescued by the exact guidance the ablation removes.
-    # (_steer_off / _prompting_off were read once near the top of this function.)
-    _middleware = [] if (_prompting_off or _steer_off) else [_no_progress_mw]
+    # loop, so it IS a dynamically-delivered prompting technique (and it only fires
+    # from run state — the steering side that now shares the same flag). Drop it
+    # whenever prompting techniques are ablated, else a stuck worker is still rescued
+    # by the exact guidance the ablation removes.
+    # (_prompting_off was read once near the top of this function.)
+    _middleware = [] if _prompting_off else [_no_progress_mw]
 
     # Per-dispatch progressive-disclosure tool: when this skill ships reference files,
     # bind a scoped read_reference tool. Wrapped defensively — reference wiring must

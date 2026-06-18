@@ -816,8 +816,7 @@ def _budgets_submenu(cfg: dict[str, dict[str, Any]]) -> None:
 # Human labels for the ablation switches, in the thesis ablation-table order.
 # Each flag, when ON, DISABLES that capability for the run.
 _CAPABILITY_KEYS: list[tuple[str, str]] = [
-    ("disable_prompting_techniques", "Prompting techniques (system-prompt standards)"),
-    ("disable_steering_directives",  "Steering directives ([SYSTEM NOTE] nudges)"),
+    ("disable_prompting_techniques", "Prompting techniques (standards + [SYSTEM NOTE] nudges)"),
     ("disable_hypothesis_passing",   "Hypothesis passing (structured beliefs)"),
     ("disable_refusal_handling",     "Refusal handling (recovery ladder)"),
     ("disable_skills",               "Skills (per-class specialists)"),

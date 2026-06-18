@@ -43,7 +43,7 @@ CAPTURED = "063-business-logic-reemit.captured.json"
 def _with_rule(messages: list[BaseMessage]) -> list[BaseMessage]:
     """Append the REAL src/ ``FINDING_NOVELTY_RULE`` to the SystemMessage.
 
-    ``get_executor_prompt`` now ends with this exact block, so appending it to
+    ``build_prompt("executor")`` now ends with this exact block, so appending it to
     the captured system message reproduces the SHIPPED prompt (the rule is the
     final joined part) — this is the real code path, not a copy, so the re-run
     confirms the change we actually merged."""

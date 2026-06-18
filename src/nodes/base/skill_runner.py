@@ -124,7 +124,7 @@ class AgentConfig:
 # Finding extraction from agent output
 #
 # Two parsers run on every assistant message:
-# 1. The structured **FINDING:** / ## Finding format defined in FINDING_FORMAT
+# 1. The structured **FINDING:** / ## Finding format defined in FINDING_SCHEMA
 # 2. JSON blocks of the form {"findings": [...]} as a forgiving fallback
 #
 # The structured pattern only requires Title and Severity now (Category, URL,

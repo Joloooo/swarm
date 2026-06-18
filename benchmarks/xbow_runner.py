@@ -1093,6 +1093,21 @@ async def run_one(benchmark_id: str, *, skip_build: bool = False) -> dict:
         # here (all holds released by now).
         result["duration_s"] = round(max(0.0, time.time() - started - paused_seconds()), 1)
         result["hibernated_s"] = round(paused_seconds(), 1)
+    # Per-bench token spend, summed from the running per-agent totals. The
+    # table is reset at this bench's start (``reset_totals()`` above), so it
+    # now holds exactly THIS run's spend. total = input + output only:
+    # cached_tokens ⊂ input_tokens and reasoning_tokens ⊂ output_tokens, so
+    # adding either separately would double-count. Mirrors the summation in
+    # ``src/observability/live.py:_emit_token_totals``. Telemetry must never
+    # crash a run, so an empty/absent table just records zeros.
+    try:
+        from src.llm.callbacks import TOKEN_TOTALS
+        tin = sum(t.input_tokens for t in TOKEN_TOTALS.values())
+        tout = sum(t.output_tokens for t in TOKEN_TOTALS.values())
+        tcalls = sum(t.calls for t in TOKEN_TOTALS.values())
+        result["tokens"] = {"in": tin, "out": tout, "total": tin + tout, "calls": tcalls}
+    except Exception:  # noqa: BLE001 — observability must not break runs
+        result["tokens"] = {"in": 0, "out": 0, "total": 0, "calls": 0}
     # Rate-limit safety net: if any LLM call this bench hit a Codex rate-limit
     # / quota error (process-global signal set in src/llm/codex.py) and we did
     # NOT capture a flag, record it as a crash even if some node swallowed the

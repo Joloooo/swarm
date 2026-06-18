@@ -80,15 +80,15 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     # ablation. The matching gates live next to each subsystem and read
     # ``config.capability.*`` from ``src/graph.py``.
     "capability": {
-        # Drop the static system-prompt standards (diversity-over-depth,
-        # transformation hypothesis, tested-vs-tested-enough, anti-bias
-        # checklist + enumeration) from every executor prompt.
+        # Drop ALL prompting techniques in one ablation: the static system-prompt
+        # standards (diversity-over-depth, transformation hypothesis,
+        # tested-vs-tested-enough, anti-bias checklist + enumeration) AND the
+        # run-state [SYSTEM NOTE] steering nudges delivered to the planner and
+        # workers (loop / primitive / hypothesis-lock / diversify / …). The paper
+        # treats run-state steering as a prompting technique, so they ablate as
+        # one flag. The evidence digest is KEPT, so the planner is deprived of
+        # steering, not blinded.
         "disable_prompting_techniques": False,
-        # Stop injecting the run-state [SYSTEM NOTE] steering nudges into the
-        # planner (loop / primitive / hypothesis-lock / diversify / …). The
-        # evidence digest is KEPT, so the planner is deprived of steering, not
-        # blinded.
-        "disable_steering_directives": False,
         # Skip structured-hypothesis synthesis in the summarizer; the planner
         # then steers on raw findings instead of fused, evidence-bearing beliefs.
         "disable_hypothesis_passing": False,

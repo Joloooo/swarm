@@ -255,9 +255,6 @@ config = SimpleNamespace(
         disable_prompting_techniques = _env_bool(
             "SWARM_DISABLE_PROMPTING_TECHNIQUES",
             _cfg["capability"]["disable_prompting_techniques"]),
-        disable_steering_directives  = _env_bool(
-            "SWARM_DISABLE_STEERING_DIRECTIVES",
-            _cfg["capability"]["disable_steering_directives"]),
         disable_hypothesis_passing   = _env_bool(
             "SWARM_DISABLE_HYPOTHESIS_PASSING",
             _cfg["capability"]["disable_hypothesis_passing"]),

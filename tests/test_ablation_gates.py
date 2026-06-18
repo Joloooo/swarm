@@ -11,9 +11,10 @@ file guards:
      code path (prompt assembly, executor dispatch, web-search node), not just
      a value in a dict.
 
-The two gates that live inside large node methods needing a live run to
-exercise (steering directives, hypothesis passing) get a wiring assertion so
-they can't be silently dropped; the other four get real behavioural tests.
+The run-state gates that need a live run to exercise behaviourally — the
+planner's [SYSTEM NOTE] steering nudges (now part of the prompting-techniques
+flag) and hypothesis passing — get a wiring assertion so they can't be silently
+dropped; the others get real behavioural tests.
 """
 
 from __future__ import annotations
@@ -32,7 +33,6 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 CAP_FLAGS = [
     "disable_prompting_techniques",
-    "disable_steering_directives",
     "disable_hypothesis_passing",
     "disable_refusal_handling",
     "disable_skills",
@@ -199,9 +199,10 @@ async def test_web_search_noop_when_disabled(monkeypatch):
 
 
 def test_run_only_gates_are_wired():
-    """Steering + hypothesis gates sit inside large node methods that need a
-    live run to exercise behaviourally; at minimum assert each flag is read in
-    its own module so the wiring can never be silently removed."""
+    """The planner's run-state steering nudges (now under the prompting-techniques
+    flag) and the hypothesis gate sit inside large node methods that need a live
+    run to exercise behaviourally; at minimum assert each flag is read in its own
+    module so the wiring can never be silently removed."""
     import src.nodes.base.prompt_builder as prompt_builder
     import src.nodes.base.worker.skill_runner as skill_runner
     import src.nodes.executor as ex
@@ -210,7 +211,9 @@ def test_run_only_gates_are_wired():
     import src.nodes.web_search as ws
     import src.refusals.retry as retry
 
-    assert "disable_steering_directives" in inspect.getsource(planner)
+    # The prompting-techniques ablation now also drives the planner's run-state
+    # [SYSTEM NOTE] steering nudges (steering folded into prompting: one flag).
+    assert "disable_prompting_techniques" in inspect.getsource(planner)
     assert "disable_web_search" in inspect.getsource(planner)
     assert "disable_hypothesis_passing" in inspect.getsource(summarizer)
     assert "disable_refusal_handling" in inspect.getsource(retry)

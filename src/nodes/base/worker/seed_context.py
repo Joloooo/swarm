@@ -29,8 +29,8 @@ def _format_dispatch_reason(state: dict, steer_off: bool = False) -> str | None:
     # The reason itself is plumbing — the hypothesis / lead the planner is handing
     # off — and always stays. The "treat it as your primary objective / do not
     # pivot" wrapper is run-state STEERING (it tells the worker what to prioritise
-    # this turn), so it drops under disable_steering_directives — mirroring how the
-    # planner drops its own steering SYSTEM NOTEs while keeping the evidence digest.
+    # this turn), so it drops under the prompting-techniques ablation — mirroring how
+    # the planner drops its own steering SYSTEM NOTEs while keeping the evidence digest.
     reason = (state.get("dispatch_reason") or "").strip()
     if not reason:
         return None
@@ -237,8 +237,8 @@ def _format_hypotheses(state: dict, steer_off: bool = False) -> str | None:
         "theories, scored by how strongly the evidence supports them."
     )
     # "run its deciding probe before broadening" is the worker-side echo of the
-    # planner's committed-hypothesis steering directive (gated there by
-    # disable_steering_directives); drop it under the same flag. The ranked
+    # planner's committed-hypothesis steering directive (dropped there by
+    # disable_prompting_techniques); drop it under the same flag. The ranked
     # hypothesis rows themselves are plumbing and always stay.
     if not steer_off:
         intro += (

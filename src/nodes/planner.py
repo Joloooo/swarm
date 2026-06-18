@@ -3271,14 +3271,16 @@ class PlannerNode(BaseNode):
         # picks a different action this turn instead of dispatching the
         # same useless attack again.
         # Ablation gates (default off → full system, byte-identical).
-        # ``steer_off`` suppresses the run-state steering nudges below; the
+        # ``steer_off`` suppresses the run-state [SYSTEM NOTE] steering nudges
+        # below. The paper folds run-state steering into the prompting-techniques
+        # ablation, so they share ONE flag (``disable_prompting_techniques``); the
         # evidence digest is KEPT regardless, so the planner is deprived of
         # steering, not blinded. ``websearch_off`` additionally suppresses the
         # web-search lead / crawl nudges (the web_search node itself is gated in
         # src/nodes/web_search.py and the research_query in this file's attack
         # branch).
         _cap = getattr(config, "capability", None)
-        steer_off = bool(getattr(_cap, "disable_steering_directives", False))
+        steer_off = bool(getattr(_cap, "disable_prompting_techniques", False))
         websearch_off = bool(getattr(_cap, "disable_web_search", False))
 
         warning = self.detect_repetition(state)

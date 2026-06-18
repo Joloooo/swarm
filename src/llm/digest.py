@@ -551,7 +551,7 @@ def find_prior_worker_report(
     """Return the most recent ``worker_report`` ``AIMessage`` whose
     ``additional_kwargs.agent_id`` matches ``agent_id``, or ``None``.
 
-    Used by ``_collect_prior_skill_history`` (in ``src/nodes/base/skill_runner.py``)
+    Used by ``_collect_prior_skill_history`` (in ``src/nodes/base/worker/skill_runner.py``)
     to seed a re-dispatched worker with what the previous dispatch did.
     Walks the list in reverse so the FIRST hit is the most recent — this
     matters because a long benchmark may have many prior reports for the

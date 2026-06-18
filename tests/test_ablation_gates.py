@@ -203,7 +203,7 @@ def test_run_only_gates_are_wired():
     live run to exercise behaviourally; at minimum assert each flag is read in
     its own module so the wiring can never be silently removed."""
     import src.nodes.base.prompt_builder as prompt_builder
-    import src.nodes.base.skill_runner as skill_runner
+    import src.nodes.base.worker.skill_runner as skill_runner
     import src.nodes.executor as ex
     import src.nodes.planner as planner
     import src.nodes.summarizer as summarizer

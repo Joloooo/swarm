@@ -29,8 +29,9 @@ Package layout:
 - ``base/system_prompt.py`` — every ``*_RULES`` constant + the
   identity preamble + the system-prompt assembly function. The
   prompt the worker LLM agent sees comes from there.
-- ``base/skill_runner.py`` — ``AgentConfig`` + ``run_skill_agent``
-  (the worker lifecycle) + finding parsers + worker-memory helpers.
+- ``base/worker/`` — the worker-lifecycle package: ``skill_runner``
+  (``AgentConfig`` + ``run_skill_agent``) plus finding/verdict parsers,
+  seed-context renderers, tool-attempt extraction, and salvage helpers.
 
 State-shape / diff / serialize helpers used by ``BaseNode.__call__``
 to instrument each node finish live in ``src/observability/state.py``
@@ -70,7 +71,7 @@ from src.refusals.retry import astream_with_refusal_retry
 from src.refusals.salvage import try_salvage
 
 # Re-exported public API so existing call sites keep working unchanged.
-from src.nodes.base.skill_runner import (
+from src.nodes.base.worker import (
     AgentConfig,
     FINDING_PATTERN,
     JSON_FINDINGS_PATTERN,
@@ -488,12 +489,12 @@ class BaseNode(ABC):
         """Run a ``create_agent`` loop with the given skill config.
 
         Thin wrapper that delegates to
-        :func:`src.nodes.base.skill_runner.run_skill_agent` — the actual
-        worker lifecycle (system prompt build, agent stream, refusal
+        :func:`src.nodes.base.worker.skill_runner.run_skill_agent` — the
+        actual worker lifecycle (system prompt build, agent stream, refusal
         retries, finding parse, salvage) lives there as a free function.
         We forward ``self`` so the runner can use ``node.log``,
         ``node.name``, and ``node.ask_focused``.
         """
         # Lazy import keeps ``__init__.py`` lightweight at module load.
-        from src.nodes.base.skill_runner import run_skill_agent as _impl
+        from src.nodes.base.worker import run_skill_agent as _impl
         return await _impl(self, config, state, llm)

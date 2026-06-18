@@ -102,7 +102,7 @@ def _score(text: str):
       parser gap — "template"/"jinja" are not in _REDIRECT_CLASSES)."""
     import re as _re
 
-    from src.nodes.base.skill_runner import _extract_verdicts
+    from src.nodes.base.worker.verdicts import _extract_verdicts
 
     # input-validation owns a multi-class set (mirrors
     # EXECUTOR_SKILLS["input-validation"].owns); pass it so the replay matches

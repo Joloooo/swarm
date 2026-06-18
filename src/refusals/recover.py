@@ -2,7 +2,7 @@
 
 When a worker hits the API safety layer and the tier-1/2 retries
 (see ``src/refusals/retry.py``) all exhaust, the outer worker call
-in ``src/nodes/base/skill_runner.py:run_skill_agent`` catches the refusal and
+in ``src/nodes/base/worker/skill_runner.py:run_skill_agent`` catches the refusal and
 gives this module one last chance to extract value from the trace
 before reporting the worker as failed.
 

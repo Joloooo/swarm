@@ -847,7 +847,7 @@ def _format_relevant_summary_for_planner(rs: dict | None) -> str | None:
     the planner's input. Returns ``None`` when nothing to show.
 
     The format mirrors the worker-side renderer in
-    ``src/nodes/base/skill_runner.py:_format_relevant_summary`` so the
+    ``src/nodes/base/worker/skill_runner.py:_format_relevant_summary`` so the
     planner reads exactly what its previous self wrote — no schema
     drift between the planner's reading view and the worker's reading
     view.
@@ -1730,7 +1730,7 @@ def _hypothesis_directive(state: SwarmGraphState) -> str | None:
     lower-belief surface — the belief-stage analogue of
     :func:`_unconverted_primitive_directive`.
 
-    The synthesis pass (``src/llm/hypotheses.py``) fuses scattered signals
+    The synthesis pass (``src/nodes/base/hypotheses.py``) fuses scattered signals
     into ranked hypotheses with belief (``confidence``) and a deciding
     ``required`` next action. When belief crosses the commit threshold but
     the vuln is not yet demonstrated, this surfaces that hypothesis and
@@ -3053,7 +3053,7 @@ class PlannerNode(BaseNode):
             )
 
         # Tier-2 fallback factory — only meaningful on Codex routes.
-        # Mirrors the pattern in src/nodes/base/skill_runner.py so the
+        # Mirrors the pattern in src/nodes/base/worker/skill_runner.py so the
         # planner and workers share the same fallback behavior.
         fallback_factory: Any = None
         if _LLMConfig().provider == _Provider.CODEX:

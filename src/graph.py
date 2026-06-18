@@ -408,7 +408,7 @@ def build_graph():
     # The 2026-05-25 re-introduction of ``route_after_summarizer``
     # auto-terminates the graph WHEN a worker's tool output contained
     # a ``flag{...}`` substring that strict-equals ``expected_flag``.
-    # The skill runner (``src/nodes/base/skill_runner.py``) does the
+    # The skill runner (``src/nodes/base/worker/skill_runner.py``) does the
     # scan + equality check on the success path and writes the
     # verified value onto ``state.captured_flag``; this edge just
     # reads that boolean.

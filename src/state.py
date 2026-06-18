@@ -95,7 +95,7 @@ class HypothesisState(str, Enum):
     - ``refuted``: contradicted by evidence, or its required action was
       tried and came back empty enough to drive belief below floor.
 
-    Stamped by the synthesis pass (``src/llm/hypotheses.py``), never by a
+    Stamped by the synthesis pass (``src/nodes/base/hypotheses.py``), never by a
     worker directly — a worker only emits :class:`Signal` atoms.
     """
 
@@ -171,7 +171,7 @@ class Signal:
     The crucial difference from the old channels: ``vuln_class`` and
     ``suggested_skill`` are OPTIONAL. A signal can be a bare observation
     ("characters {{ }} . _ [ ] are rejected on /total_loan_payments")
-    that names no skill — the synthesis pass (``src/llm/hypotheses.py``)
+    that names no skill — the synthesis pass (``src/nodes/base/hypotheses.py``)
     decides which :class:`Hypothesis` it supports and with what weight.
     That is the home the old schema lacked: an observation that is
     evidence for a hypothesis without already naming the answer.
@@ -207,7 +207,7 @@ class Signal:
     #                    tested this class on this surface returned a
     #                    confirmed verdict. The only signal kind that lets a
     #                    hypothesis cross the COMMIT threshold (priors alone
-    #                    cap below it). See ``src/llm/hypotheses.py``.
+    #                    cap below it). See ``src/nodes/base/hypotheses.py``.
     #   - "refute":      a PROBE disproved it — the owning skill's own
     #                    "it is not me" verdict. Strong negative weight that
     #                    can drive a hypothesis to ``refuted``.
@@ -235,7 +235,7 @@ class Hypothesis:
       action is, and its cost. Cost may reorder the work queue; it must
       never lower ``confidence``.
 
-    See ``src/llm/hypotheses.py`` for the scoring functions and the
+    See ``src/nodes/base/hypotheses.py`` for the scoring functions and the
     routing-rule table that turns observations into weighted support.
     """
 
@@ -490,7 +490,7 @@ def _hypotheses_reducer(
     """Last-non-empty-write-wins for ``hypotheses``.
 
     Like ``canonical_findings``, the hypothesis list is REBUILT in full by
-    the synthesis pass (``src/llm/hypotheses.py``) once per summarizer
+    the synthesis pass (``src/nodes/base/hypotheses.py``) once per summarizer
     cycle from the raw signal log + canonical findings. A node that emits
     nothing (e.g. a summarizer pass with no workers) keeps the prior view
     rather than wiping it, so the planner and worker seeds always see the
@@ -723,7 +723,7 @@ class RelevantSummary(TypedDict, total=False):
       different angle instead of re-running the stuck one. See the
       diversify-when-stuck directive in ``src/nodes/planner.py``.
 
-    The seed builder in ``src/nodes/base/skill_runner.py`` renders
+    The seed builder in ``src/nodes/base/worker/skill_runner.py`` renders
     this dict as markdown under "## Investigation state" for the
     worker.
     """
@@ -874,7 +874,7 @@ class SwarmGraphState(TypedDict, total=False):
     # :func:`src.edges.flag_match.flags_match`:
     #   - :class:`src.nodes.base.flag_watcher.FlagWatcherCallback`
     #     (worker-side eager scan)
-    #   - :func:`src.nodes.base.skill_runner._run_skill_agent_impl`
+    #   - :func:`src.nodes.base.worker.skill_runner._run_skill_agent_impl`
     #     (per-node end-of-turn scan that emits ``flag_auto_verified``)
     #   - :func:`src.edges.routing.route_after_planner`
     #     (planner's ``action="submit_flag"`` verdict)
@@ -935,7 +935,7 @@ class SwarmGraphState(TypedDict, total=False):
 
     # ── Curated investigation context (the seed-context fix) ──
     # Two structured fields the seed builder in
-    # ``src/nodes/base/skill_runner.py`` reads when assembling a worker's
+    # ``src/nodes/base/worker/skill_runner.py`` reads when assembling a worker's
     # initial HumanMessage. Together with ``state["findings"]`` (already
     # cumulative) and ``state["dispatch_reason"]`` (already per-turn),
     # these give a fresh worker the full picture of what is known about
@@ -1039,7 +1039,7 @@ class SwarmGraphState(TypedDict, total=False):
     signals: Annotated[list[Signal], _signals_reducer]
     # ``hypotheses`` is the ranked list of :class:`Hypothesis` hubs the raw
     # signals fuse into, rebuilt each summarizer cycle by the synthesis
-    # pass (``src/llm/hypotheses.py``) with belief (confidence) and utility
+    # pass (``src/nodes/base/hypotheses.py``) with belief (confidence) and utility
     # (priority) on separate axes. Last-non-empty-write-wins, like
     # ``canonical_findings``.
     hypotheses: Annotated[list[Hypothesis], _hypotheses_reducer]
@@ -1048,7 +1048,7 @@ class SwarmGraphState(TypedDict, total=False):
     # record of everything that skill has done across all its dispatches
     # (commands kept, tool outputs shrunk to a bounded budget). Seeded into
     # the next dispatch so a re-run continues instead of re-deriving. See
-    # the thread builder/compactor in ``src/nodes/base/skill_runner.py``.
+    # the thread builder/compactor in ``src/nodes/base/worker/skill_runner.py``.
     investigation_threads: Annotated[dict, _investigation_threads_reducer]
 
     # ── Worker → Summarizer hand-off (the context-window fix) ──

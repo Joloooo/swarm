@@ -14,7 +14,7 @@ the real run re-emitted it (the ▣ at 15:58:51).
             faithful preview of the src/ change we would ship.
 
 Scorer reuses the REAL production parser
-``src.nodes.base.skill_runner._extract_findings`` (import-only, no drift): a
+``src.nodes.base.worker.findings._extract_findings`` (import-only, no drift): a
 "loan re-emission" is a parsed Finding whose title names the already-confirmed
 loan vuln — exactly what production turns into a ▣ line. Crude-append spike per
 SKILL §3 (throwaway basis): a clean win here justifies wiring the rule into the
@@ -86,7 +86,7 @@ def _restates_confirmed(f) -> bool:
 
 def _classify(text: str):
     """Parse output as production does, split into confirmed-restatements vs new."""
-    from src.nodes.base.skill_runner import _extract_findings
+    from src.nodes.base.worker.findings import _extract_findings
 
     allf = _extract_findings([AIMessage(content=text)], "business-logic")
     restate = [f for f in allf if _restates_confirmed(f)]

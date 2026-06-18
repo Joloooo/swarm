@@ -98,7 +98,7 @@ def _score(text: str):
     routing_classes). Authoritative: the real _extract_verdicts Redirect parser
     (routing Signal vuln_class=='ssti'); plus a recommend-line regex for the new
     Recommend: channel that the production parser does not (yet) read."""
-    from src.nodes.base.skill_runner import _extract_verdicts
+    from src.nodes.base.worker.verdicts import _extract_verdicts
 
     rec_lines = _REC_RE.findall(text)
     rec_ssti = any(_SKILL_RE.search(line) for line in rec_lines)

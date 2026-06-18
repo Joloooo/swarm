@@ -85,13 +85,13 @@ def _read_jsonl_rows(run_id: str) -> list[dict]:
 
 def test_info_record_from_src_logger_is_mirrored(per_test_run_id):
     """The exact case the fix targets — ``logger.info(...)`` from a
-    module like ``src.nodes.base.skill_runner`` must appear in
+    module like ``src.nodes.base.worker.skill_runner`` must appear in
     ``full_logs.jsonl`` even when the root logger is at WARNING."""
     # Simulate the compact-mode root-logger configuration so this
     # test catches regressions where the handler somehow inherits
     # the root level instead of running on its own.
     logging.getLogger().setLevel(logging.WARNING)
-    logging.getLogger("src.nodes.base.skill_runner").info(
+    logging.getLogger("src.nodes.base.worker.skill_runner").info(
         "auto-verified flag in tool output: flag{abc123}"
     )
 
@@ -104,7 +104,7 @@ def test_info_record_from_src_logger_is_mirrored(per_test_run_id):
     assert len(matching) == 1
     row = matching[0]
     assert row["level"] == "INFO"
-    assert row["logger"] == "src.nodes.base.skill_runner"
+    assert row["logger"] == "src.nodes.base.worker.skill_runner"
     assert "where" in row  # path:line is included for jump-to-source
 
 

@@ -10,7 +10,7 @@ Why it exists
 -------------
 When the selected Codex account crosses its 5-hour limit mid-benchmark, the
 error surfaces deep inside a worker's ``agent.astream``. The worker-crash
-handler (:mod:`src.nodes.base.skill_runner`) would normally salvage a partial
+handler (:mod:`src.nodes.base.worker.skill_runner`) would normally salvage a partial
 result and let the run continue — so the run burns its whole time budget and
 ends up looking like an ordinary ``fail`` instead of a crash. That's wrong: a
 rate-limited run never got a fair attempt.
@@ -19,7 +19,7 @@ So the pieces work together:
 
   * :mod:`src.llm.codex` sets this signal when it raises a rate-limit / quota
     error (the single choke point every Codex call passes through).
-  * :mod:`src.nodes.base.skill_runner` re-raises those errors instead of
+  * :mod:`src.nodes.base.worker.skill_runner` re-raises those errors instead of
     salvaging, so the run aborts promptly.
   * :func:`benchmarks.xbow_runner.run_one` uses it as a safety net to mark the
     benchmark crashed (``~``) regardless of where the error was caught, and the

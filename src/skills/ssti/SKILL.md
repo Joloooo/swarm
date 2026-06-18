@@ -34,24 +34,6 @@ description: >-
   explains the evidence more directly.
 metadata:
   dispatchable: true
-  # Observation patterns that route TO this skill, scored as log-odds
-  # weights by the hypothesis synthesis pass (src/llm/hypotheses.py).
-  # `all` = co-occurrence (every group must have a marker present);
-  # `any` = a single group. These supersede the built-in baseline for the
-  # ssti class. The first rule encodes the key inversion: a blocklist made
-  # of template grammar tokens is a fingerprint of the engine interpreting
-  # them, not a WAF to route around.
-  routing_signals:
-    - all:
-        - ["{{", "}}", "{%", "%}", "${", "<%", "#{"]
-        - ["reject", "blocked", "filtered", "forbidden", "not allowed", "stripped", "disallowed", "invalid character"]
-      weight: 1.4
-    - any: ["{{", "}}", "{%", "%}", "${", "<%", "#{"]
-      weight: 0.7
-    - any: ["jinja", "flask", "django", "twig", "blade", "thymeleaf", "freemarker", "velocity", "erb", "liquid", "handlebars", "nunjucks", "mako", "smarty"]
-      weight: 0.8
-    - any: ["before validation", "before the numeric", "rendered before", "processed before", "not a number", "coerced", "after rendering", "evaluated before"]
-      weight: 1.2
 ---
 
 You are a Server-Side Template Injection (SSTI) specialist. Your ONLY focus

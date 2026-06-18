@@ -666,7 +666,7 @@ mechanism end-to-end.
 
 
 def _universal_parts(stealth_level: int) -> list[str]:
-    """The shared chunks every worker prompt starts with."""
+    # The shared chunks every worker prompt starts with.
     parts = [
         IDENTITY_PREAMBLE,
         NARRATION_RULES,
@@ -680,14 +680,13 @@ def _universal_parts(stealth_level: int) -> list[str]:
 
 
 def get_universal_prompt(stealth_level: int = 0) -> str:
-    """Universal blocks only.
-
-    Used as the base for the planner's own supervisor prompt and as
-    the starting point for both phase-specific worker prompts. The
-    planner doesn't need executor-only rules (it dispatches workers;
-    it doesn't probe payloads) and doesn't need recon-only hints (it
-    judges worker reports, doesn't file findings itself).
-    """
+    # Universal blocks only.
+    #
+    # Used as the base for the planner's own supervisor prompt and as
+    # the starting point for both phase-specific worker prompts. The
+    # planner doesn't need executor-only rules (it dispatches workers;
+    # it doesn't probe payloads) and doesn't need recon-only hints (it
+    # judges worker reports, doesn't file findings itself).
     return "\n\n".join(_universal_parts(stealth_level))
 
 
@@ -732,17 +731,17 @@ directory discovery, that is positive evidence, not checklist noise."""
 
 
 def get_executor_prompt(stealth_level: int = 0) -> str:
-    """Universal blocks + executor-only methodology + category guidance.
+    # Universal blocks + executor-only methodology + category guidance.
+    #
+    # Used by ``_build_system_message`` when ``config.phase == "executor"``,
+    # which is the default for every dispatchable attack skill.
+    #
+    # Ablation: when ``config.capability.disable_prompting_techniques`` is set,
+    # the five "prompting standards" blocks (exhaustion, diversity, enumeration,
+    # common-checklist, transformation hypothesis) are dropped, leaving the
+    # universal blocks + the basic methodology/tactical structure. Default off,
+    # so a normal run includes every block.
 
-    Used by ``_build_system_message`` when ``config.phase == "executor"``,
-    which is the default for every dispatchable attack skill.
-
-    Ablation: when ``config.capability.disable_prompting_techniques`` is set,
-    the five "prompting standards" blocks (exhaustion, diversity, enumeration,
-    common-checklist, transformation hypothesis) are dropped, leaving the
-    universal blocks + the basic methodology/tactical structure. Default off,
-    so a normal run includes every block.
-    """
     # The prompting-standards block (thesis Sec. "Prompting Standards"). Removed
     # as a group for the no-prompting-techniques ablation.
     standards = [
@@ -773,18 +772,17 @@ def get_executor_prompt(stealth_level: int = 0) -> str:
 
 
 def get_recon_prompt(stealth_level: int = 0) -> str:
-    """Universal blocks + a short note on what counts as a recon finding.
-
-    Used by ``_build_system_message`` when ``config.phase == "recon"``.
-    Does NOT include the executor methodology block — recon agents do
-    not probe payloads, do not chase the demonstrated-extraction
-    standard, and do not need the transformation-hypothesis reasoning.
-    Including those blocks was the empirical cause of the
-    ``cyber_policy`` refusal on the owasp-recon worker in
-    ``logs/run-XBEN-006-24__2026-05-13_21h14m49s/`` — the heavy
-    exploitation vocabulary made a benign discovery agent read as red
-    team to the classifier.
-    """
+    # Universal blocks + a short note on what counts as a recon finding.
+    #
+    # Used by ``_build_system_message`` when ``config.phase == "recon"``.
+    # Does NOT include the executor methodology block — recon agents do
+    # not probe payloads, do not chase the demonstrated-extraction
+    # standard, and do not need the transformation-hypothesis reasoning.
+    # Including those blocks was the empirical cause of the
+    # ``cyber_policy`` refusal on the owasp-recon worker in
+    # ``logs/run-XBEN-006-24__2026-05-13_21h14m49s/`` — the heavy
+    # exploitation vocabulary made a benign discovery agent read as red
+    # team to the classifier.
     parts = _universal_parts(stealth_level) + [RECON_FINDINGS_HINT]
     return "\n\n".join(parts)
 
@@ -797,11 +795,10 @@ def get_recon_prompt(stealth_level: int = 0) -> str:
 # (which is what the old monolithic prompt was, modulo splits).
 
 def get_base_prompt(stealth_level: int = 0) -> str:
-    """Deprecated alias for :func:`get_executor_prompt`.
-
-    Existing imports (the planner's vocabulary-filter pass; legacy
-    tests) keep working unchanged.
-    """
+    # Deprecated alias for :func:`get_executor_prompt`.
+    #
+    # Existing imports (the planner's vocabulary-filter pass; legacy
+    # tests) keep working unchanged.
     return get_executor_prompt(stealth_level)
 
 
@@ -893,38 +890,38 @@ def _build_system_message(
     target_url: str,
     is_benchmark: bool = False,
 ) -> str:
-    """Assemble the full system prompt from config + knowledge layers.
+    # Assemble the full system prompt from config + knowledge layers.
+    #
+    # When ``config.skip_base_prompt`` is True the assembly is reduced to
+    # the SKILL.md body alone — no identity framing, no rule blocks, no
+    # RAG hint. Used by skills whose value depends on minimal framing
+    # (e.g. the request-builder skill, which performs pure technical Q&A
+    # and would be poisoned by pentest vocabulary).
+    #
+    # Phase routing:
+    #     - ``config.phase == "recon"`` → :func:`get_recon_prompt`
+    #       (universal + recon findings hint, no executor methodology)
+    #     - any other value → :func:`get_executor_prompt` (universal +
+    #       full executor methodology, severity, category guidance).
+    #
+    # Benchmark-mode flag guidance was REMOVED from the worker prompt on
+    # 2026-05-14 (the literal "scan for ``FLAG{...}``" wording was the
+    # strongest cyber_policy refusal trigger), then RE-INTRODUCED on
+    # 2026-05-31 as :data:`BENCHMARK_GUIDANCE` — a playful, neutral "find
+    # the hidden token, the app is the referee" block. It is appended
+    # ONLY when ``is_benchmark`` is True AND the phase is not ``recon``
+    # (recon never submits candidates and stays minimal). The planner
+    # still owns flag submission via ``action="submit_flag"`` (verified by
+    # ``src/edges/routing.py:route_after_planner``); the addendum just
+    # teaches the executor to submit-and-read and to follow the target's
+    # own corrective hints instead of judging success locally.
+    #
+    # Cumulative findings used to be injected here via a never-populated
+    # ``phase1_findings`` parameter; that path was deleted on 2026-05-26
+    # once the seed-message renderer in
+    # ``src/nodes/base/skill_runner.py:_format_findings`` started
+    # delivering ``state["findings"]`` to every worker.
 
-    When ``config.skip_base_prompt`` is True the assembly is reduced to
-    the SKILL.md body alone — no identity framing, no rule blocks, no
-    RAG hint. Used by skills whose value depends on minimal framing
-    (e.g. the request-builder skill, which performs pure technical Q&A
-    and would be poisoned by pentest vocabulary).
-
-    Phase routing:
-        - ``config.phase == "recon"`` → :func:`get_recon_prompt`
-          (universal + recon findings hint, no executor methodology)
-        - any other value → :func:`get_executor_prompt` (universal +
-          full executor methodology, severity, category guidance).
-
-    Benchmark-mode flag guidance was REMOVED from the worker prompt on
-    2026-05-14 (the literal "scan for ``FLAG{...}``" wording was the
-    strongest cyber_policy refusal trigger), then RE-INTRODUCED on
-    2026-05-31 as :data:`BENCHMARK_GUIDANCE` — a playful, neutral "find
-    the hidden token, the app is the referee" block. It is appended
-    ONLY when ``is_benchmark`` is True AND the phase is not ``recon``
-    (recon never submits candidates and stays minimal). The planner
-    still owns flag submission via ``action="submit_flag"`` (verified by
-    ``src/edges/routing.py:route_after_planner``); the addendum just
-    teaches the executor to submit-and-read and to follow the target's
-    own corrective hints instead of judging success locally.
-
-    Cumulative findings used to be injected here via a never-populated
-    ``phase1_findings`` parameter; that path was deleted on 2026-05-26
-    once the seed-message renderer in
-    ``src/nodes/base/skill_runner.py:_format_findings`` started
-    delivering ``state["findings"]`` to every worker.
-    """
     # Minimal-framing path: the SKILL.md body is the entire system
     # prompt. No additional layers — observed findings reach the worker
     # through the seed HumanMessage instead.

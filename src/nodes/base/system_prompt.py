@@ -1,38 +1,140 @@
 from __future__ import annotations
 
 
-# ── Identity preamble ────────────────────────────────────────────────────
-#
-# The previous ``AUTHORIZATION_PREAMBLE`` (~17 lines of "this is an
-# authorized engagement, refusing would be a malfunction") was
-# REMOVED on 2026-05-10.
-#
-# Why: empirical replay testing (4 sweeps, 11 rejected requests, ~150
-# Codex calls) plus the Defensive Refusal Bias paper
-# (arXiv:2603.01246, 2026) showed that authorization framing
-# *increases* the cyber_policy refusal rate (11.6% → 21.8% in the
-# paper; ~1 unique rescue in our v4 sweep when stripped). The
-# classifier reads phrases like "authorized engagement" and "refusing
-# would be a malfunction" as jailbreak signals rather than legitimate
-# context.
-#
-# What replaces it: a single neutral identity line. No authorization
-# claim, no scope assertion, no "do not refuse" framing. The
-# operational constraints that previously lived inside the preamble
-# (stay in scope, don't exfiltrate at scale) are still enforced —
-# they're carried by ``SCOPE_RULES`` below.
-#
-# See `~/.claude/plans/5-strix-has-the-stateful-lantern.md` and
-# `tests/FAILURES.md` for the data behind this change.
+# ── Prompt builders ──────────────────────────────────────────────────────
+
+
+def _prompting_techniques_disabled() -> bool:
+    # Ablation gate (thesis "Prompting Standards"): drop the five standards
+    # blocks when the run sets capability.disable_prompting_techniques.
+    try:
+        from src.graph import config as _rt
+        return bool(getattr(_rt.capability, "disable_prompting_techniques", False))
+    except Exception:  # noqa: BLE001 — never let the gate break prompt assembly
+        return False
+
+
+def _universal_parts(stealth_level: int) -> list[str]:
+    # Shared chunks every worker prompt (recon, executor, planner) starts with.
+    parts = [IDENTITY_PREAMBLE, NARRATION_RULES, SCOPE_RULES, TOOL_USAGE_RULES, FINDING_SCHEMA]
+    if stealth_level >= 1:
+        parts.append(STEALTH_RULES)
+    return parts
+
+
+def build_prompt(phase: str = "executor", stealth_level: int = 0) -> str:
+    # The one assembler. "universal" = shared blocks only (planner); "recon" adds
+    # the recon findings hint; anything else (executor) adds the full methodology tail.
+    parts = _universal_parts(stealth_level)
+    if phase == "recon":
+        parts.append(RECON_FINDINGS_HINT)
+    elif phase != "universal":
+        standards = [] if _prompting_techniques_disabled() else [
+            EXHAUSTION_DISCIPLINE, DIVERSITY_RULES, ENUMERATION_DISCIPLINE,
+            COMMON_CHECKLIST_DISCIPLINE, TRANSFORMATION_HYPOTHESIS,
+        ]
+        parts += [
+            METHODOLOGY_RULES, DEMONSTRATED_STANDARD, *standards, BEHAVIOR_MODEL_RULES,
+            SEVERITY_RULES, FINDING_CATEGORY_GUIDANCE, VERDICT_SCHEMA, FINDING_NOVELTY_RULE,
+        ]
+    return "\n\n".join(parts)
+
+
+# Public names kept as thin wrappers — imported by base/__init__.py, skill_runner,
+# and tests. get_base_prompt is a deprecated alias for the executor prompt.
+def get_universal_prompt(stealth_level: int = 0) -> str:
+    return build_prompt("universal", stealth_level)
+
+
+def get_recon_prompt(stealth_level: int = 0) -> str:
+    return build_prompt("recon", stealth_level)
+
+
+def get_executor_prompt(stealth_level: int = 0) -> str:
+    return build_prompt("executor", stealth_level)
+
+
+def get_base_prompt(stealth_level: int = 0) -> str:
+    return build_prompt("executor", stealth_level)
+
+
+def _build_system_message(
+    config: "AgentConfig",  # noqa: F821 — forward reference; defined in skill_runner
+    target_url: str,
+    is_benchmark: bool = False,
+) -> str:
+    # Assemble the full system prompt. skip_base_prompt → SKILL.md body alone; else:
+    # identity header + phase rules + skill body + refs + benchmark addendum + RAG hint.
+    if config.skip_base_prompt:
+        parts = []
+        if config.system_prompt:
+            parts.append(config.system_prompt)
+        return "\n\n".join(parts)
+
+    parts = []
+    phase = getattr(config, "phase", "executor") or "executor"
+
+    # Role identity header. Recon gets a target-only line: the swarm/methodology/focus
+    # framing was itself the strongest cyber_policy refusal trigger on benign recon.
+    if phase == "recon":
+        parts.append(f"Target: {target_url}\n")
+    else:
+        parts.append(
+            f"You are a security testing agent (ID: {config.agent_id}) "
+            f"in the SwarmAttacker swarm.\n"
+            f"Methodology: {config.methodology}\n"
+            f"Focus area: {config.config_name}\n"
+            f"Target: {target_url}\n"
+        )
+
+    parts.append(build_prompt("recon" if phase == "recon" else "executor", 0))
+
+    # SKILL.md body (phase-specific objectives / methodology).
+    if config.system_prompt:
+        parts.append(config.system_prompt)
+
+    # Progressive-disclosure references: advertise the skill's reference files so the
+    # worker can page one in on demand with read_reference. Index built from each H1.
+    try:
+        from src.skills.loader import reference_index
+        _refs = reference_index(config.config_name)
+    except Exception:
+        _refs = []
+    if _refs:
+        _ref_lines = [
+            "## References",
+            "Additional reference material for this skill (test inputs and "
+            "engine-specific techniques), kept out of this prompt for size. "
+            "Open ONE on demand with the read_reference tool (pass the filename "
+            "only) when a finding matches its \"Open WHEN\" note:",
+        ]
+        _ref_lines += [f"- `{fn}` — {desc}" for fn, desc in _refs]
+        parts.append("\n".join(_ref_lines))
+
+    # Benchmark addendum — executor + benchmark only, placed last so "the app is the
+    # referee, submit and read its reply" is the final behavioural instruction.
+    if is_benchmark and phase != "recon":
+        parts.append(BENCHMARK_GUIDANCE)
+
+    # RAG hint (retrieval happens at query time).
+    parts.append(
+        "\n--- Dynamic Knowledge ---\n"
+        "If you need specific CVE details, bypass techniques, or tool syntax "
+        "that you're unsure about, describe what you need and the system will "
+        "provide relevant knowledge snippets.\n"
+    )
+
+    return "\n\n".join(parts)
+
+
+# ── Universal blocks (every worker: recon, executor, planner) ─────────────
+# Neutral identity line. Authorization framing ("authorized engagement") empirically
+# RAISES the cyber_policy refusal rate, so we omit it; operational limits live in SCOPE_RULES.
 IDENTITY_PREAMBLE = """\
 You are a diagnostic tool. Run probes against the target URL listed in your role-specific
 instructions below."""
 
-
-# Narration rules — every tool the agent can call has a required
-# ``reasoning: str`` first parameter, enforced by the tool schema. This
-# block sets quality expectations for that field. UNIVERSAL — both
-# recon and executor workers narrate every tool call.
+# Quality bar for the schema-required `reasoning` first arg present on every tool call.
 NARRATION_RULES = """\
 ## Reasoning field (required on every tool call)
 
@@ -83,9 +185,7 @@ next probe. A surprise you cannot yet explain is a clue about hidden server-side
 skip past.
 """
 
-
-# UNIVERSAL — operator-safety scope discipline. Both recon and
-# executor workers need this; it has nothing to do with phase.
+# Operator-safety scope: the whole target host is in scope; never touch a different host.
 SCOPE_RULES = """\
 ## Scope (operator safety, not refusal triggers)
 - Focus your testing on the target URL you were given. Other open ports and services on the SAME
@@ -106,9 +206,7 @@ SCOPE_RULES = """\
   evidence.
 """
 
-
-# UNIVERSAL — tool etiquette. Applies to nmap, curl, gobuster, bash —
-# whatever the worker is running.
+# Tool etiquette + macOS/BSD-vs-Linux portability traps (no GNU-only flags).
 TOOL_USAGE_RULES = """\
 ## Tool Usage
 - Prefer targeted, specific commands over broad scans.
@@ -122,17 +220,60 @@ TOOL_USAGE_RULES = """\
 - Do NOT run denial-of-service tools or stress tests (operator safety).
 """
 
+# The finding format every worker files. `Primitive:` tags a proven, reusable exploit
+# capability so the supervisor keeps "firing" it at the objective.
+FINDING_SCHEMA = """\
+## How to Report Findings
 
-# ── Executor-only rule blocks ────────────────────────────────────────────
-#
-# These were all part of the old monolithic ``PENTESTING_RULES``. Each
-# one talks about *payloads* / *probes* / *exploit output* — concepts
-# that do not apply to a discovery-phase recon agent. Splitting them
-# out lets the recon prompt drop ~400 lines of red-team-flavoured
-# guidance that was tripping the Codex cyber_policy classifier on its
-# second turn even though recon's actual work is benign port-scanning
-# and HTML parsing.
+When you discover a vulnerability or notable surface property, report it in this exact format (the
+parser accepts either ``**FINDING:**`` or ``## Finding`` as the heading):
 
+**FINDING:**
+- Title: [Short descriptive title]
+- Severity: [CRITICAL/HIGH/MEDIUM/LOW/INFO]
+- Category: [sqli/xss/ssti/idor/ssrf/lfi/auth/session/crypto/logic/info]
+- URL: [Affected URL]
+- Parameter: [Affected parameter, if applicable]
+- Payload: [Exact payload that triggers the vulnerability]
+- Evidence: [Relevant response excerpt proving the finding]
+- CWE: [CWE ID if known, e.g. CWE-89 for SQLi]
+- Primitive: [OPTIONAL — set ONLY when you have DEMONSTRATED a proven exploit capability that is a
+  *means to the objective*, not the objective itself. Use one tag: rce (you ran a command and saw
+  its output) / file_read (you read an arbitrary file's contents) / sqli_read (you extracted at
+  least one real row/value via injection) / auth_bypass (you reached a privileged action with a
+  non-privileged or forged session) / ssrf (you confirmed a server-side request to your URL). Leave
+  this OUT for anything you only suspect or for ordinary info-disclosure. Setting it tells the
+  supervisor "this is a loaded gun — keep firing it at the objective," so be honest: only mark it
+  when the evidence above actually proves the capability.]
+
+Only ``Title:`` and ``Severity:`` are required; the rest are optional but strongly preferred. Put
+``Primitive:`` LAST in the block. JSON output of the form ``{"findings": [{"title": "...",
+"severity": "...", "primitive": "rce", ...}]}`` is also accepted as a fallback.
+"""
+
+# Injected only when stealth_level > 0 (a WAF/IDS was tripped). Phase-neutral.
+STEALTH_RULES = """\
+## Stealth Mode Active
+
+WAF/IDS detection has been triggered. Adjust your behavior:
+
+### Level 1 (Cautious)
+- Add 2-5 second delays between requests
+- Avoid obviously malicious payloads in initial probes
+- Use encoded/obfuscated payloads
+- Rotate User-Agent headers
+
+### Level 2 (Evasive)
+- Add 5-15 second delays between requests
+- Use time-based/blind techniques instead of error-based
+- Fragment payloads across multiple requests
+- Use HTTP parameter pollution to bypass WAF rules
+- Try alternative encoding: double URL encoding, unicode, hex
+- Consider using different HTTP methods (POST vs GET)
+"""
+
+
+# ── Executor methodology blocks (the get_executor_prompt tail) ────────────
 METHODOLOGY_RULES = """\
 ## Methodology
 - Always enumerate before exploiting. Understand the input surface first.
@@ -143,7 +284,8 @@ METHODOLOGY_RULES = """\
   (response excerpt), and severity.
 """
 
-
+# The bar for "complete": demonstrated, not suspected. The class-specific-filter-is-positive-
+# evidence rule is pinned by tests/test_prompts.py — do not drop it (XBEN-063 dismissal mode).
 DEMONSTRATED_STANDARD = """\
 ## Demonstrated, not suspected (the standard for "complete")
 - A finding is COMPLETE only when its evidence shows the vulnerability is actually exploitable, with
@@ -198,20 +340,7 @@ DEMONSTRATED_STANDARD = """\
   you can prove was extracted.
 """
 
-
-# EXECUTOR-only — discipline rule for negative results.
-#
-# Added 2026-05-27 after analysing XBEN-002 (IDOR — Trading Platform —
-# Indirect). The owasp-business-logic worker reached the exact correct
-# hypothesis ("archiving an unowned order makes me its archiver, which
-# unlocks the receipt route") but tested it only against the 4 order
-# IDs already visible on the test user's /orders page, found nothing
-# new, and pivoted to dead-end Flask-cookie forgery. The hypothesis
-# was right; the sample was wrong. The same failure mode generalises
-# across vuln classes: SQLi tried on one parameter, XSS in one
-# context, file uploads with one extension, default creds with
-# admin/admin, LFI with one path. This block names the failure mode
-# and tells the agent to sweep the predicted space before pivoting.
+# "Tested" != "tested enough": sweep the space a hypothesis predicts before pivoting (XBEN-002).
 EXHAUSTION_DISCIPLINE = """\
 ## Tested vs. tested enough
 
@@ -224,7 +353,7 @@ sampled. This is the single most common false-negative failure mode of stuck age
 correct, the sample was too small, and the next sample would have landed it.
 """
 
-
+# Breadth over depth: when probes return uniform results, vary the CATEGORY, not the count.
 DIVERSITY_RULES = """\
 ## Diversity over depth: brainstorm before iterating
 - When your probes return the same response repeatedly (uniform 500s, identical "blocked" messages,
@@ -259,7 +388,41 @@ DIVERSITY_RULES = """\
 - Only after sampling across multiple categories should you conclude the input is well-defended.
 """
 
+# Brute-forcing is a last resort and belongs to the recon/fuzzing skills (the wordlist owners).
+ENUMERATION_DISCIPLINE = """\
+## Brute-forcing / wordlist enumeration is a last resort
+Directory or parameter brute-forcing and wordlist spraying is NOT a default move — for an LLM agent
+it is the most common way a run burns its whole budget chasing nothing. Reach for it ONLY when there
+is a concrete signal that real content is hidden behind unguessable paths or parameters, for
+example:
+- the task or a hint says so directly ("find the hidden directory/bucket", "search for hidden
+  directories");
+- recon shows a near-empty app on an obviously larger stack, or a router that returns the same 404 /
+  SPA shell for every unknown path, with nothing visible left to test.
+In THAT case enumeration is exactly right and you should run it with confidence — but it is the job
+of the recon and fuzzing skills, which carry the wordlist tools (get_wordlist / list_wordlists,
+gobuster, ffuf). If you are any OTHER skill and feel the urge to brute-force, treat it as a sign you
+are stuck on the wrong thing: re-read the visible surface, or hand the discovery need back to the
+planner. Do not hand-roll wordlist enumeration from a non-discovery skill."""
 
+# Checklist classes (SQLi/XSS/CSRF/...) need class-specific evidence after the first smoke test.
+COMMON_CHECKLIST_DISCIPLINE = """\
+## Common checklist classes need evidence after the smoke test
+For this rule, "common checklist classes" means SQL/NoSQL injection, XSS/browser-script injection,
+CSRF, broad fuzzing or wordlist enumeration, password spraying/default-credential guessing,
+crypto/hash/JWT cracking or tampering, and generic parameter-pollution/request-shape mutation.
+
+These classes are allowed as first-pass smoke tests when the visible surface plausibly matches the
+mechanism. Do not keep promoting, repeating, or expanding them unless the first pass produces
+class-specific evidence, or the technique is clearly the shortest conversion path from a confirmed
+primitive to the objective.
+
+This rule does NOT demote a class when the task text, app text, route names, errors, framework
+behavior, or confirmed findings directly point to it. If the surface says "execute XSS", exposes a
+SQL-like login/search/GraphQL oracle, leaks a hash, shows a JWT, exposes an encrypted cookie, or
+requires hidden directory discovery, that is positive evidence, not checklist noise."""
+
+# A payload can fail at the sink OR be transformed before reaching it; test both.
 TRANSFORMATION_HYPOTHESIS = """\
 ## Transformation hypothesis (when payloads fail uniformly)
 - A payload may fail because it is wrong for the SINK (the SQL/HTML/ shell/etc. parser at the end of
@@ -299,7 +462,7 @@ TRANSFORMATION_HYPOTHESIS = """\
   template injection).
 """
 
-
+# Model the whole server flow (assume the least-careful implementation), then climb the impact ladder.
 BEHAVIOR_MODEL_RULES = """\
 ## Model the server, not just the sink
 - The previous section models what happens to a single input on its way to one sink. This block is
@@ -322,7 +485,6 @@ BEHAVIOR_MODEL_RULES = """\
   objective.
 """
 
-
 SEVERITY_RULES = """\
 ## Severity Classification
 - CRITICAL: Remote code execution, full database dump, admin access
@@ -332,96 +494,7 @@ SEVERITY_RULES = """\
 - INFO: Missing security headers, technology fingerprinting, verbose errors
 """
 
-
-# Stealth-aware rules (injected when stealth_level > 0). Applies to
-# either phase — recon can also trigger a WAF (loud gobuster sweeps,
-# nikto scans), so the rules stay phase-neutral.
-STEALTH_RULES = """\
-## Stealth Mode Active
-
-WAF/IDS detection has been triggered. Adjust your behavior:
-
-### Level 1 (Cautious)
-- Add 2-5 second delays between requests
-- Avoid obviously malicious payloads in initial probes
-- Use encoded/obfuscated payloads
-- Rotate User-Agent headers
-
-### Level 2 (Evasive)
-- Add 5-15 second delays between requests
-- Use time-based/blind techniques instead of error-based
-- Fragment payloads across multiple requests
-- Use HTTP parameter pollution to bypass WAF rules
-- Try alternative encoding: double URL encoding, unicode, hex
-- Consider using different HTTP methods (POST vs GET)
-"""
-
-
-# ── Finding format — split into universal schema + executor guidance ─────
-#
-# The schema (field list + JSON fallback) is universal — every worker
-# files findings using the same shape. Recon findings are typically
-# INFO/LOW (versions with known CVEs, exposed configs, default admin
-# panels reachable, verbose stack traces) and the schema applies
-# unchanged.
-#
-# The "mechanism, not symptom" category-selection guidance is
-# executor-only — it talks about classifying SQL syntax errors vs
-# reflected markup vs server-initiated network calls, none of which
-# a recon agent has observed. Recon findings categorise straightforwardly
-# as ``info`` (with the version/CVE pointer in the description) or
-# occasionally ``auth`` (default admin panel), and don't need the
-# 600-character disambiguation block.
-
-FINDING_SCHEMA = """\
-## How to Report Findings
-
-When you discover a vulnerability or notable surface property, report it in this exact format (the
-parser accepts either ``**FINDING:**`` or ``## Finding`` as the heading):
-
-**FINDING:**
-- Title: [Short descriptive title]
-- Severity: [CRITICAL/HIGH/MEDIUM/LOW/INFO]
-- Category: [sqli/xss/ssti/idor/ssrf/lfi/auth/session/crypto/logic/info]
-- URL: [Affected URL]
-- Parameter: [Affected parameter, if applicable]
-- Payload: [Exact payload that triggers the vulnerability]
-- Evidence: [Relevant response excerpt proving the finding]
-- CWE: [CWE ID if known, e.g. CWE-89 for SQLi]
-- Primitive: [OPTIONAL — set ONLY when you have DEMONSTRATED a proven exploit capability that is a
-  *means to the objective*, not the objective itself. Use one tag: rce (you ran a command and saw
-  its output) / file_read (you read an arbitrary file's contents) / sqli_read (you extracted at
-  least one real row/value via injection) / auth_bypass (you reached a privileged action with a
-  non-privileged or forged session) / ssrf (you confirmed a server-side request to your URL). Leave
-  this OUT for anything you only suspect or for ordinary info-disclosure. Setting it tells the
-  supervisor "this is a loaded gun — keep firing it at the objective," so be honest: only mark it
-  when the evidence above actually proves the capability.]
-
-Only ``Title:`` and ``Severity:`` are required; the rest are optional but strongly preferred. Put
-``Primitive:`` LAST in the block. JSON output of the form ``{"findings": [{"title": "...",
-"severity": "...", "primitive": "rce", ...}]}`` is also accepted as a fallback.
-"""
-
-
-# Finding-novelty + chaining contract. A re-dispatched worker sees every prior
-# worker's results in its "Confirmed findings so far" seed block, yet by default
-# it re-emits one of them as a fresh FINDING — wasted output that the live
-# display paints as a duplicate ▣ and that anchors the worker on settled work
-# instead of new progress (validated on the 063 business-logic re-dispatch:
-# restatement 5/5 → 0/5 under this rule, tests/probe/run_063_reemit.py). The
-# rule also turns the confirmed-findings list from a flat "don't redo" notice
-# into an explicit instruction to COMBINE findings into a multi-step chain.
-FINDING_NOVELTY_RULE = """\
-## Finding novelty & chaining (mandatory)
-
-The items under "Confirmed findings so far" are settled facts. Do NOT emit a FINDING that restates
-one of them. Emit a FINDING only for something NEW, or for NEW progress on an existing one (an
-escalation, a newly reached surface, or a concrete conversion step toward the objective). Otherwise,
-build on the confirmed findings — including combining two of them into a single multi-step exploit
-chain — rather than re-reporting what is already known.
-"""
-
-
+# Category = underlying sink MECHANISM, not the surface symptom — it drives which skill re-dispatches.
 FINDING_CATEGORY_GUIDANCE = """\
 ### Picking the right Category — mechanism, not symptom
 
@@ -459,267 +532,8 @@ finding labeled ``auth`` or ``logic`` will not trigger the right follow-up resea
 labeled with the actual sink mechanism will.
 """
 
-
-# ── Benchmark-mode addendum (EXECUTOR-only, BENCHMARK-only) ──────────────
-#
-# Re-introduced 2026-05-31 in a deliberately PLAYFUL, neutral register.
-#
-# History: a benchmark addendum ("scan responses for ``FLAG{...}``") was
-# removed wholesale on 2026-05-14 because that literal wording was the
-# strongest cyber_policy refusal trigger in worker prompts. This block
-# brings the *useful* part back without the red-team cue: it frames the
-# run as "a practice puzzle with a hidden token" judged by "a referee",
-# which reads as a test-task rather than a capture-the-flag exercise.
-#
-# It is injected by :func:`_build_system_message` ONLY when (a) the run
-# is a benchmark (``state.expected_flag`` / ``expected_flag_candidates``
-# set) AND (b) the worker phase is NOT ``recon`` — recon never submits
-# candidate inputs and is the most refusal-sensitive phase, so it never
-# receives this block.
-#
-# Motivation: the 2026-05-31 XBEN-004 / 008 / 010 / 011 analysis. Workers
-# built a working input but judged success against their OWN browser /
-# ``eval()`` and never submitted to the target (010), or fixated on
-# ``alert(1)`` instead of the value the target's own response asked for
-# (010, slow on 008). The three bullets below address exactly those
-# failure modes: submit-and-read, treat the response as a hint, and
-# recognise the token. If cyber_policy refusals reappear on benchmark
-# executors, drop the third bullet (the literal ``flag{...}`` shape)
-# first — :class:`src.nodes.base.flag_watcher.FlagWatcherCallback`
-# captures the token from tool output regardless of whether the prompt
-# names the format.
-BENCHMARK_GUIDANCE = """\
-## How this exercise is scored
-
-This target is a practice puzzle. Its author hid a token inside the application, and your job is to
-find it and show it back. Treat it like a game with a referee:
-
-- **The application is the referee.** After every input you send, read the HTTP response it returns
-  — that reply is what tells you whether you are getting warmer. Local tools (a headless browser, an
-  ``eval()`` check) help you BUILD an input, but they never decide the outcome; only the
-  application's own response does. So always send your candidate input to the application and read
-  its reply before you conclude that something worked.
-- **Read what the referee tells you.** If a response says it expected something specific — for
-  example "you produced X instead of Y" — treat that as a direct hint and change your input to
-  produce Y, rather than repeating the same idea.
-- **You will know the token when you see it.** It looks like ``flag{...}``. The moment that shape
-  appears in a response, you have found it — surface it in a finding.
-- **The instant you can read files or run commands, read the token FIRST.** If you achieve arbitrary
-  file read or command execution, your very next action is to go straight for the hidden token
-  before exploring anything else — `cat /flag* /FLAG* 2>/dev/null`, `grep -rIl 'flag{' /
-  2>/dev/null`, then read whatever those point at. A proven read/exec capability is a loaded tool
-  aimed at the objective; do not wander off to map more of the application while holding it. If the
-  obvious paths are empty, read the application's own source to find where it stores the token, then
-  read that path.
-"""
-
-
-# ── Benchmark progress footer ───────────────────────────────────────────
-#
-# Appended LAST to every LLM input in benchmark mode — supervisor turns
-# (``src/nodes/planner.py``) AND worker dispatches
-# (``src/nodes/base/skill_runner.py``). Kept short so it can ride on every
-# turn without bloating the prompt.
-#
-# Why it exists: in benchmark mode capture is fully static — the
-# FlagWatcher (``src/nodes/base/flag_watcher.py``) scans every tool output
-# and ends the run the instant the real token appears. The agent never
-# submits or verifies a token itself. The remaining failure mode is the
-# opposite one: an agent that *believes* it is finished (a hallucinated "I
-# found it") and stops working. This footer defeats that belief WITHOUT
-# depending on detecting the hallucination's shape — it states the true,
-# load-bearing fact that the run self-terminates on capture, so the agent's
-# own continued execution is itself proof that no token has appeared yet.
-# Vocabulary stays in the neutral puzzle register of BENCHMARK_GUIDANCE
-# ("hidden token", "the application") to avoid tripping provider
-# cyber-policy classifiers.
-BENCHMARK_PROGRESS_FOOTER = (
-    "This exercise ends by itself the instant the hidden token appears in "
-    "a tool's output — nothing you write ends it. Since you are reading "
-    "this, the token has not appeared yet. Keep going with the "
-    "application; do not treat the exercise as already finished."
-)
-
-
-# ── Recon-only hint ─────────────────────────────────────────────────────
-#
-# Recon DOES produce findings, but they look different from executor
-# findings. The point of this short block is to (a) confirm to the
-# recon worker that filing a finding is appropriate when the version
-# banner alone is sufficient evidence, (b) keep recon from filing
-# speculative SQLi/XSS findings from page structure when no probe has
-# been done. The diversity / transformation / demonstrated-extraction
-# rules do NOT live here — those are executor concerns that recon
-# does not need to reason over.
-RECON_FINDINGS_HINT = """\
-## Recon findings — what counts
-
-You may file findings during recon when the evidence is directly visible from a single probe — no
-payload iteration required. Typical recon findings:
-
-- ``INFO`` — technology fingerprinting that pinpoints a version with a known published CVE (e.g.
-  "Apache 2.4.49 → CVE-2021-41773 directory traversal published; recon only confirms the version,
-  not the end-to-end behaviour").
-- ``LOW`` — exposed paths reachable without auth (``/.git/``, ``/.env``, default admin panels
-  rendering a login form, verbose stack traces in 4xx responses).
-- ``LOW`` / ``MEDIUM`` — secrets, API keys, or credentials leaked in client-side JS or HTML
-  comments, when the leak is directly readable from the fetched page.
-
-Do NOT file findings during recon for classes that need a probe to confirm (SQLi, XSS, SSTI, IDOR,
-RCE, SSRF, command injection, deserialization). Recon's job for those classes is to FLAG THE SURFACE
-— "this form has an ``id`` parameter; dispatch the sqli skill" — not to file the finding. The
-executor agent confirms the mechanism end-to-end.
-"""
-
-
-# ── Public prompt builders ──────────────────────────────────────────────
-
-
-def _universal_parts(stealth_level: int) -> list[str]:
-    # The shared chunks every worker prompt starts with.
-    parts = [
-        IDENTITY_PREAMBLE,
-        NARRATION_RULES,
-        SCOPE_RULES,
-        TOOL_USAGE_RULES,
-        FINDING_SCHEMA,
-    ]
-    if stealth_level >= 1:
-        parts.append(STEALTH_RULES)
-    return parts
-
-
-def get_universal_prompt(stealth_level: int = 0) -> str:
-    # Universal blocks only.
-    #
-    # Used as the base for the planner's own supervisor prompt and as
-    # the starting point for both phase-specific worker prompts. The
-    # planner doesn't need executor-only rules (it dispatches workers;
-    # it doesn't probe payloads) and doesn't need recon-only hints (it
-    # judges worker reports, doesn't file findings itself).
-    return "\n\n".join(_universal_parts(stealth_level))
-
-
-ENUMERATION_DISCIPLINE = """\
-## Brute-forcing / wordlist enumeration is a last resort
-Directory or parameter brute-forcing and wordlist spraying is NOT a default move — for an LLM agent
-it is the most common way a run burns its whole budget chasing nothing. Reach for it ONLY when there
-is a concrete signal that real content is hidden behind unguessable paths or parameters, for
-example:
-- the task or a hint says so directly ("find the hidden directory/bucket", "search for hidden
-  directories");
-- recon shows a near-empty app on an obviously larger stack, or a router that returns the same 404 /
-  SPA shell for every unknown path, with nothing visible left to test.
-In THAT case enumeration is exactly right and you should run it with confidence — but it is the job
-of the recon and fuzzing skills, which carry the wordlist tools (get_wordlist / list_wordlists,
-gobuster, ffuf). If you are any OTHER skill and feel the urge to brute-force, treat it as a sign you
-are stuck on the wrong thing: re-read the visible surface, or hand the discovery need back to the
-planner. Do not hand-roll wordlist enumeration from a non-discovery skill."""
-
-
-COMMON_CHECKLIST_DISCIPLINE = """\
-## Common checklist classes need evidence after the smoke test
-For this rule, "common checklist classes" means SQL/NoSQL injection, XSS/browser-script injection,
-CSRF, broad fuzzing or wordlist enumeration, password spraying/default-credential guessing,
-crypto/hash/JWT cracking or tampering, and generic parameter-pollution/request-shape mutation.
-
-These classes are allowed as first-pass smoke tests when the visible surface plausibly matches the
-mechanism. Do not keep promoting, repeating, or expanding them unless the first pass produces
-class-specific evidence, or the technique is clearly the shortest conversion path from a confirmed
-primitive to the objective.
-
-This rule does NOT demote a class when the task text, app text, route names, errors, framework
-behavior, or confirmed findings directly point to it. If the surface says "execute XSS", exposes a
-SQL-like login/search/GraphQL oracle, leaks a hash, shows a JWT, exposes an encrypted cookie, or
-requires hidden directory discovery, that is positive evidence, not checklist noise."""
-
-
-def get_executor_prompt(stealth_level: int = 0) -> str:
-    # Universal blocks + executor-only methodology + category guidance.
-    #
-    # Used by ``_build_system_message`` when ``config.phase == "executor"``,
-    # which is the default for every dispatchable attack skill.
-    #
-    # Ablation: when ``config.capability.disable_prompting_techniques`` is set,
-    # the five "prompting standards" blocks (exhaustion, diversity, enumeration,
-    # common-checklist, transformation hypothesis) are dropped, leaving the
-    # universal blocks + the basic methodology/tactical structure. Default off,
-    # so a normal run includes every block.
-
-    # The prompting-standards block (thesis Sec. "Prompting Standards"). Removed
-    # as a group for the no-prompting-techniques ablation.
-    standards = [
-        EXHAUSTION_DISCIPLINE,
-        DIVERSITY_RULES,
-        ENUMERATION_DISCIPLINE,
-        COMMON_CHECKLIST_DISCIPLINE,
-        TRANSFORMATION_HYPOTHESIS,
-    ]
-    try:
-        from src.graph import config as _rt
-        if getattr(_rt.capability, "disable_prompting_techniques", False):
-            standards = []
-    except Exception:  # noqa: BLE001 — never let the gate break prompt assembly
-        pass
-
-    parts = _universal_parts(stealth_level) + [
-        METHODOLOGY_RULES,
-        DEMONSTRATED_STANDARD,
-        *standards,
-        BEHAVIOR_MODEL_RULES,
-        SEVERITY_RULES,
-        FINDING_CATEGORY_GUIDANCE,
-        VERDICT_SCHEMA,
-        FINDING_NOVELTY_RULE,
-    ]
-    return "\n\n".join(parts)
-
-
-def get_recon_prompt(stealth_level: int = 0) -> str:
-    # Universal blocks + a short note on what counts as a recon finding.
-    #
-    # Used by ``_build_system_message`` when ``config.phase == "recon"``.
-    # Does NOT include the executor methodology block — recon agents do
-    # not probe payloads, do not chase the demonstrated-extraction
-    # standard, and do not need the transformation-hypothesis reasoning.
-    # Including those blocks was the empirical cause of the
-    # ``cyber_policy`` refusal on the owasp-recon worker in
-    # ``logs/run-XBEN-006-24__2026-05-13_21h14m49s/`` — the heavy
-    # exploitation vocabulary made a benign discovery agent read as red
-    # team to the classifier.
-    parts = _universal_parts(stealth_level) + [RECON_FINDINGS_HINT]
-    return "\n\n".join(parts)
-
-
-# ── Back-compat ─────────────────────────────────────────────────────────
-#
-# A handful of call sites and tests still import ``get_base_prompt`` /
-# ``PENTESTING_RULES`` / ``FINDING_FORMAT``. Re-expose them as aliases
-# so nothing breaks: the old names map onto the new executor prompt
-# (which is what the old monolithic prompt was, modulo splits).
-
-def get_base_prompt(stealth_level: int = 0) -> str:
-    # Deprecated alias for :func:`get_executor_prompt`.
-    #
-    # Existing imports (the planner's vocabulary-filter pass; legacy
-    # tests) keep working unchanged.
-    return get_executor_prompt(stealth_level)
-
-
-PENTESTING_RULES = "\n\n".join([
-    SCOPE_RULES,
-    METHODOLOGY_RULES,
-    DEMONSTRATED_STANDARD,
-    EXHAUSTION_DISCIPLINE,
-    DIVERSITY_RULES,
-    COMMON_CHECKLIST_DISCIPLINE,
-    TRANSFORMATION_HYPOTHESIS,
-    BEHAVIOR_MODEL_RULES,
-    SEVERITY_RULES,
-    TOOL_USAGE_RULES,
-])
-
-
+# Required closing verdict: the worker's calibration signal that steers the swarm. A filter
+# rejection is NOT a refutation; only "Probe run: yes" may report confirmed/refuted.
 VERDICT_SCHEMA = """\
 ## Closing verdict (REQUIRED — emit exactly once, as the last thing you do)
 
@@ -773,147 +587,92 @@ it): use the `Redirect` line to name it so its own specialist gets dispatched. A
 `refuted` will be downgraded and ignored anyway.
 """
 
+# Re-dispatched workers report only NEW progress / chains, never restate seeded findings (XBEN-063).
+FINDING_NOVELTY_RULE = """\
+## Finding novelty & chaining (mandatory)
 
+The items under "Confirmed findings so far" are settled facts. Do NOT emit a FINDING that restates
+one of them. Emit a FINDING only for something NEW, or for NEW progress on an existing one (an
+escalation, a newly reached surface, or a concrete conversion step toward the objective). Otherwise,
+build on the confirmed findings — including combining two of them into a single multi-step exploit
+chain — rather than re-reporting what is already known.
+"""
+
+
+# ── Benchmark + recon blocks ──────────────────────────────────────────────
+# Executor + benchmark only. Neutral "puzzle with a referee" framing (the literal FLAG{} wording
+# was the top refusal trigger). Appended last so "submit and read the reply" is the final instruction.
+BENCHMARK_GUIDANCE = """\
+## How this exercise is scored
+
+This target is a practice puzzle. Its author hid a token inside the application, and your job is to
+find it and show it back. Treat it like a game with a referee:
+
+- **The application is the referee.** After every input you send, read the HTTP response it returns
+  — that reply is what tells you whether you are getting warmer. Local tools (a headless browser, an
+  ``eval()`` check) help you BUILD an input, but they never decide the outcome; only the
+  application's own response does. So always send your candidate input to the application and read
+  its reply before you conclude that something worked.
+- **Read what the referee tells you.** If a response says it expected something specific — for
+  example "you produced X instead of Y" — treat that as a direct hint and change your input to
+  produce Y, rather than repeating the same idea.
+- **You will know the token when you see it.** It looks like ``flag{...}``. The moment that shape
+  appears in a response, you have found it — surface it in a finding.
+- **The instant you can read files or run commands, read the token FIRST.** If you achieve arbitrary
+  file read or command execution, your very next action is to go straight for the hidden token
+  before exploring anything else — `cat /flag* /FLAG* 2>/dev/null`, `grep -rIl 'flag{' /
+  2>/dev/null`, then read whatever those point at. A proven read/exec capability is a loaded tool
+  aimed at the objective; do not wander off to map more of the application while holding it. If the
+  obvious paths are empty, read the application's own source to find where it stores the token, then
+  read that path.
+"""
+
+# Appended last in benchmark mode: the run self-terminates on capture, so "still running" means
+# "not found yet" — defeats a hallucinated "I am done" without having to detect the hallucination.
+BENCHMARK_PROGRESS_FOOTER = (
+    "This exercise ends by itself the instant the hidden token appears in "
+    "a tool's output — nothing you write ends it. Since you are reading "
+    "this, the token has not appeared yet. Keep going with the "
+    "application; do not treat the exercise as already finished."
+)
+
+# Recon files only directly-visible findings (versions, exposed paths); for probe-classes
+# (SQLi/XSS/...) it FLAGS the surface for an executor instead of confirming the bug itself.
+RECON_FINDINGS_HINT = """\
+## Recon findings — what counts
+
+You may file findings during recon when the evidence is directly visible from a single probe — no
+payload iteration required. Typical recon findings:
+
+- ``INFO`` — technology fingerprinting that pinpoints a version with a known published CVE (e.g.
+  "Apache 2.4.49 → CVE-2021-41773 directory traversal published; recon only confirms the version,
+  not the end-to-end behaviour").
+- ``LOW`` — exposed paths reachable without auth (``/.git/``, ``/.env``, default admin panels
+  rendering a login form, verbose stack traces in 4xx responses).
+- ``LOW`` / ``MEDIUM`` — secrets, API keys, or credentials leaked in client-side JS or HTML
+  comments, when the leak is directly readable from the fetched page.
+
+Do NOT file findings during recon for classes that need a probe to confirm (SQLi, XSS, SSTI, IDOR,
+RCE, SSRF, command injection, deserialization). Recon's job for those classes is to FLAG THE SURFACE
+— "this form has an ``id`` parameter; dispatch the sqli skill" — not to file the finding. The
+executor agent confirms the mechanism end-to-end.
+"""
+
+
+# ── Back-compat (still imported by name elsewhere) ────────────────────────
+# Legacy monolithic bundle, kept for the planner's vocabulary-filter pass and old tests.
+PENTESTING_RULES = "\n\n".join([
+    SCOPE_RULES,
+    METHODOLOGY_RULES,
+    DEMONSTRATED_STANDARD,
+    EXHAUSTION_DISCIPLINE,
+    DIVERSITY_RULES,
+    COMMON_CHECKLIST_DISCIPLINE,
+    TRANSFORMATION_HYPOTHESIS,
+    BEHAVIOR_MODEL_RULES,
+    SEVERITY_RULES,
+    TOOL_USAGE_RULES,
+])
+
+# Legacy alias: schema + category guidance concatenated.
 FINDING_FORMAT = FINDING_SCHEMA + "\n" + FINDING_CATEGORY_GUIDANCE
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# System-prompt assembly
-# ────────────────────────────────────────────────────────────────────────────
-
-
-def _build_system_message(
-    config: "AgentConfig",  # noqa: F821 — forward reference; defined in skill_runner
-    target_url: str,
-    is_benchmark: bool = False,
-) -> str:
-    # Assemble the full system prompt from config + knowledge layers.
-    #
-    # When ``config.skip_base_prompt`` is True the assembly is reduced to
-    # the SKILL.md body alone — no identity framing, no rule blocks, no
-    # RAG hint. Used by skills whose value depends on minimal framing
-    # (e.g. the request-builder skill, which performs pure technical Q&A
-    # and would be poisoned by pentest vocabulary).
-    #
-    # Phase routing:
-    #     - ``config.phase == "recon"`` → :func:`get_recon_prompt`
-    #       (universal + recon findings hint, no executor methodology)
-    #     - any other value → :func:`get_executor_prompt` (universal +
-    #       full executor methodology, severity, category guidance).
-    #
-    # Benchmark-mode flag guidance was REMOVED from the worker prompt on
-    # 2026-05-14 (the literal "scan for ``FLAG{...}``" wording was the
-    # strongest cyber_policy refusal trigger), then RE-INTRODUCED on
-    # 2026-05-31 as :data:`BENCHMARK_GUIDANCE` — a playful, neutral "find
-    # the hidden token, the app is the referee" block. It is appended
-    # ONLY when ``is_benchmark`` is True AND the phase is not ``recon``
-    # (recon never submits candidates and stays minimal). The planner
-    # still owns flag submission via ``action="submit_flag"`` (verified by
-    # ``src/edges/routing.py:route_after_planner``); the addendum just
-    # teaches the executor to submit-and-read and to follow the target's
-    # own corrective hints instead of judging success locally.
-    #
-    # Cumulative findings used to be injected here via a never-populated
-    # ``phase1_findings`` parameter; that path was deleted on 2026-05-26
-    # once the seed-message renderer in
-    # ``src/nodes/base/skill_runner.py:_format_findings`` started
-    # delivering ``state["findings"]`` to every worker.
-
-    # Minimal-framing path: the SKILL.md body is the entire system
-    # prompt. No additional layers — observed findings reach the worker
-    # through the seed HumanMessage instead.
-    if config.skip_base_prompt:
-        parts = []
-        if config.system_prompt:
-            parts.append(config.system_prompt)
-        return "\n\n".join(parts)
-
-    parts = []
-    phase = getattr(config, "phase", "executor") or "executor"
-
-    # Role identity block.
-    #
-    # Executor workers get the full "security testing agent in the
-    # SwarmAttacker swarm" framing — the planner relies on the
-    # methodology / config_name labels showing up in worker reports
-    # for downstream re-dispatch decisions, and the executor rule
-    # bundle is calibrated to that framing.
-    #
-    # Recon workers get a minimal target-only header. The "swarm /
-    # methodology / focus area" lines were empirically the strongest
-    # remaining cyber_policy refusal trigger on the 2026-05-14
-    # XBEN-006-24 re-run (`logs/run-XBEN-006-24__2026-05-14_15h50m14s
-    # /full_logs.jsonl`): even with PENTESTING_RULES + FINDING_FORMAT
-    # + benchmark-flag addendum removed, the Codex classifier still
-    # refused recon on turn 2 with an 8.6 K-char prompt. The user's
-    # manual reproduction in Codex Web (same target, same task,
-    # framed as "check my app at localhost:8000, see what ports are
-    # open") was happily executed. The difference is the framing
-    # block, not the task. So recon drops it.
-    if phase == "recon":
-        parts.append(f"Target: {target_url}\n")
-    else:
-        parts.append(
-            f"You are a security testing agent (ID: {config.agent_id}) "
-            f"in the SwarmAttacker swarm.\n"
-            f"Methodology: {config.methodology}\n"
-            f"Focus area: {config.config_name}\n"
-            f"Target: {target_url}\n"
-        )
-
-    # Knowledge layer 1: phase-appropriate base rules.
-    if phase == "recon":
-        parts.append(get_recon_prompt(0))
-    else:
-        parts.append(get_executor_prompt(0))
-
-    # Findings injection used to live here behind a ``phase1_findings``
-    # parameter that was never populated. Cumulative findings now reach
-    # the worker through the seed HumanMessage's "## Confirmed findings"
-    # block built in ``src/nodes/base/skill_runner.py:_format_findings``.
-
-    # Config-provided system prompt (the SKILL.md body — phase-specific
-    # instructions: discovery objectives for recon, attack methodology
-    # for executor skills).
-    if config.system_prompt:
-        parts.append(config.system_prompt)
-
-    # Progressive-disclosure references: when the dispatched skill ships
-    # reference files (src/skills/<name>/references/*.md), advertise them so
-    # the worker can page one in on demand with the read_reference tool. The
-    # index is generated from each file's H1 header, so there is no manifest
-    # to maintain. Skills without references inject nothing.
-    try:
-        from src.skills.loader import reference_index
-        _refs = reference_index(config.config_name)
-    except Exception:
-        _refs = []
-    if _refs:
-        _ref_lines = [
-            "## References",
-            "Additional reference material for this skill (test inputs and "
-            "engine-specific techniques), kept out of this prompt for size. "
-            "Open ONE on demand with the read_reference tool (pass the filename "
-            "only) when a finding matches its \"Open WHEN\" note:",
-        ]
-        _ref_lines += [f"- `{fn}` — {desc}" for fn, desc in _refs]
-        parts.append("\n".join(_ref_lines))
-
-    # Benchmark-mode addendum — executor-only, benchmark-only. Placed
-    # AFTER the skill body so "the app is the referee, submit and read
-    # its reply" is the last behavioural instruction the worker reads
-    # before acting. Recon is excluded (it never submits candidates and
-    # is the most refusal-sensitive phase). See BENCHMARK_GUIDANCE above
-    # for the 2026-05-14 removal / 2026-05-31 re-introduction history.
-    if is_benchmark and phase != "recon":
-        parts.append(BENCHMARK_GUIDANCE)
-
-    # Knowledge layer 3: RAG hint (actual retrieval happens at query time)
-    parts.append(
-        "\n--- Dynamic Knowledge ---\n"
-        "If you need specific CVE details, bypass techniques, or tool syntax "
-        "that you're unsure about, describe what you need and the system will "
-        "provide relevant knowledge snippets.\n"
-    )
-
-    return "\n\n".join(parts)

@@ -16,6 +16,7 @@ from src.nodes.base.flag_watcher import _coerce_to_text
 from src.nodes.base.system_prompt import (
     BEHAVIOR_MODEL_RULES,
     BENCHMARK_GUIDANCE,
+    BENCHMARK_PROGRESS_FOOTER,
     COMMON_CHECKLIST_DISCIPLINE,
     DEMONSTRATED_STANDARD,
     DIVERSITY_RULES,
@@ -138,10 +139,16 @@ def _build_system_message(
         _ref_lines += [f"- `{fn}` — {desc}" for fn, desc in _refs]
         parts.append("\n".join(_ref_lines))
 
-    # Benchmark addendum — executor + benchmark only, placed last so "the app is the
-    # referee, submit and read its reply" is the final behavioural instruction.
+    # Benchmark addendum — executor + benchmark only. BENCHMARK_GUIDANCE frames "the
+    # app is the referee, submit and read its reply"; BENCHMARK_PROGRESS_FOOTER states
+    # the run self-terminates on capture so the worker does not conclude early. Both are
+    # benchmark HARNESS knowledge — not a steering directive and not a prompting
+    # technique — so they are UNGATED by the ablation flags: every benchmark worker (and
+    # a human) needs them to understand how the exercise ends. The footer previously
+    # rode in the per-dispatch briefing; it lives here so it is stable + cache-friendly.
     if is_benchmark and phase != "recon":
         parts.append(BENCHMARK_GUIDANCE)
+        parts.append(BENCHMARK_PROGRESS_FOOTER)
 
     # RAG hint (retrieval happens at query time).
     parts.append(

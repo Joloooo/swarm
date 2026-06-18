@@ -23,7 +23,6 @@ from src.nodes.base.flag_watcher import (
     SiblingCapturedSignal,
 )
 from src.nodes.base.prompt_builder import _build_system_message
-from src.nodes.base.system_prompt import BENCHMARK_PROGRESS_FOOTER
 from src.nodes.base.worker.findings import _extract_findings
 from src.nodes.base.worker.salvage import _salvage_primitive_from_trace
 from src.nodes.base.worker.seed_context import (
@@ -209,11 +208,10 @@ async def _run_skill_agent_impl(
             "already been confirmed."
         )
 
-    # Benchmark status footer — appended LAST so it's the final thing the worker
-    # reads. Capture is static (FlagWatcher ends the run on the real token), so this
-    # keeps a worker from concluding early. Mirrors the planner footer.
-    if is_benchmark:
-        seed_parts.append(BENCHMARK_PROGRESS_FOOTER)
+    # The benchmark progress footer ("the run self-terminates on capture; do not
+    # conclude early") is benchmark HARNESS knowledge, not per-dispatch context, so it
+    # now lives in the system prompt (see _build_system_message) rather than riding in
+    # this briefing — stable, cache-friendly, and ungated by the ablation flags.
 
     if seed_parts:
         seed_msgs: list = [HumanMessage(content="\n\n".join(seed_parts))]
@@ -221,7 +219,7 @@ async def _run_skill_agent_impl(
             "[%s] seeding worker with %d context block(s) "
             "(dispatch_reason=%s, findings=%s, recon_summary=%s, "
             "relevant_summary=%s, tool_attempts=%s, skill_catalogue=%s, "
-            "web_search=%s, prior_history=%s, benchmark_footer=%s)",
+            "web_search=%s, prior_history=%s)",
             config.agent_id,
             sum(bool(b) for b in (
                 dispatch_block, findings_block, recon_block,
@@ -236,7 +234,6 @@ async def _run_skill_agent_impl(
             bool(skill_catalogue_block),
             bool(web_search_ctx),
             bool(prior_history),
-            is_benchmark,
         )
     else:
         seed_msgs = []

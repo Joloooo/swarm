@@ -1,35 +1,7 @@
-"""Skill runner — turn a loaded skill config into an executing LangChain agent.
-
-This module is the heart of every worker dispatch. The flow:
-
-  1. The planner picks an action and stages a list of skill configs in
-     ``state.pending_dispatch``. The routing edge fans them out across
-     parallel ExecutorNode / ReconNode invocations.
-  2. Each worker's ``execute`` calls
-     :meth:`src.nodes.base.BaseNode.run_skill_agent`, which is a thin
-     wrapper that forwards to :func:`run_skill_agent` here.
-  3. This module builds the system prompt
-     (``src/nodes/base/system_prompt.py:_build_system_message``), seeds
-     the agent with cross-turn context (latest web search, prior
-     dispatch's report), runs the LangChain ``create_agent`` loop with
-     the tier-1/tier-2 refusal-retry ladder
-     (``src/refusals/retry.py``), parses out structured findings from
-     the trace, and on crash tries to salvage a finding from the
-     partial messages (``src/refusals/salvage.py``).
-  4. The result is the standard worker-node update dict
-     (``messages`` / ``agent_results`` / ``findings`` /
-     ``active_agents`` / ``pending_summary_inputs``) the rest of the
-     graph already understands.
-
-The ``AgentConfig`` dataclass that carries skill content
-(SKILL.md body, tool list, budgets) lives here too because it is the
-runner's input contract — it has nowhere else to belong.
-
-NB: skill *loading* (reading SKILL.md from disk, parsing frontmatter,
-resolving tool names to LangChain tool instances) lives in
-``src/skills/loader.py``. This module consumes the loaded config; it
-does not load.
-"""
+# Skill runner — turn a loaded skill config into an executing LangChain agent.
+# Each worker dispatch builds the prompt, seeds cross-turn context, runs the
+# create_agent loop with the refusal-retry ladder, parses findings, salvages on
+# crash. AgentConfig (the input contract) lives here; loading is in skills/loader.
 
 from __future__ import annotations
 
@@ -50,10 +22,8 @@ from src.nodes.base.flag_watcher import (
     FlagCapturedSignal,
     SiblingCapturedSignal,
 )
-from src.nodes.base.system_prompt import (
-    BENCHMARK_PROGRESS_FOOTER,
-    _build_system_message,
-)
+from src.nodes.base.prompt_builder import _build_system_message
+from src.nodes.base.system_prompt import BENCHMARK_PROGRESS_FOOTER
 from src.observability import make_run_id
 from src.observability.state import _count_worker_iterations
 from src.refusals.detect import looks_like_refusal
@@ -66,71 +36,29 @@ if TYPE_CHECKING:
     from src.nodes.base import BaseNode
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# AgentConfig — the in-memory carrier produced by ``src.skills.loader``
-# ────────────────────────────────────────────────────────────────────────────
+# ── AgentConfig — in-memory carrier produced by src.skills.loader ──
 
 
 @dataclass
 class AgentConfig:
-    """Everything that makes one swarm agent different from another.
+    # What makes one swarm agent different from another. Skill content
+    # (system_prompt + tools + caps) is parsed from SKILL.md by skills/loader.py;
+    # this is the in-memory carrier the loader produces.
 
-    Skill content (system_prompt + tool list + caps) comes from SKILL.md
-    files under ``src/skills/`` parsed by ``src/skills/loader.py``. This
-    dataclass is the in-memory carrier the loader produces.
-    """
-
-    # Identity
     agent_id: str  # unique name, e.g. "owasp-auth-testing"
     methodology: str  # "owasp" | "vulntype" | "custom" | "skill"
     config_name: str  # primary key for planner dispatch — matches skill folder
-
-    # Prompt body (the SKILL.md body, minus frontmatter)
-    system_prompt: str = ""
-
-    # Tools (LangChain tool instances, resolved from SKILL.md tool names)
-    tools: list[BaseTool] = field(default_factory=list)
-
-    # Worker budget in REAL tool-using rounds (model decides + a tool runs);
-    # the only worker cap, fed by ``budgets.worker_max_iterations``. Converted
-    # to a LangGraph super-step ``recursion_limit`` (~3 super-steps/round) where
-    # ``call_config`` is built. This dataclass default is only a fallback for
-    # configs constructed outside the loader.
-    max_iterations: int = 20
-
-    # Prompt assembly opt-out. When True, ``_build_system_message``
-    # skips the identity preamble, pentesting-rules block, role
-    # framing, and RAG hint — the SKILL.md body is the entire system
-    # prompt. Use for skills whose value depends on minimal framing
-    # (focused technical Q&A that broad pentest context would taint).
-    skip_base_prompt: bool = False
-
-    # Which rule bundle the worker prompt carries.
-    #   "executor" (default) — every dispatchable attack skill.
-    #     Gets universal blocks + methodology + demonstrated-extraction
-    #     + diversity + transformation hypothesis + severity +
-    #     finding category guidance.
-    #   "recon"             — discovery-phase agents (the recon skill).
-    #     Gets universal blocks + a short "what counts as a recon
-    #     finding" hint. No payload methodology, no exploit-output
-    #     standard — those are exec-phase concerns that empirically
-    #     tripped the Codex cyber_policy classifier on recon turns in
-    #     ``logs/run-XBEN-006-24__2026-05-13_21h14m49s/``.
-    # Set via ``metadata.phase`` in SKILL.md frontmatter.
-    phase: str = "executor"
+    system_prompt: str = ""  # the SKILL.md body, minus frontmatter
+    tools: list[BaseTool] = field(default_factory=list)  # LangChain instances resolved from SKILL.md tool names
+    max_iterations: int = 20  # worker budget in REAL tool rounds; → recursion_limit (~3 super-steps/round); fallback default only
+    skip_base_prompt: bool = False  # True → skip preamble/rules/role/RAG, SKILL.md body is the whole prompt
+    phase: str = "executor"  # rule bundle: "executor" (full methodology) | "recon" (universal + recon hint, no exploit blocks)
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# Finding extraction from agent output
-#
-# Two parsers run on every assistant message:
-# 1. The structured **FINDING:** / ## Finding format defined in FINDING_SCHEMA
-# 2. JSON blocks of the form {"findings": [...]} as a forgiving fallback
-#
-# The structured pattern only requires Title and Severity now (Category, URL,
-# Evidence are optional). Bounded `[\s\S]{0,N}?` gaps prevent runaway matches
-# across unrelated headings.
-# ────────────────────────────────────────────────────────────────────────────
+# ── Finding extraction ──
+# Two parsers run per assistant message: structured **FINDING:** / ## Finding,
+# then JSON {"findings": [...]} as fallback. Only Title + Severity are required;
+# bounded gaps stop runaway matches across unrelated headings.
 
 
 FINDING_PATTERN = re.compile(
@@ -1749,8 +1677,8 @@ async def _run_skill_agent_impl(
     # on byte-identical tool outputs and only re-surfaces the existing
     # DIVERSITY_RULES guidance — it never stops the worker, so it is
     # safe in both benchmark and real-pentest mode. See
-    # ``src/nodes/base/nudges.py``.
-    from src.nodes.base.nudges import NoProgressNudgeMiddleware
+    # ``src/nodes/base/prompt_builder.py``.
+    from src.nodes.base.prompt_builder import NoProgressNudgeMiddleware
     _no_progress_mw = NoProgressNudgeMiddleware(
         agent_id=config.agent_id, log=node.log,
     )
@@ -2344,13 +2272,13 @@ async def _run_skill_agent_impl(
             #   2. make ONE forced wrap-up call asking the worker to stop
             #      and summarize its own work + emit any not-yet-written
             #      findings.
-            # See src/nodes/base/nudges.py for the rationale.
+            # See src/nodes/base/prompt_builder.py for the rationale.
             node.log.warning(
                 "[%s] reached its step budget (%s) — forcing a graceful "
                 "wrap-up instead of discarding the run.",
                 config.agent_id, str(e)[:160],
             )
-            from src.nodes.base.nudges import force_wrapup_summary
+            from src.nodes.base.prompt_builder import force_wrapup_summary
 
             own_findings = _extract_findings(partial_messages, config.agent_id)
             wrapup_msg = await force_wrapup_summary(

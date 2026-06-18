@@ -1,9 +1,7 @@
-# Worker nudges — prompt fragments injected at runtime moments:
-#   - NoProgressNudgeMiddleware: re-surfaces DIVERSITY_RULES in-loop when a
-#     worker plateaus on byte-identical tool outputs (fires once per plateau,
-#     never stops the worker or trims its budget).
-#   - force_wrapup_summary: on step-budget exhaustion, one LLM call asking the
-#     worker to stop and write a clean summary + any unformalized FINDINGs.
+# prompt_builder — assemble and deliver the worker's prompt across its lifecycle.
+# build_prompt + PHASE_BLOCKS compose a phase's rule blocks; _build_system_message
+# wraps them with per-worker context; the nudges re-inject guidance mid-loop and at
+# wrap-up. The prompt TEXT itself lives in system_prompt.py — this module assembles it.
 
 from __future__ import annotations
 
@@ -15,11 +13,145 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from src.nodes.base.flag_watcher import _coerce_to_text
+from src.nodes.base.system_prompt import (
+    BEHAVIOR_MODEL_RULES,
+    BENCHMARK_GUIDANCE,
+    COMMON_CHECKLIST_DISCIPLINE,
+    DEMONSTRATED_STANDARD,
+    DIVERSITY_RULES,
+    ENUMERATION_DISCIPLINE,
+    EXHAUSTION_DISCIPLINE,
+    FINDING_CATEGORY_GUIDANCE,
+    FINDING_NOVELTY_RULE,
+    FINDING_SCHEMA,
+    IDENTITY_PREAMBLE,
+    METHODOLOGY_RULES,
+    NARRATION_RULES,
+    RECON_FINDINGS_HINT,
+    SCOPE_RULES,
+    SEVERITY_RULES,
+    STEALTH_RULES,
+    TOOL_USAGE_RULES,
+    TRANSFORMATION_HYPOTHESIS,
+    VERDICT_SCHEMA,
+)
 
 if TYPE_CHECKING:
     from src.nodes.base import AgentConfig
 
 logger = logging.getLogger(__name__)
+
+
+# ── What each phase's prompt is made of (read top-to-bottom) ──────────────
+# Composition manifest: each phase is a list of the rule-block constants imported
+# above. build_prompt joins the chosen list; the ablation drops the _STANDARDS subset.
+_UNIVERSAL = [IDENTITY_PREAMBLE, NARRATION_RULES, SCOPE_RULES, TOOL_USAGE_RULES, FINDING_SCHEMA]
+_STANDARDS = [EXHAUSTION_DISCIPLINE, DIVERSITY_RULES, ENUMERATION_DISCIPLINE,
+              COMMON_CHECKLIST_DISCIPLINE, TRANSFORMATION_HYPOTHESIS]   # dropped by ablation
+_EXECUTOR = [METHODOLOGY_RULES, DEMONSTRATED_STANDARD, *_STANDARDS, BEHAVIOR_MODEL_RULES,
+             SEVERITY_RULES, FINDING_CATEGORY_GUIDANCE, VERDICT_SCHEMA, FINDING_NOVELTY_RULE]
+
+PHASE_BLOCKS = {
+    "universal": _UNIVERSAL,
+    "recon": _UNIVERSAL + [RECON_FINDINGS_HINT],
+    "executor": _UNIVERSAL + _EXECUTOR,
+}
+
+
+# ── Prompt assembly ──────────────────────────────────────────────────────
+
+
+def _prompting_techniques_disabled() -> bool:
+    # Ablation gate (thesis "Prompting Standards"): drop the five standards
+    # blocks when the run sets capability.disable_prompting_techniques.
+    try:
+        from src.graph import config as _rt
+        return bool(getattr(_rt.capability, "disable_prompting_techniques", False))
+    except Exception:  # noqa: BLE001 — never let the gate break prompt assembly
+        return False
+
+
+def build_prompt(phase: str = "executor", stealth_level: int = 0) -> str:
+    # Assemble a phase's prompt from PHASE_BLOCKS (defined at the BOTTOM of this
+    # file — the manifest lists the block constants, so it must come after them;
+    # build_prompt reads it at call time, so the forward reference is fine).
+    # Ablation drops the _STANDARDS subset; STEALTH_RULES is inserted right after
+    # the universal head when a WAF/IDS has been tripped.
+    blocks = list(PHASE_BLOCKS[phase])
+    if stealth_level >= 1:
+        blocks.insert(len(_UNIVERSAL), STEALTH_RULES)
+    if _prompting_techniques_disabled():
+        blocks = [b for b in blocks if b not in _STANDARDS]
+    return "\n\n".join(blocks)
+
+
+def _build_system_message(
+    config: "AgentConfig",  # noqa: F821 — forward reference; defined in skill_runner
+    target_url: str,
+    is_benchmark: bool = False,
+) -> str:
+    # Assemble the full system prompt. skip_base_prompt → SKILL.md body alone; else:
+    # identity header + phase rules + skill body + refs + benchmark addendum + RAG hint.
+    if config.skip_base_prompt:
+        parts = []
+        if config.system_prompt:
+            parts.append(config.system_prompt)
+        return "\n\n".join(parts)
+
+    parts = []
+    phase = getattr(config, "phase", "executor") or "executor"
+
+    # Role identity header. Recon gets a target-only line: the swarm/methodology/focus
+    # framing was itself the strongest cyber_policy refusal trigger on benign recon.
+    if phase == "recon":
+        parts.append(f"Target: {target_url}\n")
+    else:
+        parts.append(
+            f"You are a security testing agent (ID: {config.agent_id}) "
+            f"in the SwarmAttacker swarm.\n"
+            f"Methodology: {config.methodology}\n"
+            f"Focus area: {config.config_name}\n"
+            f"Target: {target_url}\n"
+        )
+
+    parts.append(build_prompt("recon" if phase == "recon" else "executor", 0))
+
+    # SKILL.md body (phase-specific objectives / methodology).
+    if config.system_prompt:
+        parts.append(config.system_prompt)
+
+    # Progressive-disclosure references: advertise the skill's reference files so the
+    # worker can page one in on demand with read_reference. Index built from each H1.
+    try:
+        from src.skills.loader import reference_index
+        _refs = reference_index(config.config_name)
+    except Exception:
+        _refs = []
+    if _refs:
+        _ref_lines = [
+            "## References",
+            "Additional reference material for this skill (test inputs and "
+            "engine-specific techniques), kept out of this prompt for size. "
+            "Open ONE on demand with the read_reference tool (pass the filename "
+            "only) when a finding matches its \"Open WHEN\" note:",
+        ]
+        _ref_lines += [f"- `{fn}` — {desc}" for fn, desc in _refs]
+        parts.append("\n".join(_ref_lines))
+
+    # Benchmark addendum — executor + benchmark only, placed last so "the app is the
+    # referee, submit and read its reply" is the final behavioural instruction.
+    if is_benchmark and phase != "recon":
+        parts.append(BENCHMARK_GUIDANCE)
+
+    # RAG hint (retrieval happens at query time).
+    parts.append(
+        "\n--- Dynamic Knowledge ---\n"
+        "If you need specific CVE details, bypass techniques, or tool syntax "
+        "that you're unsure about, describe what you need and the system will "
+        "provide relevant knowledge snippets.\n"
+    )
+
+    return "\n\n".join(parts)
 
 
 # ── No-progress nudge (mid-loop) ──────────────────────────────────────────

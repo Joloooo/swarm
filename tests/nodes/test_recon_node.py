@@ -30,7 +30,7 @@ import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 
-from src.nodes.base.system_prompt import _build_system_message
+from src.nodes.base.prompt_builder import _build_system_message
 from src.nodes.recon import recon_node
 from src.skills.loader import load_skill
 from src.tools.registry import resolve_tool

@@ -93,13 +93,13 @@ def test_env_override_applies_at_startup(flag, envvar):
 
 def test_prompting_techniques_gate(monkeypatch):
     from src.graph import config
+    from src.nodes.base.prompt_builder import build_prompt
     from src.nodes.base.system_prompt import (
         COMMON_CHECKLIST_DISCIPLINE,
         DIVERSITY_RULES,
         EXHAUSTION_DISCIPLINE,
         METHODOLOGY_RULES,
         TRANSFORMATION_HYPOTHESIS,
-        build_prompt,
     )
     standards = (
         DIVERSITY_RULES, TRANSFORMATION_HYPOTHESIS,
@@ -202,8 +202,8 @@ def test_run_only_gates_are_wired():
     """Steering + hypothesis gates sit inside large node methods that need a
     live run to exercise behaviourally; at minimum assert each flag is read in
     its own module so the wiring can never be silently removed."""
+    import src.nodes.base.prompt_builder as prompt_builder
     import src.nodes.base.skill_runner as skill_runner
-    import src.nodes.base.system_prompt as sp
     import src.nodes.executor as ex
     import src.nodes.planner as planner
     import src.nodes.summarizer as summarizer
@@ -216,7 +216,7 @@ def test_run_only_gates_are_wired():
     assert "disable_refusal_handling" in inspect.getsource(retry)
     assert "disable_web_search" in inspect.getsource(ws)
     assert "disable_skills" in inspect.getsource(ex)
-    assert "disable_prompting_techniques" in inspect.getsource(sp)
+    assert "disable_prompting_techniques" in inspect.getsource(prompt_builder)
     # The prompting-techniques ablation must ALSO drop the no-progress nudge,
     # which re-injects the same diversity/transformation guidance in-loop.
     assert "disable_prompting_techniques" in inspect.getsource(skill_runner)

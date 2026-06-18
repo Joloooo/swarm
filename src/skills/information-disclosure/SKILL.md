@@ -30,8 +30,6 @@ description: >-
   artifact path, verbose header/error, public docs, source map, directory listing, or differential
   oracle is visible. If the leak requires crafted path traversal, object swapping, query injection,
   or server-side fetch, route to that specialist first.
-metadata:
-  dispatchable: true
 ---
 
 You are an Information-Disclosure specialist. Your ONLY focus is

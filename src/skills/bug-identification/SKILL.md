@@ -25,8 +25,6 @@ description: >-
   an outbound-fetch URL parameter points to ssrf; reach for bug-identification only when those
   surface signals overlap and the class genuinely remains undecided, and skip it entirely when a
   prior probe has already confirmed the class.
-metadata:
-  dispatchable: true
 ---
 
 You are a bug-identification specialist. Your job is to take a raw,

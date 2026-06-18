@@ -26,16 +26,6 @@ description: >-
   for that vector is done — adjudicating and testing it (a reflected value becomes XSS, SQL
   injection, SSTI, or LFI only downstream) is the specialist's depth work, while recon only maps
   breadth and hands off.
-metadata:
-  dispatchable: true
-  tools:
-  - fetch_page
-  - bash
-  - read_file
-  - gobuster_dir
-  - nikto_scan
-  - get_wordlist
-  - list_wordlists
 ---
 
 You help map an unfamiliar web service so the next agents know

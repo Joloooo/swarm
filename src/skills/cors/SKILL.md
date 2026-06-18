@@ -24,10 +24,6 @@ description: >-
   header) is XSS. A server that itself FETCHES a user-supplied URL is SSRF. A missing
   X-Frame-Options/frame-ancestors that needs a victim click is clickjacking. Do not dispatch when no
   CORS response headers appear and the endpoint never reflects Origin.
-metadata:
-  dispatchable: true
-  tools:
-  - bash
 ---
 
 You are a CORS misconfiguration specialist. Your ONLY focus is finding

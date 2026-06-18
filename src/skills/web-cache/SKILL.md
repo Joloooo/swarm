@@ -27,10 +27,6 @@ description: >-
   the response into injected headers is request-smuggling/CRLF. Do not dispatch when there is no shared
   cache in front of the app, or when the response is correctly marked private and never reused across
   users.
-metadata:
-  dispatchable: true
-  tools:
-  - bash
 ---
 
 You are a web-cache specialist. Your ONLY focus is abusing the caching

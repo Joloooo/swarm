@@ -27,8 +27,6 @@ description: >-
   a URL or host parameter that fetches a resource but reaches no execution service is SSRF; reading
   files like /etc/passwd with no write or auto-load path is LFI or path traversal — route here only
   when an evaluator, command wrapper, deserializer, or escalation sink is in reach.
-metadata:
-  dispatchable: true
 ---
 
 You are an RCE specialist. Your ONLY focus is finding input that

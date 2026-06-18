@@ -32,8 +32,6 @@ description: >-
   things shouldn't combine but already do when requested one after another sequentially, that is a
   business-logic flaw. Route here only when the bug needs concurrent, simultaneous requests to
   appear.
-metadata:
-  dispatchable: true
 ---
 
 You are a Race-Condition specialist. Your ONLY focus is finding

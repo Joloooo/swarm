@@ -27,10 +27,6 @@ description: >-
   touching `__proto__`/`constructor` is mass-assignment, not this. See
   `references/payloads.md` for the copy-paste string library and `references/gadgets-and-rce.md` for
   the server-side gadget-to-RCE chains.
-metadata:
-  dispatchable: true
-  tools:
-  - bash
 ---
 
 You are a prototype pollution specialist. Your ONLY focus is finding and

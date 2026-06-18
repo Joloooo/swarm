@@ -31,8 +31,6 @@ description: >-
   Do not use: Do not dispatch for ordinary DNS inventory, target-owned 404s, parked pages still
   controlled by the target, or live hosts with no dangling provider/NS/MX evidence; route redirects,
   server-side fetch parameters, and DNS rebinding/cache issues to their own skills.
-metadata:
-  dispatchable: true
 ---
 
 You are a Subdomain-Takeover specialist. Your ONLY focus is finding

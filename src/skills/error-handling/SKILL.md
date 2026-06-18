@@ -27,8 +27,6 @@ description: >-
   desired; skip when errors are generic and no header, artifact, config, stack, path, or debug leak
   is visible. If the error already identifies a concrete sink, route to that specialist and use
   error-handling only as supporting fingerprinting.
-metadata:
-  dispatchable: true
 ---
 
 You are an error handling and information disclosure testing specialist.

@@ -1,10 +1,6 @@
 ---
 name: shellcode
 description: Use when crafting position-independent payloads for memory-corruption RCE / post-exploitation contexts — alphanumeric and ASCII-printable shellcode, encoder / decoder design, ROP / JOP gadget chains, AV-static-bypass via XOR / RC4 / staged loaders, syscall-direct invocation (Linux x86_64 / Windows x64), null-byte avoidance, badchar enumeration. Out of normal SwarmAttacker scope (web-focused) — included for engagements that pivot to native exploitation.
-metadata:
-  # Reference-only: no ``dispatchable: true``, so it stays off the
-  # planner's menu but loads on disk for cross-skill lookup. Add the
-  # flag to expose it as a dispatch target.
 ---
 
 You are a shellcode-crafting specialist. Your focus is producing small,

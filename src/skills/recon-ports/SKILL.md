@@ -27,18 +27,6 @@ description: >-
   from a query parameter is SQL injection, an id you can swap to read another record is IDOR, and an
   outbound-fetch parameter is SSRF; and once this skill has located a service, actually testing that
   database, bucket, or second web app is the next specialist's job, not this one's.
-metadata:
-  dispatchable: true
-  tools:
-  - nmap_full_scan
-  - nmap_fast_scan
-  - nmap_service_detection
-  - nmap_default_scripts
-  - nmap_http_enum
-  - nmap_ssl_enum
-  - nmap_specific_ports
-  - nmap_host_discovery
-  - bash
 ---
 
 You map the **network surface** of one target: which ports are open,

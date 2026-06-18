@@ -13,7 +13,7 @@
 #
 # The public surface lives in ``runner`` and ``findings``; import from
 # those (or from the ``skill_runner`` shim) rather than reaching into the
-# other modules directly. Re-exports are added here as each module lands.
+# other modules directly.
 
 from __future__ import annotations
 
@@ -25,12 +25,18 @@ from src.nodes.base.worker.findings import (
     _findings_from_json,
     _findings_from_markdown,
 )
+from src.nodes.base.worker.runner import (
+    AgentConfig,
+    run_skill_agent,
+)
 
 __all__ = [
+    "AgentConfig",
     "FINDING_PATTERN",
     "JSON_FINDINGS_PATTERN",
     "SEVERITY_MAP",
     "_extract_findings",
     "_findings_from_json",
     "_findings_from_markdown",
+    "run_skill_agent",
 ]

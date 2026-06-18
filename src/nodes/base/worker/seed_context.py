@@ -22,20 +22,26 @@ _SEED_FINDING_EVIDENCE_CHARS = 400  # per-evidence cap in a seed line; full evid
 _SEED_RECON_SUMMARY_CHARS = 12_000  # recon summary cap — defensive only, against an unbounded summarizer
 
 
-def _format_dispatch_reason(state: dict) -> str | None:
+def _format_dispatch_reason(state: dict, steer_off: bool = False) -> str | None:
     # Render the planner's reason-for-this-dispatch as a seed block. None on the
     # cold-boot path (initialize → recon) or when no reason was recorded.
+    #
+    # The reason itself is plumbing — the hypothesis / lead the planner is handing
+    # off — and always stays. The "treat it as your primary objective / do not
+    # pivot" wrapper is run-state STEERING (it tells the worker what to prioritise
+    # this turn), so it drops under disable_steering_directives — mirroring how the
+    # planner drops its own steering SYSTEM NOTEs while keeping the evidence digest.
     reason = (state.get("dispatch_reason") or "").strip()
     if not reason:
         return None
-    return (
-        "## Why you were dispatched\n\n"
-        "The supervisor picked you for this turn based on the state "
-        "below. Treat the hypothesis as your primary objective; if the "
-        "evidence you gather contradicts it, surface that in your "
-        "report — do not silently pivot.\n\n"
-        f"{reason}"
-    )
+    intro = "The supervisor picked you for this turn based on the state below."
+    if not steer_off:
+        intro += (
+            " Treat the hypothesis as your primary objective; if the "
+            "evidence you gather contradicts it, surface that in your "
+            "report — do not silently pivot."
+        )
+    return f"## Why you were dispatched\n\n{intro}\n\n{reason}"
 
 
 def _render_finding_attempts(finding, n: int = 3) -> list[str]:
@@ -193,7 +199,7 @@ def _format_relevant_summary(state: dict) -> str | None:
     )
 
 
-def _format_hypotheses(state: dict) -> str | None:
+def _format_hypotheses(state: dict, steer_off: bool = False) -> str | None:
     # Render the ranked hypotheses so a worker sees the supervisor's committed
     # theory. Source: state["hypotheses"] (belief/utility-ranked by the synthesis
     # pass). Surfaces committed/supported/confirmed with belief + deciding probe.
@@ -226,12 +232,22 @@ def _format_hypotheses(state: dict) -> str | None:
             line += f"\n  → deciding probe: {action}"
         rows.append(line)
 
+    intro = (
+        "Observations from across the swarm have been fused into these "
+        "theories, scored by how strongly the evidence supports them."
+    )
+    # "run its deciding probe before broadening" is the worker-side echo of the
+    # planner's committed-hypothesis steering directive (gated there by
+    # disable_steering_directives); drop it under the same flag. The ranked
+    # hypothesis rows themselves are plumbing and always stay.
+    if not steer_off:
+        intro += (
+            " The top one is the supervisor's committed line — run its "
+            "deciding probe before broadening."
+        )
     return (
         "## Leading hypotheses (ranked by the supervisor)\n\n"
-        "Observations from across the swarm have been fused into these "
-        "theories, scored by how strongly the evidence supports them. The "
-        "top one is the supervisor's committed line — run its deciding probe "
-        "before broadening.\n\n"
+        + intro + "\n\n"
         + "\n".join(rows)
     )
 

@@ -1036,7 +1036,7 @@ class _Live:
             verdict = _paint("✓ FLAG FOUND", _BOLD, _GREEN)
         elif status == API:
             head = _paint(f"⚠ {bench_id}", _BOLD, _YELLOW)
-            verdict = _paint(f"~ CRASH: {error}", _BOLD, _YELLOW)
+            verdict = _paint(f"~ MALFUNCTION: {error}", _BOLD, _YELLOW)
         else:  # FAIL — ran its budget or gave up; show the reason if any.
             head = _paint(f"◇ {bench_id}", _YELLOW)
             verdict = _paint("✗ no flag" + (f" — {error}" if error else ""), _YELLOW)

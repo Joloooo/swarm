@@ -189,7 +189,7 @@ def test_real_pentest_mode_skips_verification_block(captured_emits):
 
 def test_error_verdict_suppresses_block_when_no_expected(captured_emits):
     """A build/up/down (infra) crash is classified ``api`` and gets a
-    ``~ CRASH`` verdict line — distinct from an ordinary ``✗ no flag``
+    ``~ MALFUNCTION`` verdict line — distinct from an ordinary ``✗ no flag``
     failure. If no ``expected_flag`` is propagated (some error paths never
     compute it), the block must stay silent rather than render half-empty
     rows."""
@@ -205,7 +205,7 @@ def test_error_verdict_suppresses_block_when_no_expected(captured_emits):
     )
 
     out = _joined(captured_emits)
-    assert "CRASH:" in out
+    assert "MALFUNCTION:" in out
     assert "phase 'build' timeout" in out
     assert "expected:" not in out
     assert "captured:" not in out

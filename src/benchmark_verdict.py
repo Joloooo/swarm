@@ -25,13 +25,21 @@ OK = "ok"      # a flag was captured
 FAIL = "fail"  # ran its time budget / gave up, but found no flag
 API = "api"    # codex/API or infra crash — the run never got a fair attempt
 
-# Error-string markers that mean "the run crashed before it could give a
+# Error-string markers that mean "the run malfunctioned before it could give a
 # fair verdict" rather than "the agent tried and failed". ``str.startswith``
 # takes this tuple directly. ``benchmarks.xbow_runner`` records errors as
-# ``"{ExceptionType}: {msg}"``; every codex/provider error subclasses
-# ``CodexAPIError`` (so the type name starts with ``Codex``), and a hung
-# docker build/up is ``phase '…' timeout``.
-_CRASH_MARKERS: tuple[str, ...] = ("Codex", "phase '")
+# ``"{ExceptionType}: {msg}"``; the families that never got a fair attempt:
+#   * ``Codex``               — any codex/provider error (subclasses CodexAPIError),
+#                               including the usage cap.
+#   * ``phase '``             — a hung docker build/up (``phase '…' timeout``).
+#   * ``CalledProcessError``  — ``make … run`` exited non-zero, i.e. the target
+#                               container never came up (docker infra crash —
+#                               XBEN-039/040/043 in full_run_06-17_22h59m).
+#   * ``InvalidUpdateError``  — a LangGraph state crash from concurrent writes
+#                               (XBEN-098, since fixed by the waf_detected reducers).
+_CRASH_MARKERS: tuple[str, ...] = (
+    "Codex", "phase '", "CalledProcessError", "InvalidUpdateError",
+)
 
 
 def format_duration(seconds: float | int | None) -> str:

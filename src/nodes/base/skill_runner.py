@@ -70,15 +70,14 @@ FINDING_PATTERN = re.compile(
     r"(?:[\s\S]{0,200}?Category:\s*([\w-]+))?"
     r"(?:[\s\S]{0,400}?URL:\s*(.+?)$)?"
     r"(?:[\s\S]{0,400}?Evidence:\s*(.+?)$)?"
-    # Primitive is OPTIONAL and instructed to come LAST in the block, so a
-    # generous gap after Evidence lets it tolerate a CWE / Payload line in
-    # between. Group 6. Absent → "" → ordinary (non-primitive) finding.
+    # Primitive is OPTIONAL, instructed LAST; generous gap tolerates a CWE/Payload
+    # line before it. Group 6. Absent → "" → ordinary (non-primitive) finding.
     r"(?:[\s\S]{0,400}?Primitive:\s*([\w-]+))?",
     re.MULTILINE,
 )
 
-# Match a JSON object (non-greedy) that contains a "findings" key. Used as a
-# fallback when the model emits {"findings": [...]} instead of the markdown.
+# JSON object (non-greedy) containing a "findings" key — fallback when the model
+# emits {"findings": [...]} instead of the markdown form.
 JSON_FINDINGS_PATTERN = re.compile(
     r'\{[^{}]*?"findings"\s*:\s*\[[\s\S]*?\]\s*\}',
 )
@@ -91,10 +90,9 @@ SEVERITY_MAP = {
     "info": Severity.INFO,
 }
 
-# Closing-verdict block (VERDICT_SCHEMA in system_prompt.py). The worker's
-# self-assessment of whether its assigned class is the real issue on the
-# tested surface — parsed into a signed Signal that updates hypothesis
-# belief (confirm raises it over the COMMIT gate; refute drives it down).
+# Closing-verdict block (VERDICT_SCHEMA). The worker's self-assessment of whether
+# its assigned class is the real issue — parsed into a signed Signal that updates
+# hypothesis belief (confirm raises over COMMIT; refute drives it down).
 VERDICT_PATTERN = re.compile(
     r"(?:\*\*VERDICT:?\*\*|##\s+VERDICT|##\s+Verdict)"
     r"(?:[\s\S]{0,160}?Class:\s*([\w-]+))?"
@@ -109,7 +107,7 @@ VERDICT_PATTERN = re.compile(
 
 
 def _findings_from_markdown(content: str, agent_id: str) -> list[Finding]:
-    """Parse the structured **FINDING:** / ## Finding format."""
+    # Parse the structured **FINDING:** / ## Finding format.
     out = []
     for match in FINDING_PATTERN.finditer(content):
         title = match.group(1).strip()
@@ -132,7 +130,7 @@ def _findings_from_markdown(content: str, agent_id: str) -> list[Finding]:
 
 
 def _findings_from_json(content: str, agent_id: str) -> list[Finding]:
-    """Fallback parser for JSON {"findings": [...]} blocks."""
+    # Fallback parser for JSON {"findings": [...]} blocks.
     out = []
     for match in JSON_FINDINGS_PATTERN.finditer(content):
         try:
@@ -162,12 +160,8 @@ def _findings_from_json(content: str, agent_id: str) -> list[Finding]:
 
 
 def _extract_findings(messages: list, agent_id: str) -> list[Finding]:
-    """Parse structured findings from agent messages.
-
-    Tries the markdown FINDING format first; falls back to JSON
-    {"findings": [...]} blocks. Both parsers run on every AIMessage and
-    results are concatenated.
-    """
+    # Parse structured findings from agent messages: markdown FINDING first,
+    # then JSON {"findings": [...]} fallback. Both run on every AIMessage.
     findings = []
     for msg in messages:
         if not isinstance(msg, AIMessage):
@@ -178,11 +172,9 @@ def _extract_findings(messages: list, agent_id: str) -> list[Finding]:
     return findings
 
 
-# Verdict outcome → (base log-odds magnitude, Signal.kind). The executor's
-# closing verdict is the deciding-probe feedback that closes the belief
-# loop: a ``confirmed`` is the only signal kind that lets a hypothesis
-# cross the COMMIT threshold; a ``refuted`` is the owning skill's "it is
-# not me" and drives belief down hard.
+# Verdict outcome → (base log-odds magnitude, Signal.kind). The closing verdict
+# is the deciding-probe feedback: a confirmed is the only kind that crosses the
+# COMMIT threshold; a refuted is the owning skill's "it is not me".
 _VERDICT_OUTCOME = {
     "confirmed": (3.0, "confirm"),
     "refuted": (3.0, "refute"),
@@ -190,20 +182,13 @@ _VERDICT_OUTCOME = {
 }
 
 
-# ── Specialist-refutation gate ─────────────────────────────────────────
-#
-# Only a class's own specialist may pronounce that class dead. The failure
-# this prevents (XBEN-063, 7 repeats): a non-``ssti`` worker fires the
-# textbook ``{{7*7}}`` payload, hits the ``{{`` blacklist, and declares
-# "no SSTI" — burying the class so its real specialist (which knows the
-# brace-free ``{% %}`` bypass) is never dispatched. A worker giving a
-# ``refuted`` verdict on a class OUTSIDE its lane gets that refute
-# downgraded to a neutral, zero-weight observation, so the class stays a
-# live lead for the specialist that actually owns it. (Confirms are not
-# gated — a cross-lane confirm only lifts a class, it cannot bury one.)
+# ── Specialist-refutation gate ──
+# Only a class's own specialist may pronounce it dead. Prevents XBEN-063: a
+# non-ssti worker fires {{7*7}}, hits the {{ blacklist, declares "no SSTI", and
+# buries the class. A cross-lane refuted is downgraded to a zero-weight
+# observation so the class stays a live lead. Confirms are not gated.
 
-# Class-token aliases so the ownership check matches regardless of how a
-# worker spells the class (the synthesis pass uses the same loose tokens).
+# Class-token aliases so ownership checks match regardless of spelling.
 _CLASS_ALIASES = {
     "deser": "deserialization",
     "insecure_deserialization": "deserialization",
@@ -222,17 +207,14 @@ _CLASS_ALIASES = {
 
 
 def _norm_class(token: str) -> str:
-    """Normalise a class token to its canonical key for ownership checks."""
+    # Normalise a class token to its canonical key for ownership checks.
     t = (token or "").strip().lower()
     return _CLASS_ALIASES.get(t, t)
 
 
-# Skills whose lane is NOT simply "the class with my name". Two kinds:
-#   - discovery / triage / chain / generic workers own NO single class —
-#     they surface leads and redirect, but may never refute a class;
-#   - multi-class skills own the explicit set listed.
-# Any skill not in this map owns exactly its own class (config_name), so a
-# plain specialist (sqli, idor, …) may refute only its own class.
+# Skills whose lane is NOT "the class with my name": discovery/triage/generic
+# workers own nothing (may only redirect, never refute); multi-class skills own
+# the listed set. Any skill not here owns exactly its own class (config_name).
 _SKILL_OWNED_CLASSES: dict[str, set[str]] = {
     # discovery / triage / generic — own nothing, may only redirect
     "exploration": set(),
@@ -249,13 +231,12 @@ _SKILL_OWNED_CLASSES: dict[str, set[str]] = {
 
 
 def _worker_owns_class(config_name: str, vuln_class: str) -> bool:
-    """Whether the dispatched skill is the specialist for ``vuln_class`` —
-    i.e. allowed to issue a refuting verdict on it."""
+    # Whether the dispatched skill is the specialist for vuln_class — i.e.
+    # allowed to issue a refuting verdict on it.
     skill_raw = (config_name or "").strip().lower()
     skill = _norm_class(skill_raw)
     cls = _norm_class(vuln_class)
-    # No class named (defaults to the worker's own skill) or the verdict is
-    # on the worker's own class → its call to make.
+    # No class named (→ own skill) or verdict on own class → its call.
     if not cls or cls == skill:
         return True
     owned = _SKILL_OWNED_CLASSES.get(skill_raw)
@@ -268,18 +249,10 @@ def _worker_owns_class(config_name: str, vuln_class: str) -> bool:
 def _extract_verdicts(
     messages: list, agent_id: str, config_name: str,
 ) -> list[Signal]:
-    """Parse the worker's closing VERDICT block into signed Signal atoms.
-
-    Returns at most one verdict signal (plus an optional ``redirect``
-    routing signal) — the LAST verdict in the trace wins, since a worker
-    refines its assessment as it goes. ``Class`` / ``Surface`` default to
-    the dispatched skill identity when the worker omits them. The signed
-    weight feeds the hypothesis synthesis pass directly:
-
-    - confirmed   → kind="confirm", weight +3·conf  (crosses COMMIT gate)
-    - refuted     → kind="refute",  weight −3·(1−conf) (drives toward refuted)
-    - inconclusive→ kind="observation", weight = (conf−0.5)·1.2 (mild, signed)
-    """
+    # Parse the worker's closing VERDICT block into signed Signal atoms. Returns
+    # at most one verdict signal (+ optional redirect routing signal); the LAST
+    # verdict wins. Weights: confirmed +3·conf (crosses COMMIT), refuted
+    # −3·(1−conf), inconclusive (conf−0.5)·1.2.
     last: tuple = ()
     for msg in messages:
         if not isinstance(msg, AIMessage):
@@ -294,12 +267,10 @@ def _extract_verdicts(
     outcome = (outcome_raw or "").strip().lower()
     if outcome not in _VERDICT_OUTCOME:
         return []
-    # The deciding-probe gate: a confirm/refute is only trustworthy if the
-    # worker actually ran the canonical test on the real surface. If it
-    # says "Probe run: no" (or omits it while claiming a strong outcome),
-    # downgrade to inconclusive — a worker that tested the wrong surface
-    # must not suppress (refute) or over-commit (confirm) a class. This is
-    # what stops a wrong-surface refute from burying the real answer.
+    # Deciding-probe gate: a confirm/refute is only trustworthy if the worker ran
+    # the canonical test on the real surface. "Probe run: no" (or omitted with a
+    # strong outcome) → downgrade to inconclusive, so a wrong-surface verdict
+    # cannot bury or over-commit a class.
     probe_run = (probe_raw or "").strip().lower() == "yes"
     if outcome in ("confirmed", "refuted") and not probe_run:
         outcome = "inconclusive"
@@ -311,11 +282,8 @@ def _extract_verdicts(
     except (TypeError, ValueError):
         conf = 0.5
 
-    # Specialist-refutation gate: a worker may only refute a class it owns.
-    # A cross-lane ``refuted`` becomes a neutral, zero-weight observation so
-    # it cannot bury a class the worker is not the specialist for — the real
-    # specialist still gets dispatched (and any redirect line below still
-    # lifts the class as a lead).
+    # Specialist-refutation gate: a cross-lane refuted becomes a zero-weight
+    # observation so it can't bury a class this worker doesn't own.
     cross_lane_refute = (
         outcome == "refuted" and not _worker_owns_class(config_name, vuln_class)
     )
@@ -349,9 +317,8 @@ def _extract_verdicts(
         source_agent=agent_id,
     )]
 
-    # A redirect ("looks like X, not Y") lifts the alternative class so it
-    # can rise in the ranking — exactly what was missing when the real
-    # class never surfaced in the top hypotheses.
+    # A redirect ("looks like X, not Y") lifts the alternative class so it can
+    # rise in the ranking.
     redirect = " ".join((redirect_raw or "").split()).strip()
     if redirect:
         redirect_class = _redirect_class(redirect)
@@ -370,9 +337,8 @@ def _extract_verdicts(
     return out
 
 
-# Known dispatchable class tokens a redirect line might name. Kept loose —
-# the synthesis pass tolerates an unknown class (it just becomes a new
-# hypothesis bucket), so this only needs to catch the common spellings.
+# Known class tokens a redirect line might name. Loose — synthesis tolerates an
+# unknown class (it becomes a new hypothesis bucket), so this just catches common spellings.
 _REDIRECT_CLASSES = (
     "deserialization", "ssti", "sqli", "ssrf", "idor", "lfi", "rce", "xss",
     "xxe", "csrf", "auth", "open-redirect", "file-upload", "mass-assignment",
@@ -381,7 +347,7 @@ _REDIRECT_CLASSES = (
 
 
 def _redirect_class(text: str) -> str:
-    """Pull a known class token out of a free-text redirect line."""
+    # Pull a known class token out of a free-text redirect line.
     low = text.lower()
     for c in _REDIRECT_CLASSES:
         if c in low:
@@ -389,31 +355,11 @@ def _redirect_class(text: str) -> str:
     return ""
 
 
-# ── Refusal-path primitive salvage ──────────────────────────────────
-#
-# The Codex safety classifier fires most often PRECISELY when a worker
-# has just received its most valuable output — a dumped table, a shell
-# ``id`` line, ``/etc/passwd`` contents — because that output is the
-# most offensive-LOOKING thing in context. The flag salvage in the
-# refusal branch only rescues a literal ``flag{...}``; without this, a
-# worker that PROVED a non-flag primitive (a SQL extraction, command
-# output, a file read) and was then refused on its next call loses that
-# proof entirely — it reaches the planner only through the lossy,
-# refusal-prone summariser digest. This deterministic scan mints a HIGH
-# ``Finding`` carrying the primitive tag so the planner's
-# ``_unconverted_primitive_directive`` can drive it to the objective on
-# a later turn.
-#
-# Two guards (the same the planner uses) keep it from false-firing:
-#   * received-not-sent: only ``ToolMessage`` content (server responses)
-#     is scanned — never the worker's own command — so a payload the
-#     worker merely TYPED (e.g. it wrote ``UNION SELECT``) cannot
-#     self-trigger; only output that came BACK counts.
-#   * negation guard: a marker preceded (within 32 chars) by a negation
-#     cue is skipped, so "no group_concat output" does not fire.
-#
-# Markers are ordered strongest-first; the loop returns on the first
-# real hit. Each maps to a canonical primitive tag + finding category.
+# ── Refusal-path primitive salvage ──
+# The Codex classifier fires most often right when a worker received its most
+# valuable output (dumped table, `id` line, /etc/passwd) — so a refused worker
+# can lose a PROVEN primitive. This scan mints a HIGH Finding from received
+# ToolMessage output only (negation-guarded), markers strongest-first.
 _REFUSAL_PRIMITIVE_MARKERS: tuple[tuple[str, str, str], ...] = (
     ("root:x:0:0", "file_read", "lfi"),        # /etc/passwd contents
     ("uid=", "rce", "rce"),                     # `id` command output
@@ -431,8 +377,8 @@ _REFUSAL_NEGATION_CUES: tuple[str, ...] = (
 
 
 def _refusal_marker_is_real(text_lower: str, marker: str) -> bool:
-    """True if ``marker`` occurs in ``text_lower`` at least once without a
-    negation cue in the ~32 characters before it."""
+    # True if marker occurs at least once without a negation cue in the ~32 chars
+    # before it.
     start = 0
     while True:
         idx = text_lower.find(marker, start)
@@ -447,13 +393,9 @@ def _refusal_marker_is_real(text_lower: str, marker: str) -> bool:
 def _salvage_primitive_from_trace(
     partial_messages: list, agent_id: str,
 ) -> Finding | None:
-    """Scan a refused worker's RECEIVED tool output for a proven primitive.
-
-    Returns a HIGH ``Finding`` tagged with the matching primitive when a
-    marker appears in ``ToolMessage`` content (received-not-sent guard),
-    or ``None`` when nothing matches. The worker's own request text is
-    never scanned, so a payload it merely typed cannot self-trigger.
-    """
+    # Scan a refused worker's RECEIVED tool output for a proven primitive. Returns
+    # a HIGH Finding tagged with the matching primitive, or None. The worker's own
+    # request text is never scanned, so a typed payload can't self-trigger.
     tool_parts: list[str] = []
     for m in partial_messages:
         if not isinstance(m, ToolMessage):
@@ -497,84 +439,26 @@ def _salvage_primitive_from_trace(
     return None
 
 
-# ── Worker memory: prior-attempts + web-search context injection ────────
-#
-# By default, every dispatch of ``run_skill_agent`` calls
-# ``agent.ainvoke({"messages": []})`` — the worker starts cold with zero
-# memory of:
-#   1. its own previous run, when the planner re-dispatches the same
-#      skill (``vulntype-sqli`` first run → web_search → second SQLi
-#      dispatch starts from scratch and re-tries the same payloads), and
-#   2. the supervisor's most recent ``web_search`` result, even though
-#      the planner explicitly chose to research before dispatching.
-#
-# These two helpers fix both holes by seeding the create_agent loop with
-# a single ``HumanMessage`` that includes:
-#   - the latest ``[Web Search]`` synthesis (capped via
-#     ``_WEB_SEARCH_INJECT_CHARS``), and
-#   - a one-line summary of every prior tool call this agent_id made on
-#     this run, paired with its tool-output exit code + trimmed body
-#     (capped via ``_PRIOR_HISTORY_MAX_TURNS`` and
-#     ``_PRIOR_PROBE_SUMMARY_CHARS``).
-#
-# Pairing is by ``tool_call_id`` (LangChain's stable round-trip ID), not
-# by message order — so out-of-order ToolMessage delivery from parallel
-# fan-out doesn't corrupt the summary. ``additional_kwargs.agent_id`` on
-# both AIMessage and ToolMessage (set by ``run_skill_agent`` before
-# trace propagation) is the per-skill filter.
-#
-# Returned by:
-#   - ``_extract_latest_web_search(state)`` → str | None
-#   - ``_collect_prior_skill_history(state, agent_id)`` → str | None
-#
-# Combined into the seed message inside ``run_skill_agent``.
+# ── Worker memory: prior-attempts + web-search context injection ──
+# By default a worker starts cold. These helpers seed the create_agent loop with
+# a HumanMessage carrying the latest [Web Search] synthesis and a one-line summary
+# of every prior tool call this agent_id made (paired by tool_call_id, not order).
 
-# ── Curated-state seed blocks ──────────────────────────────────────────
-#
-# These four helpers render structured fields from ``state`` into
-# markdown blocks the worker's seed HumanMessage will contain. Each
-# returns ``None`` when its source field is empty so cold-boot workers
-# (turn 1, no prior planner output) don't see empty ``##`` headers.
-#
-# Reading map:
-#   - dispatch_reason   ← state["dispatch_reason"]      (planner per turn)
-#   - findings          ← state["findings"]              (cumulative)
-#   - recon_summary     ← state["recon_summary"]         (written once)
-#   - relevant_summary  ← state["relevant_summary"]      (planner per turn)
-#
-# All four are pure renderers — no LLM calls, no side effects. They are
-# invoked from ``run_skill_agent`` after the system prompt is built and
-# before the agent loop starts.
+# ── Curated-state seed blocks ──
+# These helpers render structured state fields into markdown blocks for the
+# worker's seed HumanMessage (dispatch_reason, findings, recon_summary,
+# relevant_summary). Each returns None when its source is empty. Pure renderers.
 
-# Cap on findings rendered in the seed. The findings list grows
-# unboundedly across turns; a runaway swarm could produce dozens.
-# Workers care most about the freshest evidence, so we render the
-# tail. 30 is empirically enough to cover any realistic engagement
-# without bloating the prompt past ~5 KB for this block alone.
-_SEED_FINDINGS_TAIL = 30
+_SEED_FINDINGS_TAIL = 30  # cap on findings rendered in the seed (tail); 30 covers any realistic engagement
 
-# Per-evidence cap inside a finding's seed line. The full evidence is
-# preserved in state["findings"] for the planner; workers only need
-# enough to recognise the finding and copy any literal payload string.
-_SEED_FINDING_EVIDENCE_CHARS = 400
+_SEED_FINDING_EVIDENCE_CHARS = 400  # per-evidence cap in a seed line; full evidence stays in state for the planner
 
-# Recon summary cap. The full digest can run 5-10 KB; we keep all of it
-# unless it's pathologically large. The reason for any cap at all is
-# defensive — a misbehaving summarizer could in principle emit
-# unbounded text, and silently truncating to a generous cap is safer
-# than poisoning every worker prompt downstream.
-_SEED_RECON_SUMMARY_CHARS = 12_000
+_SEED_RECON_SUMMARY_CHARS = 12_000  # recon summary cap — defensive only, against an unbounded summarizer
 
 
 def _format_dispatch_reason(state: dict) -> str | None:
-    """Render the planner's reason-for-this-dispatch as a seed block.
-
-    Returns ``None`` on the cold-boot path (initialize → recon, before
-    the planner has spoken). The routing edge always writes
-    ``state["dispatch_reason"]`` for planner-staged workers — empty
-    string sentinel means "no reason recorded", which we also treat as
-    no block.
-    """
+    # Render the planner's reason-for-this-dispatch as a seed block. None on the
+    # cold-boot path (initialize → recon) or when no reason was recorded.
     reason = (state.get("dispatch_reason") or "").strip()
     if not reason:
         return None
@@ -589,10 +473,8 @@ def _format_dispatch_reason(state: dict) -> str | None:
 
 
 def _render_finding_attempts(finding, n: int = 3) -> list[str]:
-    """Render the last ``n`` conversion attempts on a finding as compact
-    seed lines (``tried: method → result (note)``). Empty when the finding
-    has no attempts (an ordinary observation, or pre-consolidation).
-    """
+    # Render the last n conversion attempts on a finding as compact seed lines.
+    # Empty when the finding has no attempts.
     attempts = getattr(finding, "attempts", None)
     if not isinstance(attempts, list) or not attempts:
         return []
@@ -611,34 +493,18 @@ def _render_finding_attempts(finding, n: int = 3) -> list[str]:
 
 
 def _format_findings(state: dict) -> str | None:
-    """Render the cumulative findings list as a seed block.
-
-    Includes every finding accumulated across the run so far — recon's
-    info-disclosures, prior attack workers' confirmed vulnerabilities,
-    everything. Tail-capped at ``_SEED_FINDINGS_TAIL`` items so a
-    runaway swarm cannot blow worker context; in practice 30 covers
-    multi-turn engagements with room to spare.
-
-    Each rendered line carries severity, title, url, category, and
-    trimmed evidence — enough for the worker to recognise the finding
-    and copy any literal payload string the previous worker captured.
-
-    Prefers the consolidated ``canonical_findings`` view (deduped, status-
-    stamped, ranked by ``lead_priority``) when the consolidation pass has
-    produced one — so the worker sees one entry per issue, the conversion
-    ``status``, and the ``attempts`` already tried on a primitive (so it
-    does not repeat a dead method). Falls back to the raw append-only
-    ``findings`` log before the first consolidation.
-    """
+    # Render the cumulative findings as a seed block: every finding across the run,
+    # tail-capped at _SEED_FINDINGS_TAIL. Each line carries severity, title, url,
+    # category, trimmed evidence. Prefers the consolidated canonical_findings view
+    # (deduped, ranked, with attempts) when available; else the raw findings log.
     canonical = state.get("canonical_findings")
     use_canonical = bool(canonical)
     findings = list(canonical) if use_canonical else list(state.get("findings") or [])
     if not findings:
         return None
 
-    # Canonical findings are pre-sorted by lead_priority (highest first),
-    # so take the TOP N; the raw log is append-ordered, so take the most
-    # RECENT N.
+    # Canonical is pre-sorted by lead_priority → take TOP N; raw log is
+    # append-ordered → take most RECENT N.
     rendered = (findings[:_SEED_FINDINGS_TAIL] if use_canonical
                 else findings[-_SEED_FINDINGS_TAIL:])
     elided = len(findings) - len(rendered)
@@ -663,8 +529,7 @@ def _format_findings(state: dict) -> str | None:
                 evidence[: _SEED_FINDING_EVIDENCE_CHARS - 1]
                 + "…"
             )
-        # A primitive carries a conversion status — surface it inline so
-        # the worker knows whether this is a proven capability to finish.
+        # A primitive carries a conversion status — surface it inline.
         stat = f" ({status})" if status else ""
         head = f"{i}. [{sev.upper()}]{stat} {title}"
         meta_bits = []
@@ -677,8 +542,7 @@ def _format_findings(state: dict) -> str | None:
             lines.append(f"   {'  '.join(meta_bits)}")
         if evidence:
             lines.append(f"   evidence: {evidence}")
-        # Conversion attempts already tried on this primitive — so the
-        # worker does NOT repeat a dead method.
+        # Conversion attempts already tried — so the worker doesn't repeat a dead method.
         for line in _render_finding_attempts(f):
             lines.append(line)
 
@@ -693,13 +557,8 @@ def _format_findings(state: dict) -> str | None:
 
 
 def _format_recon_summary(state: dict) -> str | None:
-    """Render the one-time recon application map as a seed block.
-
-    Written once by the summarizer on its first pass that processes a
-    recon worker; never decays. Tells the worker the routes, params,
-    auth flow, framework fingerprint, and inferred server-side
-    behaviour without making it re-walk the application.
-    """
+    # Render the one-time recon application map as a seed block: routes, params,
+    # auth flow, framework, inferred behaviour — so the worker need not re-walk it.
     raw = (state.get("recon_summary") or "").strip()
     if not raw:
         return None
@@ -717,18 +576,9 @@ def _format_recon_summary(state: dict) -> str | None:
 
 
 def _format_relevant_summary(state: dict) -> str | None:
-    """Render the planner's curated investigation state as a seed block.
-
-    Source: ``state["relevant_summary"]`` — a dict with three optional
-    keys (``current_hypothesis``, ``ruled_out``, ``open_questions``)
-    rewritten by the planner each turn. Returns ``None`` when nothing
-    is present (turn-1 cold start, or planner failed validation).
-
-    Renders only the keys that have content — a partial relevant_summary
-    is more useful to the worker than no block at all, and the planner
-    validator's fallback behaviour leaves missing keys empty rather than
-    rejecting the whole dict.
-    """
+    # Render the planner's curated investigation state (current_hypothesis,
+    # ruled_out, open_questions) as a seed block. None when nothing is present.
+    # Renders only keys that have content.
     rs = state.get("relevant_summary") or {}
     if not isinstance(rs, dict):
         return None
@@ -778,16 +628,10 @@ def _format_relevant_summary(state: dict) -> str | None:
 
 
 def _format_hypotheses(state: dict) -> str | None:
-    """Render the ranked hypotheses as a seed block so a dispatched worker
-    sees the focused theory the supervisor committed to.
-
-    Source: ``state["hypotheses"]`` — the belief/utility-ranked list the
-    synthesis pass (``src/llm/hypotheses.py``) rebuilds each cycle from the
-    raw signal log. Surfaces committed / supported / confirmed hypotheses
-    with their belief and deciding probe. Complements
-    ``_format_relevant_summary`` (the planner's free-text notes) with the
-    machine-fused, scored view. Returns ``None`` when none are actionable.
-    """
+    # Render the ranked hypotheses so a worker sees the supervisor's committed
+    # theory. Source: state["hypotheses"] (belief/utility-ranked by the synthesis
+    # pass). Surfaces committed/supported/confirmed with belief + deciding probe.
+    # None when none are actionable.
     hyps = state.get("hypotheses") or []
     rankable = [
         h for h in hyps
@@ -827,7 +671,7 @@ def _format_hypotheses(state: dict) -> str | None:
 
 
 def _format_tool_attempts(state: dict) -> str | None:
-    """Render recent important tool outcomes for worker context."""
+    # Render recent important tool outcomes for worker context.
     attempts = [
         a for a in (state.get("tool_attempts") or [])
         if isinstance(a, dict)
@@ -870,7 +714,7 @@ def _format_tool_attempts(state: dict) -> str | None:
 
 
 def _format_skill_context_catalogue(config_name: str) -> str | None:
-    """Render the compact cross-skill context catalogue for a worker."""
+    # Render the compact cross-skill context catalogue for a worker.
     try:
         from src.skills.usage import render_context_skill_index
 
@@ -881,76 +725,16 @@ def _format_skill_context_catalogue(config_name: str) -> str | None:
     return body or None
 
 
-# Maximum chars per summarized probe in the prior-attempts block.
-# Big enough to show the bash command + first/last bytes of output;
-# small enough that 12 of these stays under ~5KB of context.
-_PRIOR_PROBE_SUMMARY_CHARS = 280
+_PRIOR_PROBE_SUMMARY_CHARS = 280  # max chars per summarized probe in the prior-attempts block
 
-# Cap on tool-call/response pairs included from prior runs of the same
-# skill. Older probes past the cap are summarized as a count so the
-# worker still knows N earlier attempts existed, even if it can't see
-# them all.
+# Cap on tool-call/response pairs from prior runs of the same skill; older ones
+# are summarized as a count.
 _PRIOR_HISTORY_MAX_TURNS = 12
 
-# Maximum chars of the latest web_search synthesis to inject. The research
-# node now returns payload-rich, deduped technique guidance drawn from curated
-# authoritative sources (HackTricks / PayloadsAllTheThings) — the verbatim
-# payloads are the whole point, so the old 5000 cap truncated exactly what the
-# worker needs. Raised to keep them; the synthesis is one concentrated block,
-# not a tool-call trace. Tunable via env.
+# Max chars of the latest web_search synthesis to inject. The research node returns
+# payload-rich curated guidance (HackTricks / PayloadsAllTheThings); the verbatim
+# payloads are the point, so the cap is generous. Tunable via env.
 _WEB_SEARCH_INJECT_CHARS = int(os.getenv("SWARM_WEB_SEARCH_INJECT_CHARS", "16000"))
-
-
-def _summarize_tool_call_pair(tool_call: dict, tool_msg: ToolMessage | None) -> str:
-    """Render one (tool_call, tool_response) pair as a single probe line.
-
-    Picks the most informative argument field — bash uses ``command``,
-    fetch tools use ``url``, etc. — and pairs it with the response's
-    exit code (parsed from the bash tool's ``[exit=N | cwd=...]``
-    suffix when present) plus a trimmed body so failed and successful
-    probes are visually distinguishable.
-    """
-    name = tool_call.get("name") if isinstance(tool_call, dict) else getattr(tool_call, "name", "tool")
-    args = tool_call.get("args") if isinstance(tool_call, dict) else getattr(tool_call, "args", {})
-
-    payload = ""
-    if isinstance(args, dict):
-        for key in ("command", "url", "data", "query", "payload", "target"):
-            v = args.get(key)
-            if isinstance(v, str) and v:
-                payload = v
-                break
-        if not payload:
-            for k, v in args.items():
-                if k == "reasoning":
-                    continue
-                if isinstance(v, str) and v:
-                    payload = f"{k}={v}"
-                    break
-    payload_str = (payload or "<no args>").strip()
-    if len(payload_str) > 140:
-        payload_str = payload_str[:137] + "..."
-
-    if tool_msg is None:
-        response = "(no response captured)"
-    else:
-        body = tool_msg.content if isinstance(tool_msg.content, str) else str(tool_msg.content)
-        body = body.strip()
-        m = re.search(r"\[exit=(-?\d+)", body)
-        exit_code = m.group(1) if m else "?"
-        # Keep first 100 + last 60 chars for very long outputs so both
-        # the start and the end (where flag matches / errors usually
-        # appear) are visible.
-        if len(body) > 200:
-            body = body[:100].replace("\n", " ") + " …trimmed… " + body[-60:].replace("\n", " ")
-        else:
-            body = body.replace("\n", " ")
-        response = f"exit={exit_code} {body}"
-
-    line = f"- {name}({payload_str}) → {response}"
-    if len(line) > _PRIOR_PROBE_SUMMARY_CHARS:
-        line = line[: _PRIOR_PROBE_SUMMARY_CHARS - 1] + "…"
-    return line
 
 
 _TOOL_OUTCOME_IMPORTANT_TOKENS = (
@@ -1033,7 +817,7 @@ def _classify_tool_attempt(
     agent_id: str,
     config_name: str,
 ) -> dict | None:
-    """Return a coverage-style tool outcome, or None for routine probes."""
+    # Return a coverage-style tool outcome, or None for routine probes.
     if not _important_tool_surface(tool_name, command):
         return None
 
@@ -1060,8 +844,7 @@ def _classify_tool_attempt(
             fallback_needed = True
             error_type = "wpscan-db-missing-or-aborted"
         else:
-            # `--enumerate p` can still miss arbitrary installed plugins.
-            # Full component coverage needs the all-plugins/all-themes forms.
+            # --enumerate p can miss arbitrary plugins; full coverage needs ap/at.
             enum_full = bool(
                 re.search(r"--enumerate\s+[^\s]*\bap\b", low_cmd)
                 or re.search(r"--enumerate\s+[^\s]*\bat\b", low_cmd)
@@ -1122,7 +905,7 @@ def _extract_tool_attempts_from_trace(
     agent_id: str,
     config_name: str,
 ) -> list[dict]:
-    """Extract important tool outcomes from AI tool calls + ToolMessages."""
+    # Extract important tool outcomes from AI tool calls + ToolMessages.
     responses: dict[str, ToolMessage] = {}
     for msg in messages:
         if not isinstance(msg, ToolMessage):
@@ -1171,22 +954,17 @@ def _extract_tool_attempts_from_trace(
     return attempts[-20:]
 
 
-# ── Per-skill investigation thread (continuity + compaction) ──────────
-#
-# Measured: a single fresh worker context peaks around 45-87k tokens —
-# under the ~120k point where the model degrades. Carrying prior work
-# forward (continuity) is what risks crossing that line, so the thread is
-# compacted to a bounded CHARACTER budget that leaves headroom for the
-# fresh work on top. Commands are kept verbatim; tool OUTPUTS are shrunk
-# to a one-line summary (the user's "keep what was executed, shrink the
-# outputs"). ~120k chars ≈ 30k tokens for the carried thread.
+# ── Per-skill investigation thread (continuity + compaction) ──
+# A fresh worker context peaks ~45-87k tokens; carrying prior work forward risks
+# crossing the ~120k degradation point, so the thread is compacted to a bounded
+# char budget — commands kept verbatim, tool OUTPUTS shrunk to one line.
 _THREAD_CHAR_BUDGET = 120_000
 _RECORD_CMD_CHARS = 240
 _RECORD_OUTPUT_CHARS = 200
 _MAX_STEPS_PER_RUN = 40
 
-# Cheap artifact tells worth preserving in a shrunk output summary — the
-# things that actually decide whether a probe progressed.
+# Cheap artifact tells worth preserving in a shrunk output summary — what actually
+# decides whether a probe progressed.
 _OUTPUT_TELLS = (
     "root:x:0:0", "uid=", "gid=", "flag{", "information_schema",
     "union select", "@@version", "traceback", "stack trace", "exception",
@@ -1196,8 +974,7 @@ _OUTPUT_TELLS = (
 
 
 def _summarize_output(output: str) -> str:
-    """Shrink a tool output to a one-line summary: size + first line +
-    the decisive artifact tells that survive compaction."""
+    # Shrink a tool output to one line: size + first line + decisive artifact tells.
     o = (output or "").strip()
     if not o:
         return "(no output)"
@@ -1209,9 +986,8 @@ def _summarize_output(output: str) -> str:
 
 
 def _compact_run_record(messages: list, verdict_signals: list) -> str:
-    """Build a compact record of ONE dispatch: each step's command kept
-    verbatim, its tool output shrunk to a one-line summary, then the
-    closing verdict. This is the unit the continuity thread accumulates."""
+    # Compact record of ONE dispatch: each command verbatim, its output shrunk to
+    # one line, then the closing verdict. The unit the continuity thread accumulates.
     responses: dict[str, ToolMessage] = {}
     for msg in messages:
         if isinstance(msg, ToolMessage):
@@ -1251,39 +1027,24 @@ def _compact_run_record(messages: list, verdict_signals: list) -> str:
 def _build_investigation_thread(
     state: dict, config_name: str, messages: list, verdict_signals: list,
 ) -> dict:
-    """Append this dispatch's compacted record to the skill's thread,
-    increment its run count, and trim the OLDEST runs until the thread is
-    back under the character budget. Returns the single-key update for
-    ``state['investigation_threads']``."""
+    # Append this dispatch's compacted record to the skill's thread, bump its run
+    # count, trim oldest runs until under the char budget. Returns the single-key
+    # update for state['investigation_threads'].
     prior = (state.get("investigation_threads") or {}).get(config_name) or {}
     run_count = int(prior.get("run_count", 0)) + 1
     runs = [str(r) for r in (prior.get("runs") or [])]
     runs.append(_compact_run_record(messages, verdict_signals))
-    # Drop oldest runs (keeping at least the current one) until under budget.
+    # Drop oldest runs (keep ≥ current) until under budget.
     while len(runs) > 1 and sum(len(r) for r in runs) > _THREAD_CHAR_BUDGET:
         runs.pop(0)
     return {config_name: {"run_count": run_count, "runs": runs}}
 
 
 def _collect_prior_skill_history(state: dict, agent_id: str) -> str | None:
-    """Return the previous summarizer report for this ``agent_id``, or
-    ``None`` if there is no prior dispatch.
-
-    Background: in the pre-summarizer-node design this function walked
-    ``state['messages']`` looking for raw ``AIMessage``s with matching
-    ``agent_id`` and reconstructed a "previous attempts" block from
-    their tool calls. After the worker → summarizer hand-off
-    (``state.pending_summary_inputs`` + ``SummarizerNode``), those raw
-    ``AIMessage``s no longer enter ``state['messages']`` — only the
-    summarizer's structured ``worker_report`` does.
-
-    So we just look up the most recent ``worker_report`` for the
-    matching ``agent_id``. The report is already in the right format
-    and tone (probe enumeration, what-was-NOT-tried, recommended next
-    angle) — no per-probe re-formatting needed here.
-
-    See :func:`src.llm.digest.find_prior_worker_report` for the lookup.
-    """
+    # Return the previous summarizer report for this agent_id, or None. Since the
+    # worker → summarizer hand-off, raw AIMessages no longer enter state['messages']
+    # — only the structured worker_report does, so we look up the most recent one.
+    # See src.llm.digest.find_prior_worker_report.
     from src.llm.digest import find_prior_worker_report
 
     report = find_prior_worker_report(state.get("messages") or [], agent_id)
@@ -1304,10 +1065,8 @@ def _collect_prior_skill_history(state: dict, agent_id: str) -> str | None:
 
 
 def _format_investigation_thread(state: dict, config_name: str) -> str | None:
-    """Render this skill's own compacted cross-dispatch history as a seed
-    block, with the run count, so a re-dispatched worker CONTINUES instead
-    of starting fresh. Complements ``_collect_prior_skill_history`` (the
-    supervisor's digest) with the worker's own raw command trail."""
+    # Render this skill's own compacted cross-dispatch history as a seed block (with
+    # run count) so a re-dispatched worker CONTINUES instead of starting fresh.
     th = (state.get("investigation_threads") or {}).get(config_name)
     if not th:
         return None
@@ -1335,13 +1094,9 @@ def _format_investigation_thread(state: dict, config_name: str) -> str | None:
 
 
 def _extract_latest_web_search(state: dict) -> str | None:
-    """Return the most recent ``[Web Search] ...`` AIMessage content,
-    truncated to ``_WEB_SEARCH_INJECT_CHARS``, or ``None``.
-
-    The web_search node prefixes its synthesis with a literal
-    ``[Web Search]`` marker (see ``src/nodes/web_search.py``), which
-    makes it cheap to find and disambiguate from worker output.
-    """
+    # Return the most recent [Web Search] AIMessage content, truncated to
+    # _WEB_SEARCH_INJECT_CHARS, or None. The web_search node prefixes its synthesis
+    # with a literal [Web Search] marker.
     msgs = state.get("messages") or []
     for m in reversed(msgs):
         if not isinstance(m, AIMessage):
@@ -1360,32 +1115,17 @@ def _persist_worker_trace(
     run_id: str,
     agent_id: str,
 ):
-    """No-op shim — worker traces are no longer mirrored to disk.
-
-    The previous behaviour wrote one row per LangChain message into
-    ``logs/run-<run_id>/worker_traces.jsonl``. The file was nearly
-    redundant with ``full_logs.jsonl`` (every LLM round-trip is already
-    captured there with full prompt + response) and was never read by
-    a human in practice. Removed as part of the 2026-05 log
-    consolidation.
-
-    Kept as a function (instead of being deleted) so call sites in
-    ``run_skill_agent`` can keep invoking it without conditional logic.
-    Returns ``None`` so any caller that stored the path falls back to
-    its empty-path branch.
-    """
+    # No-op shim — worker traces are no longer mirrored to disk (the old
+    # worker_traces.jsonl was redundant with full_logs.jsonl). Kept as a function
+    # so call sites need no conditional; returns None.
     del trace, run_id, agent_id  # explicitly unused
     return None
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# The runner itself.
-#
-# ``run_skill_agent`` is the entire worker lifecycle: build the system
-# prompt, seed cross-turn context, run the agent loop with refusal
-# retries, parse findings, salvage on crash. ``BaseNode.run_skill_agent``
-# is a thin async wrapper that just forwards ``self`` and delegates here.
-# ────────────────────────────────────────────────────────────────────────────
+# ── The runner ──
+# run_skill_agent is the entire worker lifecycle: build the prompt, seed context,
+# run the agent loop with refusal retries, parse findings, salvage on crash.
+# BaseNode.run_skill_agent is a thin async wrapper that forwards here.
 
 
 async def run_skill_agent(
@@ -1394,27 +1134,14 @@ async def run_skill_agent(
     state: dict,
     llm: BaseChatModel | None = None,
 ) -> dict:
-    """Run a ``create_agent`` loop with the given skill config.
-
-    Public entry point. Thin wrapper that guarantees per-worker shell
-    cleanup runs whether the implementation succeeded, raised, was
-    salvaged, or refused. The actual worker lifecycle lives in
-    :func:`_run_skill_agent_impl` immediately below.
-
-    Why the wrapper exists: without it, every worker leaves its tmux
-    session and bash subprocess alive in the
-    :class:`~src.tools.shell.manager.ShellManager` registry until
-    ``atexit`` fires at process death. For benchmark runs with many
-    parallel/sequential workers that means dozens of live sessions
-    accumulating in one Python process — fine in theory, sloppy in
-    practice. The finally-block frees them as each worker finishes.
-    """
+    # Public entry point. Thin wrapper around _run_skill_agent_impl that guarantees
+    # per-worker shell cleanup runs in a finally — otherwise each worker leaks its
+    # tmux session + bash subprocess in the ShellManager until atexit.
     try:
         return await _run_skill_agent_impl(node, config, state, llm)
     finally:
-        # Best-effort per-worker shell cleanup. Never raise from the
-        # finally — a cleanup failure must not mask a successful return
-        # or a real exception from the implementation.
+        # Best-effort per-worker shell cleanup. Never raise from the finally — a
+        # cleanup failure must not mask a successful return or a real exception.
         try:
             from src.tools.shell import get_shell_manager
             await get_shell_manager().cleanup_agent(config.agent_id)
@@ -1431,49 +1158,20 @@ async def _run_skill_agent_impl(
     state: dict,
     llm: BaseChatModel | None = None,
 ) -> dict:
-    """Run a ``create_agent`` loop with the given skill config.
-
-    Returns the standard worker-node update dict::
-
-        {
-            "messages":      [...],   # mirrored agent trace
-            "agent_results": [AgentResult(...)],
-            "findings":      [Finding, ...],
-            "active_agents": [agent_id],
-        }
-
-    ``node`` is the BaseNode instance whose method delegated here. We
-    use it for ``node.log`` (per-node logger), ``node.name`` (used by
-    the LLM call config and for trace persistence), and the focused
-    sub-LLM helper ``node.ask_focused`` (which the refusal-recovery
-    path needs).
-
-    Called only via :func:`run_skill_agent` (the public entry point
-    that adds the per-worker shell cleanup ``finally``).
-    """
+    # Run a create_agent loop with the given skill config. Returns the standard
+    # worker-node update dict (messages / agent_results / findings / active_agents).
+    # node supplies node.log, node.name, node.ask_focused. Called only via
+    # run_skill_agent (which adds the shell-cleanup finally).
     if llm is None:
         from src.llm.provider import get_llm  # lazy — see module docstring
         llm = get_llm()
 
     target_url = state.get("target_url", "")
 
-    # Build system message with phase-appropriate rule bundle. The
-    # benchmark-mode addendum used to be appended here when
-    # ``state.expected_flag`` was set; it was removed on 2026-05-14
-    # because the flag success-criterion language was the strongest
-    # cyber_policy refusal trigger in worker prompts. The planner
-    # owns flag submission (``action="submit_flag"`` verified by
-    # ``src/edges/routing.py:route_after_planner``); workers only
-    # need to surface flag-shaped strings in their findings.
-    #
-    # Findings injection used to happen here via the never-populated
-    # ``phase1_findings`` state field. That was dead code; cumulative
-    # findings now reach the worker through the seed HumanMessage's
-    # "## Confirmed findings" block (see ``_format_findings`` below).
-    #
-    # ``is_benchmark`` gates the playful BENCHMARK_GUIDANCE addendum
-    # (executor-only) — re-introduced 2026-05-31. Detected from the same
-    # state fields the FlagWatcher reads below.
+    # Build the system message with the phase-appropriate rule bundle. The old
+    # benchmark flag-criterion addendum was removed (2026-05-14) as the strongest
+    # cyber_policy trigger; the planner owns flag submission. is_benchmark gates
+    # the BENCHMARK_GUIDANCE addendum (executor-only).
     is_benchmark = bool(
         (state or {}).get("expected_flag")
         or (state or {}).get("expected_flag_candidates")
@@ -1482,33 +1180,13 @@ async def _run_skill_agent_impl(
         config, target_url, is_benchmark=is_benchmark,
     )
 
-    # NB: agent construction is now deferred to ``_agent_factory``
-    # below so the tier-2 refusal-retry can rebuild the agent with
-    # a vocab-filtered system prompt without losing any of this
-    # call site's wiring.
+    # Agent construction is deferred to _agent_factory below so tier-2 refusal-retry
+    # can rebuild it with a vocab-filtered prompt without losing this call's wiring.
 
-    # Seed the create_agent loop with whatever cross-turn context we can
-    # recover from state. The seed is a single HumanMessage prepended to
-    # the agent's input so a fresh worker doesn't start cold.
-    #
-    # Order matters for both model focus and prompt caching. Stable, heavy
-    # content goes first so it stays in the shared prefix; volatile run state
-    # follows; the concrete assignment remains at the end where it is most
-    # salient for the worker.
-    #
-    #   1. skill_catalogue   — stable all-skill routing/context descriptions
-    #   2. findings          — "what is already confirmed true"
-    #   3. recon_summary     — "what does the application look like"
-    #   4. relevant_summary  — "what's the live investigation state"
-    #   5. tool_attempts     — "which high-level tools covered or failed"
-    #   6. web_search        — "what external knowledge was just pulled"
-    #   7. prior_history     — "what did I myself try on a previous run"
-    #   8. dispatch_reason   — "why am I here, what's the hypothesis"
-    #
-    # Each helper returns ``None`` when its source field is empty, so
-    # cold first dispatches (turn 1, before the planner has spoken)
-    # produce an empty seed and the worker starts cold — backward-
-    # compatible with the original ``{"messages": []}`` behavior.
+    # Seed the loop with cross-turn context as a single HumanMessage. Order matters
+    # for focus + prompt caching: stable/heavy first (skill_catalogue, findings,
+    # recon), volatile state next, the concrete assignment last. Each helper returns
+    # None when empty, so cold first dispatches start cold (back-compat).
     seed_parts: list[str] = []
 
     skill_catalogue_block = _format_skill_context_catalogue(config.config_name)
@@ -1565,13 +1243,9 @@ async def _run_skill_agent_impl(
             "already been confirmed."
         )
 
-    # Benchmark status footer — appended LAST (after the "Begin testing"
-    # tail) so it is the final thing the worker reads each dispatch. In
-    # benchmark mode capture is fully static (the FlagWatcher scans tool
-    # output and ends the run on the real token), so this keeps a worker
-    # from concluding the exercise is finished on its own and returning
-    # early. See ``BENCHMARK_PROGRESS_FOOTER``. Mirrors the supervisor
-    # footer appended in ``src/nodes/planner.py``.
+    # Benchmark status footer — appended LAST so it's the final thing the worker
+    # reads. Capture is static (FlagWatcher ends the run on the real token), so this
+    # keeps a worker from concluding early. Mirrors the planner footer.
     if is_benchmark:
         seed_parts.append(BENCHMARK_PROGRESS_FOOTER)
 
@@ -1604,33 +1278,18 @@ async def _run_skill_agent_impl(
     trace: list = []
     findings: list[Finding] = []
     verdict_signals: list[Signal] = []
-    # Resolve the run_id once so every LLM call below logs into the
-    # same ``logs/run-<id>/llm_calls.jsonl`` and so on a crash the
-    # salvage path knows where to write its output.
+    # Resolve run_id once so every LLM call logs into the same llm_calls.jsonl and
+    # the salvage path knows where to write.
     run_id = (state or {}).get("run_id") or make_run_id(
         target_url=target_url,
     )
-    # ``call_config`` carries: callbacks (token logger + optional
-    # flag watcher), metadata (agent_id / run_id / node — read by the
-    # callback to attribute each LLM call), and the recursion_limit
-    # budget. Using a helper keeps every LLM call site in the codebase
-    # consistent — a missing callback here would silently drop
-    # token-cost rows from llm_calls.jsonl.
-    #
-    # In benchmark mode the FlagWatcherCallback hooks ``on_tool_end``
-    # and raises ``FlagCapturedSignal`` the instant a tool returns the
-    # expected flag literal. This short-circuits the worker BEFORE the
-    # next LLM call is queued — saves 60-90 s of gpt-5.5 reasoning per
-    # capture and unblocks the LangGraph fan-in much faster (other
-    # parallel workers then also stop on the same capture via the
-    # ``state.captured_flag`` reducer). See the module docstring of
-    # ``src.nodes.base.flag_watcher`` for the full incident retro.
+    # call_config carries callbacks (token logger + optional flag watcher), metadata
+    # (agent_id/run_id/node), and the recursion_limit budget. In benchmark mode the
+    # FlagWatcherCallback hooks on_tool_end and raises FlagCapturedSignal the instant
+    # a tool returns the expected flag — short-circuiting before the next LLM call.
     from src.nodes.base.flag_watcher import FlagWatcherCallback
-    # Pass the full candidate set to the watcher — see
-    # :func:`src.edges.flag_match.flags_match` for why benchmarks can
-    # legitimately have multiple expected flag values. Falls back to
-    # the (back-compat) single ``expected_flag`` field if the runner
-    # didn't populate the candidates tuple.
+    # Pass the full candidate set to the watcher — benchmarks can legitimately have
+    # multiple expected values. Falls back to the single expected_flag field.
     expected_flag_candidates_for_callback: tuple[str, ...] = tuple(
         (state or {}).get("expected_flag_candidates") or ()
     )
@@ -1644,15 +1303,10 @@ async def _run_skill_agent_impl(
             expected_flag=expected_flag_candidates_for_callback,
             agent_id=config.agent_id,
         ))
-    # ``config.max_iterations`` is the worker's budget in REAL tool-using
-    # rounds (one round = the model decides + a tool runs). LangGraph's
-    # ``recursion_limit`` instead counts super-steps, and the create_agent
-    # loop spends ~3 super-steps per round (the no-progress middleware's
-    # before_model node + the model node + the tools node) — empirically a
-    # limit of 40 stops a worker at exactly 13 rounds (measured across
-    # XBEN-030/088/095, see tests/FAILURES.md 2026-06-10). Convert rounds →
-    # super-steps here (``3*rounds + 1``) so the config, this budget, and
-    # ``_count_worker_iterations`` all speak in the same real-round units.
+    # max_iterations is the budget in REAL tool rounds; LangGraph's recursion_limit
+    # counts super-steps (~3/round: nudge before_model + model + tools). Convert
+    # rounds → super-steps (3*rounds + 1) so config, budget, and
+    # _count_worker_iterations all speak in real-round units.
     recursion_limit = config.max_iterations * 3 + 1
     call_config = make_call_config(
         run_id=run_id,
@@ -1662,35 +1316,22 @@ async def _run_skill_agent_impl(
         extra_callbacks=worker_callbacks or None,
     )
 
-    # Stream rather than ainvoke so a partial state snapshot
-    # survives crashes. ``stream_mode="values"`` yields successive
-    # full-state snapshots; we keep the latest one. When LangGraph
-    # raises ``GraphRecursionError`` mid-loop, ``last_snapshot``
-    # holds the messages accumulated up to the last successful
-    # step — which is exactly what salvage_finding() consumes.
+    # Stream (not ainvoke) so a partial snapshot survives crashes: stream_mode=
+    # "values" yields full-state snapshots, we keep the latest. On GraphRecursionError
+    # last_snapshot holds messages up to the last step — what salvage consumes. The
+    # agent is rebuilt inside the retry helper (vocab-filter / tier-2 swap).
     #
-    # The agent is reconstructed inside the retry helper because
-    # vocab-filter / tier-2 model-swap both rebuild it from scratch.
-    #
-    # The no-progress nudge middleware is shared across the primary and
-    # fallback factories (one per-worker plateau state). It fires only
-    # on byte-identical tool outputs and only re-surfaces the existing
-    # DIVERSITY_RULES guidance — it never stops the worker, so it is
-    # safe in both benchmark and real-pentest mode. See
-    # ``src/nodes/base/prompt_builder.py``.
+    # The no-progress nudge middleware (shared across primary + fallback factories)
+    # fires only on byte-identical tool outputs and only re-surfaces existing
+    # DIVERSITY_RULES guidance — it never stops the worker.
     from src.nodes.base.prompt_builder import NoProgressNudgeMiddleware
     _no_progress_mw = NoProgressNudgeMiddleware(
         agent_id=config.agent_id, log=node.log,
     )
-    # Ablation: the no-progress nudge re-injects the DIVERSITY_RULES /
-    # TRANSFORMATION_HYPOTHESIS guidance in-loop when a worker plateaus on
-    # byte-identical outputs, so it IS a prompting technique delivered
-    # dynamically. When prompting techniques are ablated, drop it too —
-    # otherwise a stuck worker is still rescued by the exact guidance the
-    # no-prompting-techniques row is meant to remove, which would
-    # under-measure the effect precisely where the technique matters most.
-    # Read via the module object (not ``from src.graph import config``) for
-    # the same import-cycle reason noted at the fallback factory below.
+    # Ablation: the nudge re-injects DIVERSITY_RULES / TRANSFORMATION_HYPOTHESIS in
+    # loop, so it IS a dynamically-delivered prompting technique. When prompting
+    # techniques are ablated, drop it too, else a stuck worker is still rescued by
+    # the exact guidance the ablation removes. Read via module object (import cycle).
     from src import graph as _graph_module
     _prompting_off = bool(getattr(
         getattr(_graph_module.config, "capability", None),
@@ -1698,11 +1339,9 @@ async def _run_skill_agent_impl(
     ))
     _middleware = [] if _prompting_off else [_no_progress_mw]
 
-    # Per-dispatch progressive-disclosure tool: when this skill ships
-    # reference files (src/skills/<name>/references/*.md), bind a scoped
-    # read_reference tool so the worker can page one in on demand. Skills
-    # without references (generic executor, custom, recon) keep config.tools
-    # unchanged. Wrapped defensively — reference wiring must never break a run.
+    # Per-dispatch progressive-disclosure tool: when this skill ships reference files,
+    # bind a scoped read_reference tool. Wrapped defensively — reference wiring must
+    # never break a run.
     _run_tools = list(config.tools)
     try:
         from src.skills.loader import list_references
@@ -1726,11 +1365,9 @@ async def _run_skill_agent_impl(
             middleware=_middleware,
         )
 
-    # Tier-2 fallback factory — only wired when the primary provider
-    # is Codex (model-swap to gpt-5.4 isn't meaningful for anthropic
-    # / local / openrouter routes). See ``src/refusals/retry.py`` for
-    # the tier ladder and ``config.budgets.fallback_*`` env knobs for
-    # tuning the fallback model + reasoning_effort.
+    # Tier-2 fallback factory — only wired when the primary provider is Codex
+    # (model-swap to gpt-5.4 isn't meaningful for other routes). See
+    # src/refusals/retry.py for the tier ladder and config.budgets.fallback_* knobs.
     from src.llm.provider import LLMConfig as _LLMConfig
     from src.llm.provider import Provider as _Provider
     fallback_factory: Any = None
@@ -1738,12 +1375,9 @@ async def _run_skill_agent_impl(
     _fallback_effort: str | None = None
     _primary_cfg = _LLMConfig()
     if _primary_cfg.provider == _Provider.CODEX:
-        # Lazy import — skill_runner is imported transitively from
-        # src.graph during its own initialization, so a top-level
-        # ``from src.graph import config`` would re-enter the module
-        # while it's still binding ``config``. Reading via the module
-        # object at call-time (after graph.py has finished) avoids
-        # that.
+        # Lazy import — skill_runner is imported transitively from src.graph
+        # during init, so a top-level import would re-enter while config is still
+        # binding. Read via the module object at call-time.
         from src import graph as _graph_module
         _fallback_model = str(getattr(
             _graph_module.config.budgets, "fallback_model", "gpt-5.4",
@@ -1774,10 +1408,9 @@ async def _run_skill_agent_impl(
     flag_watcher_capture: str | None = None
     sibling_captured_value: str = ""
 
-    # Sticky fallback: if this config's prompt already tripped the primary
-    # model's cyber_policy classifier earlier this run, start its dispatch
-    # directly on the fallback model — the primary would refuse the same
-    # prompt again, wasting 3 retries. (No-op when no fallback is wired.)
+    # Sticky fallback: if this config's prompt already tripped the primary's
+    # cyber_policy classifier this run, start on the fallback model — the primary
+    # would refuse again, wasting 3 retries. (No-op when no fallback is wired.)
     start_on_fallback = (
         fallback_factory is not None
         and config.config_name in set((state or {}).get("fallback_configs") or [])
@@ -1789,27 +1422,10 @@ async def _run_skill_agent_impl(
             config.agent_id, config.config_name,
         )
     try:
-        # Inner try catches the FlagWatcher's short-circuit signals so
-        # they never reach the outer ``except Exception`` (which would
-        # mis-classify them as refusals). Two distinct signals:
-        #
-        #   * FlagCapturedSignal — THIS worker matched the flag in its
-        #     own tool output. We synthesise a ToolMessage so the
-        #     downstream auto-verify scan picks the flag up via its
-        #     existing extract_flags + flags_match path, then build a
-        #     normal worker-result dict. captured_flag lands in state
-        #     via the reducer.
-        #
-        #   * SiblingCapturedSignal — ANOTHER worker captured while we
-        #     were mid-LLM-call. We exit cleanly with an empty-findings
-        #     update so the fan-in can complete fast and the routing
-        #     edge ``route_after_summarizer`` can route to END. We do
-        #     NOT set captured_flag (the winning worker already did).
-        #
-        # Single code path for the WINNING worker — capture via
-        # FlagWatcher (early, milliseconds after tool returns) and the
-        # end-of-worker fallback scan (late, after the agent loop ends
-        # naturally) both feed the same downstream auto-verify block.
+        # Inner try catches the FlagWatcher's short-circuit signals so they don't
+        # reach the outer except (mis-classified as refusals). FlagCapturedSignal:
+        # THIS worker matched → synthesise a ToolMessage for the auto-verify scan.
+        # SiblingCapturedSignal: another worker won → exit clean, don't set captured_flag.
         try:
             (
                 last_snapshot,
@@ -1836,19 +1452,10 @@ async def _run_skill_agent_impl(
                 "fan-in)",
                 config.agent_id, sig.tool_name or "tool", sig.flag,
             )
-            # Append a synthetic ToolMessage with the captured value
-            # to the last partial snapshot. The downstream auto-verify
-            # scan iterates ``last_snapshot["messages"]`` and matches
-            # ``extract_flags(content) → flags_match(...)``; this
-            # synthetic entry is exactly what that scan expects.
-            #
-            # Why the snapshot is partial: the FlagWatcher raises
-            # inside ``on_tool_end``, which fires AFTER the tool
-            # returns but BEFORE LangGraph yields the next state
-            # snapshot. So ``last_snapshot`` holds the state from
-            # before the flag-producing tool call. The synthetic
-            # message bridges that gap without us needing to
-            # reconstruct the missing snapshot ourselves.
+            # Append a synthetic ToolMessage with the captured value to the partial
+            # snapshot — the downstream auto-verify scan expects exactly this. The
+            # snapshot is partial because FlagWatcher raises in on_tool_end, before
+            # LangGraph yields the next snapshot; this bridges the gap.
             snap = dict(last_snapshot or {})
             msgs = list(snap.get("messages") or [])
             msgs.append(ToolMessage(
@@ -1859,10 +1466,8 @@ async def _run_skill_agent_impl(
             snap["messages"] = msgs
             last_snapshot = snap
         except SiblingCapturedSignal as sig:
-            # Sibling worker captured first; this worker exits with
-            # an empty update so fan-in completes fast. Routing reads
-            # state.captured_flag (set by the winning worker) to drive
-            # termination — we don't touch it here.
+            # Sibling captured first; exit with an empty update so fan-in completes.
+            # Routing reads state.captured_flag (set by the winner) — not touched here.
             sibling_captured_value = sig.captured_flag
             node.log.info(
                 "[%s] sibling worker captured the flag (%s) — "
@@ -1877,12 +1482,9 @@ async def _run_skill_agent_impl(
             messages, config.agent_id, config.config_name,
         )
 
-        # If the FlagWatcher fired, also synthesise a CRITICAL Finding
-        # so the worker reports ``1 finding`` instead of ``0`` and the
-        # summarizer's per-worker digest has something concrete to
-        # echo. Capture itself routes through ``captured_flag`` (set
-        # by the downstream auto-verify block); this Finding is the
-        # human-readable companion to that machine-readable signal.
+        # If the FlagWatcher fired, synthesise a CRITICAL Finding so the worker
+        # reports 1 finding, not 0. Capture itself routes via captured_flag; this is
+        # the human-readable companion.
         if flag_watcher_capture and not findings:
             findings = [
                 Finding(
@@ -1904,30 +1506,21 @@ async def _run_skill_agent_impl(
                 )
             ]
 
-        # Mirror the inner agent trace up to the parent so Studio chat
-        # shows every tool call (`run_command("curl ...")`) and the
-        # corresponding ToolMessage response inline. Without this the
-        # entire conversation is hidden inside the create_agent
-        # sub-graph and the parent chat looks frozen.
+        # Mirror the inner agent trace to the parent so Studio chat shows every tool
+        # call + response inline; otherwise the conversation is hidden in the
+        # create_agent sub-graph and the parent looks frozen.
         trace = [m for m in messages if isinstance(m, (AIMessage, ToolMessage))]
         for m in trace:
-            # Tag each message with the agent_id so Studio (and
-            # downstream consumers) can group / filter by agent.
+            # Tag each message with agent_id so consumers can group/filter by agent.
             try:
                 m.additional_kwargs.setdefault("agent_id", config.agent_id)
             except Exception:
                 pass
 
-        # Refusal detection — if 0 findings AND the last assistant
-        # message reads like a safety refusal, surface it explicitly
-        # instead of letting it get swallowed as "0 findings".
-        #
-        # Skip this entire block when ``sibling_captured_value`` is
-        # set: the worker exited early because another worker captured
-        # the flag, not because of any refusal or anomalous output.
-        # Treating it as "0 findings — looks like a refusal" would
-        # trigger an unnecessary recovery sub-call AND emit a
-        # misleading warning to the operator.
+        # Refusal detection — if 0 findings AND the last assistant message reads like
+        # a safety refusal, surface it explicitly instead of swallowing it as "0
+        # findings". Skipped when sibling_captured_value is set (clean early exit, not
+        # a refusal — treating it as one would trigger a needless recovery sub-call).
         last_text = ""
         for m in reversed(messages):
             if isinstance(m, AIMessage):
@@ -1972,9 +1565,8 @@ async def _run_skill_agent_impl(
                         "recovered": True,
                     },
                 ))
-                # Treat as not-refused so AgentResult.completed=True
-                # and the planner sees the suggestion in the trace
-                # as actionable evidence for its next turn.
+                # Treat as not-refused so completed=True and the planner sees the
+                # suggestion as actionable evidence.
                 refused = False
             else:
                 node.log.warning(
@@ -1993,11 +1585,9 @@ async def _run_skill_agent_impl(
                     },
                 ))
 
-        # Sibling-cancelled workers are not refusals and not crashes —
-        # they're a clean cooperative exit. Surface them on a distinct
-        # ``error`` channel so the planner / triage tooling can tell
-        # the difference between "this worker tried and failed" and
-        # "this worker stood down because another worker won".
+        # Sibling-cancelled workers are a clean cooperative exit, not a refusal or
+        # crash — surface on a distinct error channel so triage can tell "tried and
+        # failed" from "stood down because another worker won".
         if sibling_captured_value:
             agent_result = AgentResult(
                 agent_id=config.agent_id,
@@ -2017,13 +1607,9 @@ async def _run_skill_agent_impl(
                 error="model refused" if refused else None,
             )
     except Exception as e:
-        # Rate-limit (429) / quota-exhausted errors are NOT salvageable —
-        # this run never got a fair attempt, so it's a crash. Re-raise so the
-        # error propagates out of the worker and aborts the run; xbow_runner
-        # then marks the benchmark ~ crashed and the usage guard pauses the
-        # sweep until the 5-hour window resets. Everything else (refusals,
-        # step-budget stops, ordinary tool crashes) keeps the salvage path
-        # below. Lazy import respects the planner/executor import-order dance.
+        # Rate-limit (429) / quota errors are NOT salvageable — this run never got a
+        # fair attempt, so re-raise to abort; xbow_runner marks it crashed and the
+        # usage guard pauses the sweep. Everything else keeps the salvage path below.
         try:
             from src.llm.codex import (
                 CodexQuotaExceededError as _CodexQuota,
@@ -2035,25 +1621,15 @@ async def _run_skill_agent_impl(
         if _rate_limit_types and isinstance(e, _rate_limit_types):
             raise
 
-        # The refusal-retry ladder tags the exception with the tier it
-        # reached. On a terminal refusal the tuple-unpack above never ran,
-        # so ``worker_last_tier`` is still its "primary" default — recover
-        # the real tier here so the sticky-fallback record below fires when
-        # this config exhausted the fallback model too.
+        # The refusal-retry ladder tags the exception with the tier it reached. On a
+        # terminal refusal the tuple-unpack never ran, so recover the real tier here
+        # so the sticky-fallback record fires when the fallback was exhausted too.
         worker_last_tier = getattr(e, "_swarm_last_tier", worker_last_tier)
 
-        # Cyber-policy / invalid-prompt failures from the Codex API
-        # are *refusals*, not crashes. Surface them on the
-        # ``error="model refused"`` channel so the planner's
-        # repetition + refusal logic can pick a different skill
-        # rather than treating this as a hard exception. We also
-        # try a focused-recovery sub-call: if the agent had already
-        # made any probes via ``create_agent`` before the API
-        # rejected the next request, we may have a partial trace
-        # with usable observations.
-        #
-        # Lazy-imported to keep the planner / executor import dance
-        # working — see ``src/graph.py``'s ordering note.
+        # Cyber-policy / invalid-prompt failures from Codex are refusals, not crashes.
+        # Surface on error="model refused" so the planner can pivot, and try a focused
+        # recovery sub-call in case the agent made usable probes before the API
+        # rejected the next request. Lazy import for the planner/executor import dance.
         try:
             from src.llm.codex import (
                 CodexCyberPolicyError,
@@ -2066,21 +1642,10 @@ async def _run_skill_agent_impl(
         except ImportError:
             refusal_exc_types = ()
 
-        # Pull whatever messages survived the crash into the trace
-        # so the parent chat / nodes.jsonl still show what the
-        # worker did before dying. Without this, recursion-limit
-        # crashes look like the worker did literally nothing.
-        #
-        # On a terminal refusal / step-budget stop / crash the tuple-unpack
-        # at the ``astream_with_refusal_retry`` call site never ran, so
-        # ``last_snapshot`` is still its ``None`` init. ``_run_agent_once``
-        # and the retry helper attach the worker's richest partial trace to
-        # the exception — recover it here so the salvage / wrap-up / summary
-        # below (and the success-path flag auto-verify scan further down)
-        # operate on the REAL work. Without this, an exception exit produced
-        # ``tool_msgs_scanned: 0`` and 0 findings even when the worker had
-        # already extracted data (XBEN-095 auth-testing, 2026-06-09 — ~24
-        # loops of SQL work lost across a refusal and a step-budget stop).
+        # Pull whatever messages survived the crash into the trace so the chat /
+        # nodes.jsonl still show what the worker did. On a terminal refusal / budget
+        # stop / crash the tuple-unpack never ran, so last_snapshot is None — recover
+        # the richest partial trace the retry helper attached to the exception.
         if last_snapshot is None:
             _recovered = getattr(e, "_swarm_partial_snapshot", None)
             if isinstance(_recovered, dict):
@@ -2100,32 +1665,17 @@ async def _run_skill_agent_impl(
                 m for m in partial_messages
                 if isinstance(m, (AIMessage, ToolMessage))
             ]
-            # Refusal-time flag salvage. The Codex API can refuse
-            # mid-run after the worker has already executed a few
-            # tool calls — and one of those ToolMessage responses
-            # may contain a captured ``flag{...}`` string. Without
-            # this scan, the refusal branch wipes ``findings = []``
-            # and the planner never learns the worker actually
-            # won. Concrete example: XBEN-006-24 run on
-            # 2026-05-09, where ``owasp-input-validation`` extracted
-            # ``flag{582d82bb-...}`` at iteration 5 and got refused
-            # at iteration 6, dropping the win.
-            #
-            # Lazy import so the ``src.edges.flag_match`` module is only
-            # loaded on the refusal path (it is also imported at routing
-            # time, but defensive imports here keep startup costs
-            # tied to actual usage).
+            # Refusal-time flag salvage: Codex can refuse mid-run after the worker
+            # already executed tool calls, one of whose responses may hold a captured
+            # flag{...}. Without this the refusal branch wipes findings and the planner
+            # never learns the worker won (XBEN-006-24, 2026-05-09). Lazy import.
             findings = []
             try:
                 from src.edges.flag_match import extract_flags
 
-                # Stringify partial messages inline. The old code used a
-                # private ``_stringify_messages`` helper from ``src.flag``;
-                # that helper was deleted in the 2026-05 refactor that
-                # replaced state scanning with explicit ``submit_flag``.
-                # Salvage still legitimately scans the partial trace of a
-                # refused worker, so the stringifier lives here now —
-                # narrower scope, no public API surface for state scans.
+                # Stringify partial messages inline. The old src.flag helper was
+                # deleted in the 2026-05 refactor; salvage still scans a refused
+                # worker's partial trace, so the stringifier lives here now.
                 parts: list[str] = []
                 for m in partial_messages:
                     c = getattr(m, "content", None)
@@ -2139,9 +1689,8 @@ async def _run_skill_agent_impl(
                 flag_hits = extract_flags(haystack)
                 if flag_hits:
                     flag_value = flag_hits[0]
-                    # Pull a short evidence excerpt around the
-                    # match so a human reading the report can
-                    # eyeball the request that produced it.
+                    # Short evidence excerpt around the match so a human can eyeball
+                    # the request that produced it.
                     idx = haystack.find(flag_value)
                     excerpt_start = max(0, idx - 240)
                     excerpt_end = min(
@@ -2178,8 +1727,7 @@ async def _run_skill_agent_impl(
                         config.agent_id, flag_value[:80],
                     )
             except Exception as salv_err:  # noqa: BLE001
-                # Salvage must never make the refusal path worse;
-                # log and fall through with empty findings.
+                # Salvage must never make the refusal path worse; log and fall through.
                 node.log.warning(
                     "[%s] refusal-path flag salvage failed: %s: %s",
                     config.agent_id,
@@ -2187,16 +1735,10 @@ async def _run_skill_agent_impl(
                     str(salv_err)[:160],
                 )
 
-            # Refusal-path PRIMITIVE salvage. If no flag was recovered,
-            # the worker may still have PROVEN a non-flag capability (a
-            # SQL extraction, command output, an /etc/passwd read) in the
-            # tool output the API refused on — refusals land on exactly
-            # that high-value output more often than not. Mint a HIGH
-            # primitive finding so the planner's
-            # ``_unconverted_primitive_directive`` can drive it to the
-            # flag on a later turn, instead of the proof evaporating with
-            # the refusal. Scans received tool output only (never the
-            # worker's own payload) with a negation guard; never raises.
+            # Refusal-path PRIMITIVE salvage: if no flag, the worker may still have
+            # PROVEN a non-flag capability in the refused output. Mint a HIGH primitive
+            # finding so the planner can drive it to the flag later. Scans received
+            # tool output only, negation-guarded; never raises.
             salvaged_primitive = False
             if not findings:
                 try:
@@ -2248,10 +1790,8 @@ async def _run_skill_agent_impl(
                 methodology=config.methodology,
                 config_name=config.config_name,
                 findings=findings,
-                # If we salvaged a flag, treat the worker as
-                # completed for planner-loop accounting — its
-                # contribution was real, even though the API
-                # rejected the next iteration.
+                # If we salvaged a flag, treat the worker as completed for planner
+                # accounting — its contribution was real despite the API rejection.
                 completed=bool(findings),
                 error="model refused" if not findings else None,
             )
@@ -2259,20 +1799,11 @@ async def _run_skill_agent_impl(
             "recursion limit" in str(e).lower()
             or type(e).__name__ == "GraphRecursionError"
         ):
-            # ── Step-budget stop (NOT a crash) ──────────────────────
-            # The worker exhausted its LangGraph ``recursion_limit``
-            # (``config.max_iterations`` real rounds, converted to super-steps
-            # where ``call_config`` is built). The model is still perfectly
-            # reachable — it just ran out of turns. So we do NOT use the
-            # post-crash salvage guesser here (that exists for the case
-            # the LLM channel is dead — a refusal). Instead:
-            #   1. recover the ``**FINDING:**`` blocks the worker already
-            #      wrote before the wall (the success path would have
-            #      parsed these; the old crash path threw them away), and
-            #   2. make ONE forced wrap-up call asking the worker to stop
-            #      and summarize its own work + emit any not-yet-written
-            #      findings.
-            # See src/nodes/base/prompt_builder.py for the rationale.
+            # ── Step-budget stop (NOT a crash) ──
+            # The worker exhausted its recursion_limit; the model is still reachable,
+            # it just ran out of turns. So no post-crash salvage guesser. Instead:
+            # recover the FINDING blocks already written, then make ONE forced wrap-up
+            # call. See src/nodes/base/prompt_builder.py.
             node.log.warning(
                 "[%s] reached its step budget (%s) — forcing a graceful "
                 "wrap-up instead of discarding the run.",
@@ -2292,8 +1823,8 @@ async def _run_skill_agent_impl(
                 _extract_findings([wrapup_msg], config.agent_id)
                 if wrapup_msg else []
             )
-            # Dedup by (title, url) — the worker often re-emits in the
-            # wrap-up a finding it had already written in the trace.
+            # Dedup by (title, url) — the worker often re-emits in the wrap-up a
+            # finding it already wrote in the trace.
             findings = []
             _seen_keys: set = set()
             for f in own_findings + wrapup_findings:
@@ -2330,25 +1861,18 @@ async def _run_skill_agent_impl(
                 methodology=config.methodology,
                 config_name=config.config_name,
                 findings=findings,
-                # Informative, but NOT "model refused" — so the planner's
-                # refusal/repetition logic does not mis-handle it.
+                # Informative but NOT "model refused", so the planner's refusal/
+                # repetition logic doesn't mis-handle it. A budget stop is a real
+                # completed pass — count it as a turn.
                 error="stopped at step budget",
-                # A budget stop is a real, completed pass: count it as a
-                # turn so a worker that ran out of room is not mistaken
-                # for a no-op.
                 completed=True,
             )
         else:
             node.log.error(f"Agent {config.agent_id} failed: {e}")
-            # Genuine crash — not a refusal, not a step-budget stop (e.g.
-            # a tool blew up, a transport error, an unexpected exception).
-            # Here the trace may hold impact the worker never formalized,
-            # so we fall back to the post-crash salvage guesser as a last
-            # resort. See src/refusals/salvage.py for the rationale and
-            # the XBEN-006-24 incident that motivated it. The salvage call
-            # is bounded (one sub-LLM call, ~9 KB prompt) and silently
-            # returns None on failure, so this never makes the crash path
-            # worse.
+            # Genuine crash — not a refusal or budget stop (tool blew up, transport
+            # error, unexpected exception). The trace may hold impact the worker never
+            # formalized, so fall back to the post-crash salvage guesser (one bounded
+            # sub-LLM call, returns None on failure). See src/refusals/salvage.py.
             salvaged = await try_salvage(
                 config=config,
                 partial_messages=partial_messages,
@@ -2384,29 +1908,22 @@ async def _run_skill_agent_impl(
                 config_name=config.config_name,
                 findings=findings,
                 error=str(e),
-                # A salvaged finding lets the planner act, so we
-                # report completed=True for that case so the
-                # repetition-loop detector counts it as a real turn.
+                # A salvaged finding lets the planner act, so completed=True so the
+                # repetition detector counts it as a real turn.
                 completed=bool(salvaged),
             )
 
-    # Persist the full trace to disk for forensics. The planner will
-    # never see this file directly — it's the per-worker forensic
-    # artefact (and a fallback the salvage path can re-read). The
-    # summarizer node consumes the in-memory ``trace`` we hand back
-    # via ``pending_summary_inputs`` below, so the disk path is
-    # primarily for human debugging after the run.
+    # Persist the full trace to disk for forensics — the planner never reads it
+    # directly; the summarizer consumes the in-memory trace via pending_summary_inputs.
+    # Primarily for human debugging after the run.
     trace_path = _persist_worker_trace(
         trace=trace,
         run_id=run_id,
         agent_id=config.agent_id,
     )
 
-    # Resolve the dispatch reason from state — set by the planner
-    # via ``pending_dispatch[i]["dispatch_reason"]`` and forwarded
-    # through the routing edge. Empty for cold runs (initialize →
-    # recon, before the planner has spoken) and that's fine — the
-    # summarizer prompt handles missing reason gracefully.
+    # Resolve the dispatch reason from state (set by the planner, forwarded through
+    # the routing edge). Empty for cold runs — the summarizer handles that gracefully.
     dispatch_reason = (
         state.get("dispatch_reason")
         or state.get("dispatch_focus")
@@ -2435,14 +1952,10 @@ async def _run_skill_agent_impl(
         except Exception:  # noqa: BLE001
             pass
 
-    # The worker's effective system prompt (after the preventive vocab
-    # filter that ``astream_with_refusal_retry`` always applies). We
-    # propagate it into ``summary_input`` so the summariser node can
-    # replay it byte-identically as Pattern B's prefix and get a
-    # prompt-cache hit. ``filter_text`` is a deterministic regex
-    # substitution — re-running it here yields the same bytes the
-    # retry helper sent on the wire. Lazy import to avoid a hard
-    # dependency cycle through ``src.refusals`` at module load.
+    # The worker's effective system prompt (after the preventive vocab filter the
+    # retry helper always applies). Propagated into summary_input so the summariser
+    # replays it byte-identically for a prompt-cache hit. filter_text is deterministic.
+    # Lazy import to avoid a cycle through src.refusals at load.
     from src.refusals.vocabulary import (
         filter_messages as _filter_messages,
         filter_text as _filter_text,
@@ -2450,11 +1963,9 @@ async def _run_skill_agent_impl(
     worker_system_prompt_used, _ = _filter_text(system_msg)
     worker_seed_msgs_used, _ = _filter_messages(seed_msgs)
 
-    # Reconstruct the exact worker conversation prefix for the summarizer:
-    # filtered seed HumanMessage(s) + the worker's AI/Tool trace. Prefer the
-    # full LangGraph snapshot because it also includes middleware-injected
-    # HumanMessage notes. Append any synthetic wrap-up/salvage messages we
-    # added after the snapshot so the report still sees them.
+    # Reconstruct the exact worker conversation prefix for the summarizer: filtered
+    # seed message(s) + the AI/Tool trace. Prefer the full snapshot (it includes
+    # middleware-injected notes); append synthetic wrap-up/salvage messages added after.
     snapshot_messages = []
     if isinstance(last_snapshot, dict):
         snapshot_messages = [
@@ -2474,12 +1985,9 @@ async def _run_skill_agent_impl(
             if isinstance(m, BaseMessage)
         ]
 
-    # The summary input that the SummarizerNode will consume. Each
-    # parallel worker writes a singleton list; the
-    # ``_summary_inputs_reducer`` accumulates them so the
-    # SummarizerNode (the synchronization point after fan-out) sees
-    # one entry per worker. See ``src/state.py`` for the reducer
-    # and ``src/nodes/summarizer.py`` for the consumer.
+    # The summary input the SummarizerNode consumes. Each parallel worker writes a
+    # singleton list; _summary_inputs_reducer accumulates them so the summarizer (the
+    # fan-out sync point) sees one entry per worker.
     summary_input: dict = {
         "agent_id": config.agent_id,
         "config_name": config.config_name,
@@ -2495,62 +2003,33 @@ async def _run_skill_agent_impl(
         "iteration_count": _count_worker_iterations(trace),
         "target_url": target_url,
         "tool_attempts": tool_attempts,
-        # Keep the summarizer request shape cache-compatible with the worker.
-        # Codex's prompt cache includes tool schemas, so replaying the same
-        # textual prefix with tools removed misses the cache.
+        # Keep the summarizer request cache-compatible with the worker: Codex's
+        # prompt cache includes tool schemas, so replaying with tools removed misses it.
         "summary_tools": list(_run_tools),
-        # The exact system prompt the worker's LLM saw — fed to the
-        # summariser so its call shares the worker's cached prefix.
+        # The exact system prompt the worker's LLM saw — so the summariser shares
+        # the worker's cached prefix.
         "worker_system_prompt": worker_system_prompt_used,
     }
     if worker_last_tier == "fallback" and _fallback_model:
         summary_input["summary_model"] = _fallback_model
         summary_input["summary_reasoning_effort"] = _fallback_effort or "low"
 
-    # ── Success-path flag auto-verification ─────────────────────
-    # In benchmark mode (``expected_flag`` set), scan the worker's
-    # tool messages for ``flag{...}`` substrings and strict-equal
-    # them against ``expected_flag``. On a match, surface the
-    # captured value via ``state.captured_flag`` (consumed by
-    # ``route_after_summarizer`` to terminate the graph) AND push
-    # it onto ``submission_attempts`` (consumed by ``xbow_runner``
-    # as the verdict source of truth).
-    #
-    # Why this exists: prior to 2026-05-25 the only termination
-    # path was the planner explicitly emitting ``submit_flag`` with
-    # a flag-shaped string. The summarizer's digest LLM was
-    # observed (XBEN-006-24 on 2026-05-25, see tests/FAILURES.md)
-    # to rewrite the "Server responses" prose and DROP literal
-    # ``flag{...}`` strings — so the planner never saw the
-    # capture, never submitted, run timed out.
-    #
-    # Why this is SAFE despite the 2026-05-24 removal of the old
-    # regex-only auto-terminate: the strict-equality gate
-    # against ``expected_flag`` is itself the false-positive
-    # filter. Swagger ``flag{example}`` examples, README
-    # placeholders, and the agent's own ``python3 -c "flag=…"``
-    # script literals all FAIL strict equality with the
-    # deterministic ``FLAG{sha256(BENCHMARK_UPPER)}`` value, so
-    # they never set this field. Only the actual served flag does.
-    #
-    # In real-pentest mode (``expected_flag`` empty), this block
-    # is a no-op — capture remains planner-driven.
+    # ── Success-path flag auto-verification ──
+    # In benchmark mode, scan the worker's tool messages for flag{...} and strict-
+    # equal them against expected_flag. On a match, surface via state.captured_flag
+    # (terminates the graph) and push onto submission_attempts (xbow_runner's verdict).
+    # Strict equality is the false-positive filter; in real-pentest mode this is a no-op.
     captured_flag_value: str | None = None
     expected_flag = (state or {}).get("expected_flag") or ""
-    # Full candidate set the matcher accepts — see
-    # :func:`src.edges.flag_match.flags_match` for why benchmarks can
-    # have multiple legitimate expected values. Falls back to the
-    # single ``expected_flag`` when the runner didn't populate the
-    # candidates tuple (back-compat).
+    # Full candidate set the matcher accepts — benchmarks can have multiple legitimate
+    # values. Falls back to the single expected_flag (back-compat).
     expected_flag_candidates: tuple[str, ...] = tuple(
         (state or {}).get("expected_flag_candidates") or ()
     )
     if not expected_flag_candidates and expected_flag:
         expected_flag_candidates = (expected_flag,)
-    # Counters that always end up in the auto-verify summary event,
-    # so post-mortem can see "we scanned N tool messages, looked at
-    # K candidate flag-shaped strings, matched 0" without re-reading
-    # the entire worker trace.
+    # Counters that always end up in the auto-verify event, so post-mortem can see
+    # "scanned N messages, K candidates, matched 0" without re-reading the trace.
     tool_msgs_scanned = 0
     candidates_seen = 0
     if expected_flag_candidates and last_snapshot:
@@ -2564,8 +2043,7 @@ async def _run_skill_agent_impl(
             if isinstance(c, str):
                 content_str = c
             elif isinstance(c, list):
-                # ToolMessage content can be a list of content blocks
-                # under certain provider shapes — flatten to text.
+                # ToolMessage content can be a list of content blocks — flatten to text.
                 content_str = "\n".join(
                     str((block or {}).get("text") or block)
                     if isinstance(block, dict) else str(block)
@@ -2590,15 +2068,10 @@ async def _run_skill_agent_impl(
             if captured_flag_value:
                 break
 
-    # Structured record of the scan — fires whether or not we matched,
-    # so the post-mortem can answer "did the scan even run?" with a
-    # single ``jq`` query rather than reconstructing it from logger
-    # output that may have been dropped by compact mode. The 2026-05-25
-    # XBEN-006-24 incident is the canonical case: three workers had the
-    # flag in tool output but no on-disk artefact recorded whether the
-    # scan matched, so it was unclear whether the bug was detection
-    # (scan didn't fire / didn't match) or routing (matched but graph
-    # didn't terminate from inside a fan-out).
+    # Structured record of the scan — fires whether or not we matched, so post-mortem
+    # can answer "did the scan run?" with one jq query. The 2026-05-25 XBEN-006-24
+    # incident: workers had the flag in output but no artefact recorded whether the
+    # scan matched, so detection vs routing was ambiguous.
     if expected_flag:
         try:
             from src.observability.writers import append_event
@@ -2619,12 +2092,9 @@ async def _run_skill_agent_impl(
         except Exception:  # noqa: BLE001
             pass
 
-    # Build the expensive worker digest while the worker's prompt prefix is
-    # still hot in the provider cache. The SummarizerNode remains the fan-in
-    # merger, but it can now reuse this precomputed report instead of waiting
-    # until the slowest sibling reaches the barrier and then issuing all
-    # digest calls. Skip LLM digesting on capture/cancel paths so a solved
-    # benchmark is not delayed by a report the planner will never need.
+    # Build the worker digest now, while the prompt prefix is still hot in the provider
+    # cache, instead of waiting for the slowest sibling at the fan-in barrier. Skip
+    # LLM digesting on capture/cancel paths so a solved benchmark isn't delayed.
     if captured_flag_value is not None:
         summary_input["skip_digest_reason"] = "flag captured"
         summary_input["precomputed_report"] = AIMessage(
@@ -2744,19 +2214,18 @@ async def _run_skill_agent_impl(
             )
 
     update: dict[str, Any] = {
-        # NOTE: no ``"messages": trace`` — that was the cause of the
-        # global-prompt explosion. The full trace stays on disk and
-        # in ``pending_summary_inputs[*].trace`` until the
-        # SummarizerNode replaces it with one ``AIMessage`` digest.
+        # NOTE: no "messages": trace — that caused the global-prompt explosion. The
+        # trace stays on disk and in pending_summary_inputs[*].trace until the
+        # SummarizerNode replaces it with one AIMessage digest.
         "pending_summary_inputs": [summary_input],
         "agent_results": [agent_result],
         "findings": findings,
         "active_agents": [config.agent_id],
     }
     if verdict_signals:
-        # The worker's closing self-assessment — the deciding-probe
-        # feedback that lets the synthesis pass recalibrate belief (confirm
-        # crosses COMMIT, refute drives toward refuted). See _extract_verdicts.
+        # The worker's closing self-assessment — deciding-probe feedback that lets the
+        # synthesis pass recalibrate belief (confirm crosses COMMIT, refute drives down).
+        # See _extract_verdicts.
         update["signals"] = verdict_signals
         node.log.info(
             "[%s] verdict: %s",
@@ -2768,10 +2237,8 @@ async def _run_skill_agent_impl(
         )
     if tool_attempts:
         update["tool_attempts"] = tool_attempts
-    # Continuity: append this dispatch's compacted record to the skill's
-    # investigation thread so the NEXT dispatch continues instead of
-    # re-deriving (commands kept, outputs shrunk, oldest runs trimmed to a
-    # bounded budget). See _build_investigation_thread.
+    # Continuity: append this dispatch's compacted record to the skill's investigation
+    # thread so the NEXT dispatch continues instead of re-deriving. See _build_investigation_thread.
     try:
         update["investigation_threads"] = _build_investigation_thread(
             state, config.config_name, messages, verdict_signals,
@@ -2781,21 +2248,15 @@ async def _run_skill_agent_impl(
             "[%s] investigation-thread build failed (%s) — skipping",
             config.agent_id, e,
         )
-    # Sticky-fallback bookkeeping: if this dispatch used the fallback model
-    # (rescued by it, exhausted it, or was sent straight to it), record the
+    # Sticky-fallback bookkeeping: if this dispatch used the fallback model, record the
     # config so its NEXT dispatch this run skips the doomed primary tier.
     if start_on_fallback or worker_last_tier == "fallback":
         update["fallback_configs"] = [config.config_name]
     if captured_flag_value is not None:
         update["captured_flag"] = captured_flag_value
-        # Mirror onto submission_attempts so xbow_runner.run_one's
-        # existing verdict path (which reads submission_attempts[-1])
-        # sees the capture without any change to that consumer. The
-        # graph terminates via the normal route_after_summarizer →
-        # END path: this update's captured_flag lands in state via
-        # the reducer; sibling workers exit fast via the FlagWatcher
-        # callback's sibling-cancel path (see flag_watcher module
-        # docstring); fan-in completes; summarizer fires;
-        # route_after_summarizer reads captured_flag → END.
+        # Mirror onto submission_attempts so xbow_runner's verdict path (reads [-1])
+        # sees the capture unchanged. The graph terminates via the normal route_after_
+        # summarizer → END path: captured_flag lands via the reducer, siblings exit fast,
+        # fan-in completes, summarizer fires, routing reads captured_flag → END.
         update["submission_attempts"] = [captured_flag_value]
     return update

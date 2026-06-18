@@ -99,7 +99,7 @@ def test_prompting_techniques_gate(monkeypatch):
         EXHAUSTION_DISCIPLINE,
         METHODOLOGY_RULES,
         TRANSFORMATION_HYPOTHESIS,
-        get_executor_prompt,
+        build_prompt,
     )
     standards = (
         DIVERSITY_RULES, TRANSFORMATION_HYPOTHESIS,
@@ -107,12 +107,12 @@ def test_prompting_techniques_gate(monkeypatch):
     )
 
     monkeypatch.setattr(config.capability, "disable_prompting_techniques", False)
-    full = get_executor_prompt()
+    full = build_prompt("executor")
     for block in standards:
         assert block in full
 
     monkeypatch.setattr(config.capability, "disable_prompting_techniques", True)
-    ablated = get_executor_prompt()
+    ablated = build_prompt("executor")
     for block in standards:
         assert block not in ablated
     # The basic methodology/tactical structure must remain — we drop only the

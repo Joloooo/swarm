@@ -40,24 +40,6 @@ def build_prompt(phase: str = "executor", stealth_level: int = 0) -> str:
     return "\n\n".join(parts)
 
 
-# Public names kept as thin wrappers — imported by base/__init__.py, skill_runner,
-# and tests. get_base_prompt is a deprecated alias for the executor prompt.
-def get_universal_prompt(stealth_level: int = 0) -> str:
-    return build_prompt("universal", stealth_level)
-
-
-def get_recon_prompt(stealth_level: int = 0) -> str:
-    return build_prompt("recon", stealth_level)
-
-
-def get_executor_prompt(stealth_level: int = 0) -> str:
-    return build_prompt("executor", stealth_level)
-
-
-def get_base_prompt(stealth_level: int = 0) -> str:
-    return build_prompt("executor", stealth_level)
-
-
 def _build_system_message(
     config: "AgentConfig",  # noqa: F821 — forward reference; defined in skill_runner
     target_url: str,
@@ -125,6 +107,7 @@ def _build_system_message(
     )
 
     return "\n\n".join(parts)
+
 
 
 # ── Universal blocks (every worker: recon, executor, planner) ─────────────
@@ -273,7 +256,7 @@ WAF/IDS detection has been triggered. Adjust your behavior:
 """
 
 
-# ── Executor methodology blocks (the get_executor_prompt tail) ────────────
+# ── Executor methodology blocks (the executor tail of build_prompt) ───────
 METHODOLOGY_RULES = """\
 ## Methodology
 - Always enumerate before exploiting. Understand the input surface first.
@@ -657,22 +640,3 @@ RCE, SSRF, command injection, deserialization). Recon's job for those classes is
 — "this form has an ``id`` parameter; dispatch the sqli skill" — not to file the finding. The
 executor agent confirms the mechanism end-to-end.
 """
-
-
-# ── Back-compat (still imported by name elsewhere) ────────────────────────
-# Legacy monolithic bundle, kept for the planner's vocabulary-filter pass and old tests.
-PENTESTING_RULES = "\n\n".join([
-    SCOPE_RULES,
-    METHODOLOGY_RULES,
-    DEMONSTRATED_STANDARD,
-    EXHAUSTION_DISCIPLINE,
-    DIVERSITY_RULES,
-    COMMON_CHECKLIST_DISCIPLINE,
-    TRANSFORMATION_HYPOTHESIS,
-    BEHAVIOR_MODEL_RULES,
-    SEVERITY_RULES,
-    TOOL_USAGE_RULES,
-])
-
-# Legacy alias: schema + category guidance concatenated.
-FINDING_FORMAT = FINDING_SCHEMA + "\n" + FINDING_CATEGORY_GUIDANCE

@@ -273,15 +273,116 @@ def render(summary: dict) -> str:
     return "\n".join(lines)
 
 
+def _dur(s) -> str:
+    """``8m 14s`` (right-aligned minutes), or ``   ?   `` when unknown."""
+    if s is None:
+        return "   ?   "
+    s = int(round(s))
+    return f"{s // 60:>2d}m {s % 60:02d}s"
+
+
+def _hms(s) -> str:
+    """``30h 54m`` — hours + minutes, for the campaign wall total."""
+    s = int(round(s))
+    return f"{s // 3600}h {(s % 3600) // 60:02d}m"
+
+
+def _big(t: int) -> str:
+    """Compact token magnitude: ``2.15M`` ≥1M, ``829k`` ≥1k, else the int."""
+    if t >= 1_000_000:
+        return f"{t / 1e6:.2f}M"
+    if t >= 1_000:
+        return f"{t / 1e3:.0f}k"
+    return str(t)
+
+
+def render_token_timing(campaign: Path, summary: dict) -> str:
+    """Render the ``TOKENS & TIMING`` + ``PER-BENCHMARK`` sections.
+
+    Reads each per-benchmark ``results/<id>.json`` for its ``duration_s`` and
+    ``tokens`` (``{"in","out","total","calls"}``, written by the xbow runner).
+    Token total is ``in + out`` only — cached/reasoning tokens are subsets of
+    those, so they are never added separately. Layout matches the golden
+    ``summary.txt`` byte-for-byte.
+
+    Robust to incomplete data: a result with no ``duration_s`` shows ``?`` and
+    is excluded from the average-duration mean; a result with no ``tokens`` is
+    treated as 0 and still listed. With zero token data anywhere the token
+    lines read 0 rather than erroring.
+    """
+    results = collect(campaign)
+    by_bench = summary.get("by_benchmark", {})
+
+    rows: list[dict] = []
+    for bid in sorted(results):
+        row = results[bid] or {}
+        tok = row.get("tokens") or {}
+        total = tok.get("total")
+        if total is None:
+            tin = tok.get("in") or 0
+            tout = tok.get("out") or 0
+            total = tin + tout
+        else:
+            tin = tok.get("in") or 0
+            tout = tok.get("out") or 0
+        dur = row.get("duration_s")
+        if not isinstance(dur, (int, float)):
+            dur = None
+        # Verdict: ✓ when the flag was captured, else ✗.
+        passed = bool(row.get("flag_found"))
+        rows.append({
+            "bid": bid, "in": tin, "out": tout, "total": total,
+            "duration_s": dur, "pass": passed,
+        })
+
+    n = len(rows)
+    total_tokens = sum(r["total"] for r in rows)
+    total_in = sum(r["in"] for r in rows)
+    total_out = sum(r["out"] for r in rows)
+    avg_tokens = round(total_tokens / n) if n else 0
+    durs = [r["duration_s"] for r in rows if r["duration_s"] is not None]
+    avg_duration = sum(durs) / len(durs) if durs else None
+    median_duration = sorted(durs)[len(durs) // 2] if durs else None
+    total_wall = sum(durs) if durs else 0
+
+    W = 70
+    line = "─" * W
+    out: list[str] = [
+        line,
+        " TOKENS & TIMING  (tracked LLM calls; web-search tokens not metered)",
+        line,
+        f"   total tokens       {total_tokens:>13,}   "
+        f"(in {_big(total_in)} · out {_big(total_out)})",
+        f"   avg tokens / bench {avg_tokens:>13,}   over {n} benchmarks",
+        f"   avg duration       {_dur(avg_duration).strip():>13}   "
+        f"(median {_dur(median_duration).strip()})",
+        f"   total agent wall   {_hms(total_wall):>13}   "
+        f"({int(round(total_wall)):,} s active, hibernation excluded)",
+        "",
+        " PER-BENCHMARK  (id · verdict · active duration · tokens in+out)",
+    ]
+    for r in rows:
+        v = "✓" if r["pass"] else "✗"
+        out.append(
+            f"   {r['bid']:8} {v}  {_dur(r['duration_s'])}   {_big(r['total']):>7}"
+        )
+    out.append(line)
+    return "\n".join(out)
+
+
 def write_summary(campaign: Path, summary: dict) -> Path:
     """Persist the human-readable ``summary.txt`` into the campaign dir.
 
     The machine-readable ``summary.json`` is no longer written — nothing read
     it, and ``summary.txt`` is the kept thesis artifact. Returns the txt path.
+
+    Appends the ``TOKENS & TIMING`` + ``PER-BENCHMARK`` sections (durations and
+    per-bench token spend, summed across the campaign) below the verdict table.
     """
     campaign.mkdir(parents=True, exist_ok=True)
     txt_path = campaign / "summary.txt"
-    txt_path.write_text(render(summary) + "\n", encoding="utf-8")
+    body = render(summary) + "\n\n" + render_token_timing(campaign, summary)
+    txt_path.write_text(body + "\n", encoding="utf-8")
     return txt_path
 
 

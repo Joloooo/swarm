@@ -45,19 +45,6 @@ _CACHE: dict[str, AgentConfig] = {}
 # system prompt.
 _DESCRIPTIONS: dict[str, str] = {}
 
-# Skills with no metadata.agent_id are reference-only (e.g. the nmap
-# skill — a tool-selection cheatsheet, not an attack vector). They get
-# loaded into _CACHE so other skills can pull them, but stay out of the
-# planner's dispatch menu.
-_DISPATCHABLE: set[str] = set()
-
-# Parallel cache: config_name -> normalized routing-signal specs declared
-# in that skill's frontmatter (``metadata.routing_signals``). Fed to the
-# hypothesis synthesis pass so each skill owns the observation patterns
-# that route TO it, instead of a centralized hardcoded table. See
-# :func:`list_skill_signal_specs` and ``src/llm/hypotheses.py``.
-_ROUTING_SIGNALS: dict[str, list[dict]] = {}
-
 _FILE_INDEX_BUILT = False
 
 
@@ -86,60 +73,6 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
     if not isinstance(meta, dict):
         return {}, text
     return meta, body.lstrip("\n")
-
-
-def _normalize_routing_signals(skill_name: str, md: dict) -> list[dict]:
-    """Parse ``metadata.routing_signals`` into normalized spec dicts.
-
-    Frontmatter shape (each entry declares ONE routing rule):
-
-        routing_signals:
-          - any: ["{{", "}}", "{%", "${"]        # one group; any marker hits
-            weight: 0.7
-          - all:                                   # co-occurrence; each group
-              - ["{{", "}}", "{%", "${"]           #   must have a marker present
-              - ["reject", "blocked", "filtered"]
-            weight: 1.4
-          - any: ["jinja", "flask", "twig"]
-            vuln_class: ssti                        # defaults to the skill name
-            weight: 0.8
-
-    Returns ``[{name, vuln_class, weight, all_groups}, ...]`` where
-    ``all_groups`` is a list of marker groups (lower-cased). Malformed
-    entries are skipped, never raised — one bad entry must not break load.
-    """
-    raw = md.get("routing_signals")
-    if not isinstance(raw, list):
-        return []
-    default_class = skill_name.strip().lower()
-    out: list[dict] = []
-    for i, entry in enumerate(raw):
-        if not isinstance(entry, dict):
-            continue
-        if isinstance(entry.get("all"), list):
-            groups_raw = [g for g in entry["all"] if isinstance(g, list)]
-        elif isinstance(entry.get("any"), list):
-            groups_raw = [entry["any"]]
-        else:
-            continue
-        groups = [
-            [str(m).strip().lower() for m in g if str(m).strip()]
-            for g in groups_raw
-        ]
-        groups = [g for g in groups if g]
-        if not groups:
-            continue
-        try:
-            weight = float(entry.get("weight", 0.7))
-        except (TypeError, ValueError):
-            weight = 0.7
-        out.append({
-            "name": f"{default_class}-sig{i}",
-            "vuln_class": str(entry.get("vuln_class") or default_class).strip().lower(),
-            "weight": weight,
-            "all_groups": groups,
-        })
-    return out
 
 
 def generic_executor_config(config_name: str = "generic") -> AgentConfig:
@@ -194,9 +127,10 @@ def _build_config(skill_name: str, meta: dict, body: str) -> tuple[AgentConfig, 
 def _load_from_disk(name: str) -> AgentConfig | None:
     """Read ``src/skills/<name>/SKILL.md`` and build an AgentConfig.
 
-    Returns None if the directory or SKILL.md doesn't exist. Side
-    effects: populates ``_DESCRIPTIONS`` and ``_DISPATCHABLE`` so the
-    planner-facing helpers reflect this skill on subsequent calls.
+    Returns None if the directory or SKILL.md doesn't exist. Side effect:
+    populates ``_DESCRIPTIONS`` so the planner-facing helpers can show this
+    skill's one-line description. Dispatchability and tools are owned by the
+    nodes, not the frontmatter (see :func:`list_dispatchable_skills`).
     """
     path = SKILLS_DIR / name / "SKILL.md"
     if not path.exists():
@@ -282,22 +216,6 @@ def get_skill_description(name: str) -> str:
     """Return the frontmatter description for any known skill."""
     _build_file_index()
     return _DESCRIPTIONS.get(name, "")
-
-
-def list_skill_signal_specs() -> list[dict]:
-    """Flattened ``metadata.routing_signals`` specs across all skills.
-
-    Each item: ``{name, vuln_class, weight, all_groups}``. Consumed by
-    ``src.llm.hypotheses.routing_rules_from_specs`` to build skill-owned
-    routing rules that supersede the built-in baseline per vuln class, so
-    the observation patterns that route TO a skill live with that skill
-    rather than in a centralized table.
-    """
-    _build_file_index()
-    out: list[dict] = []
-    for name in sorted(_ROUTING_SIGNALS):
-        out.extend(_ROUTING_SIGNALS[name])
-    return out
 
 
 def list_skill_descriptions() -> list[tuple[str, str, bool]]:

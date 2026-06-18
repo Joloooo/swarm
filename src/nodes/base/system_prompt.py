@@ -111,6 +111,16 @@ def _build_system_message(
 
 
 # ── Universal blocks (every worker: recon, executor, planner) ─────────────
+# TIER MAP for this section (shared by every worker — recon, executor, planner).
+# These blocks mix three concerns; nothing here is gated today:
+#   CONTRACT (parser/refusal depends on it — never ablate):
+#       IDENTITY_PREAMBLE; FINDING_SCHEMA; the "reasoning is required" half of NARRATION_RULES
+#   METHODOLOGY (how-to-test — the ablation variable):
+#       TOOL_USAGE_RULES "prefer targeted over broad"; the coaching half of NARRATION_RULES
+#   SAFETY/SCOPE (operational guardrail — keep regardless):
+#       SCOPE_RULES; the DoS + portability lines of TOOL_USAGE_RULES; STEALTH_RULES
+# A later pass can split the two spanning blocks (TOOL_USAGE_RULES, NARRATION_RULES)
+# and gate the methodology parts with the ablation flag.
 # Neutral identity line. Authorization framing ("authorized engagement") empirically
 # RAISES the cyber_policy refusal rate, so we omit it; operational limits live in SCOPE_RULES.
 IDENTITY_PREAMBLE = """\
@@ -257,6 +267,11 @@ WAF/IDS detection has been triggered. Adjust your behavior:
 
 
 # ── Executor methodology blocks (the executor tail of build_prompt) ───────
+# TIER: this entire section is METHODOLOGY — "how to test well", the part the
+# ablation removes. (Exception: VERDICT_SCHEMA's block STRUCTURE is CONTRACT — the
+# planner parses the verdict — while only its per-class bypass ladder is methodology,
+# and that ladder duplicates the one in DEMONSTRATED_STANDARD; a dedup pass would
+# merge the two.) Order below = assembly order in build_prompt's executor tail.
 METHODOLOGY_RULES = """\
 ## Methodology
 - Always enumerate before exploiting. Understand the input surface first.
@@ -583,6 +598,12 @@ chain — rather than re-reporting what is already known.
 
 
 # ── Benchmark + recon blocks ──────────────────────────────────────────────
+# TIER MAP: BENCHMARK_GUIDANCE + BENCHMARK_PROGRESS_FOOTER are CONTRACT — the
+# objective and the "ends when the token appears" scoring rule the harness enforces —
+# in refusal-neutral framing; their "read the token first" nudge is METHODOLOGY.
+# RECON_FINDINGS_HINT is METHODOLOGY (recon flags the surface; the executor confirms
+# the bug). Benchmark blocks are appended last so "the app is the referee" stays the
+# final instruction.
 # Executor + benchmark only. Neutral "puzzle with a referee" framing (the literal FLAG{} wording
 # was the top refusal trigger). Appended last so "submit and read the reply" is the final instruction.
 BENCHMARK_GUIDANCE = """\

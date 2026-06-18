@@ -169,21 +169,16 @@ def _threshold() -> int:
 
 # Injected reminder: restates DIVERSITY_RULES in-loop in neutral vocabulary and
 # says BROADEN, not give up — the only "stop" is conditional on exhausted categories.
-_NUDGE_TEMPLATE = (
-    "[automatic system note — not from the operator] Your last {n} tool "
-    "responses came back byte-for-byte identical. Identical responses "
-    "mean your inputs are carrying SOMETHING the server recognises and "
-    "rejects the same way every time — sending more variants of the same "
-    "idea will keep returning the same response. Stop and broaden: list "
-    "at least 5 different CATEGORIES of variation that could matter for "
-    "this input type (shape/format, case, encoding, character "
-    "substitution, structural splits, boundary values, a different "
-    "transformation stage), and try a few from EACH category in ONE "
-    "batched command — instead of going deeper on the category you are "
-    "already in. If you have genuinely exhausted the categories, switch "
-    "tactic or report what you have established. Do not simply repeat the "
-    "same shape again."
-)
+_NUDGE_TEMPLATE = """\
+[automatic system note — not from the operator] Your last {n} tool responses came back
+byte-for-byte identical. Identical responses mean your inputs are carrying SOMETHING the server
+recognises and rejects the same way every time — sending more variants of the same idea will
+keep returning the same response. Stop and broaden: list at least 5 different CATEGORIES of
+variation that could matter for this input type (shape/format, case, encoding, character
+substitution, structural splits, boundary values, a different transformation stage), and try a
+few from EACH category in ONE batched command — instead of going deeper on the category you are
+already in. If you have genuinely exhausted the categories, switch tactic or report what you
+have established. Do not simply repeat the same shape again."""
 
 
 class NoProgressNudgeMiddleware(AgentMiddleware):
@@ -266,26 +261,42 @@ def _get_messages(state: Any) -> list:
 # rather than discard the run. (Salvage, by contrast, is for a dead/refused LLM.)
 
 
-_WRAPUP_SYSTEM = (
-    "You are a security testing assistant. The trace below is your own "
-    "work on an authorized test target. You have reached the step budget "
-    "for this pass and must stop testing now — do not request any more "
-    "tool calls. Summarize what you did and report any findings you "
-    "confirmed, using the **FINDING:** schema for each one. Be concise "
-    "and accurate: report only what the trace actually shows, and never "
-    "invent impact you did not observe.\n\n"
-    "CRITICAL — do not let a proven capability die with this pass: if your "
-    "tool outputs show you DEMONSTRATED an exploit primitive — code "
-    "execution or template evaluation (e.g. a payload that returned a "
-    "computed value like 49), arbitrary file read, an injection that "
-    "returned database/query data, or a recovered credential or privileged "
-    "session — even if you did NOT finish driving it to the objective, you "
-    "MUST write it as a **FINDING:** with `Severity: high` and a final "
-    "`Primitive: <tag>` line naming the capability (rce / file_read / "
-    "sqli_read / auth_bypass / ssrf). The lead uses that Primitive line to "
-    "keep an executor driving it to the flag; a proven primitive left only "
-    "in your scratch output is a lost result."
-)
+_WRAPUP_SYSTEM = """\
+You are a security testing assistant. The trace below is your own work on an authorized test
+target. You have reached the step budget for this pass and must stop testing now — do not
+request any more tool calls. Summarize what you did and report any findings you confirmed,
+using the **FINDING:** schema for each one. Be concise and accurate: report only what the trace
+actually shows, and never invent impact you did not observe.
+
+CRITICAL — do not let a proven capability die with this pass: if your tool outputs show you
+DEMONSTRATED an exploit primitive — code execution or template evaluation (e.g. a payload that
+returned a computed value like 49), arbitrary file read, an injection that returned
+database/query data, or a recovered credential or privileged session — even if you did NOT
+finish driving it to the objective, you MUST write it as a **FINDING:** with `Severity: high`
+and a final `Primitive: <tag>` line naming the capability (rce / file_read / sqli_read /
+auth_bypass / ssrf). The lead uses that Primitive line to keep an executor driving it to the
+flag; a proven primitive left only in your scratch output is a lost result."""
+
+
+# User message for the wrap-up call ({target}, {tail} filled at call time).
+_WRAPUP_USER = """\
+You reached your step budget and must stop now. Do NOT ask for more tool calls.
+
+Write two things:
+1. Any confirmed finding you have not yet written up — each as a **FINDING:** block (Title /
+   Severity / Category / URL / Evidence / Primitive). Only real, observed results. If a tool
+   output shows you PROVED an exploit primitive (code execution / template evaluation / file
+   read / a data-returning injection / a recovered credential or session) — even if unfinished
+   — it MUST be one of these blocks, `Severity: high`, with a final `Primitive:
+   <rce|file_read|sqli_read|auth_bypass|ssrf>` line.
+2. A short summary for the lead: what you tested, what worked, what looked promising but
+   unfinished, and the single most useful next step.
+
+Target (for context): {target}
+
+## Your work so far (most recent at the bottom)
+
+{tail}"""
 
 
 def _format_tail(messages: list[Any], *, n: int = 16) -> str:
@@ -333,24 +344,8 @@ async def force_wrapup_summary(
 
         llm = get_llm()
         tail = _format_tail(partial_messages)
-        user_prompt = (
-            "You reached your step budget and must stop now. Do NOT ask "
-            "for more tool calls.\n\n"
-            "Write two things:\n"
-            "1. Any confirmed finding you have not yet written up — each as "
-            "a **FINDING:** block (Title / Severity / Category / URL / "
-            "Evidence / Primitive). Only real, observed results. If a tool "
-            "output shows you PROVED an exploit primitive (code execution / "
-            "template evaluation / file read / a data-returning injection / a "
-            "recovered credential or session) — even if unfinished — it MUST "
-            "be one of these blocks, `Severity: high`, with a final "
-            "`Primitive: <rce|file_read|sqli_read|auth_bypass|ssrf>` line.\n"
-            "2. A short summary for the lead: what you tested, what worked, "
-            "what looked promising but unfinished, and the single most "
-            "useful next step.\n\n"
-            f"Target (for context): {target_url or 'unknown'}\n\n"
-            "## Your work so far (most recent at the bottom)\n\n"
-            f"{tail}"
+        user_prompt = _WRAPUP_USER.format(
+            target=target_url or "unknown", tail=tail,
         )
         # Distinct synthetic agent_id so the wrap-up call is visible in
         # llm_calls.jsonl without losing the attribution chain.

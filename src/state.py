@@ -624,6 +624,31 @@ def _recon_done_reducer(existing: bool | None, new: bool | None) -> bool:
     return bool(existing or new)
 
 
+def _waf_detected_reducer(existing: bool | None, new: bool | None) -> bool:
+    """Sticky-True OR for ``waf_detected``.
+
+    The executor fans out into several parallel worker configs in a single
+    superstep (:class:`src.nodes.executor.ExecutorNode`). When two of them spot
+    a WAF/IDS signature in the same step, each returns ``waf_detected=True`` and
+    a plain ``bool`` field raises ``InvalidUpdateError`` ("can receive only one
+    value per step") — this is the crash seen on XBEN-098 in
+    ``full_run_06-17_22h59m``. Collapsing the concurrent writes with OR fixes
+    it: once any worker sees a WAF the run stays WAF-aware. ``None``-safe so the
+    channel's first write doesn't compare against an unset value.
+    """
+    return bool(existing or new)
+
+
+def _stealth_level_reducer(existing: int | None, new: int | None) -> int:
+    """Take the highest ``stealth_level`` across concurrent writes.
+
+    Same fan-out hazard as :func:`_waf_detected_reducer`: parallel executors can
+    each bump the level in one superstep. Highest-wins matches the executor's
+    own ``max(current, recommended)`` intent and is ``None``-safe.
+    """
+    return max(existing or 0, new or 0)
+
+
 class SwarmState:
     """Root state for the SwarmAttacker LangGraph graph.
 
@@ -648,8 +673,10 @@ class SwarmState:
     exhausted_ledger: Annotated[dict, _exhausted_ledger_reducer]
 
     # -- Stealth state (shared across all agents) --
-    waf_detected: bool
-    stealth_level: int  # 0=none, 1=cautious, 2=evasive
+    # Reducers: parallel executors can write both keys in one superstep — a
+    # plain field would raise InvalidUpdateError (see the reducer docstrings).
+    waf_detected: Annotated[bool, _waf_detected_reducer]
+    stealth_level: Annotated[int, _stealth_level_reducer]  # 0=none, 1=cautious, 2=evasive
 
     # -- Planning / routing metadata --
     active_agents: Annotated[list[str], operator.add]
@@ -740,9 +767,9 @@ class SwarmGraphState(TypedDict, total=False):
     # the findings digest being diluted by ~90% negatives.
     exhausted_ledger: Annotated[dict, _exhausted_ledger_reducer]
 
-    # Stealth
-    waf_detected: bool
-    stealth_level: int
+    # Stealth — reduced (concurrent executor writes); see reducer docstrings.
+    waf_detected: Annotated[bool, _waf_detected_reducer]
+    stealth_level: Annotated[int, _stealth_level_reducer]
 
     # Workflow mode
     mode: str  # "analyze" or "full" — controls whether exploit phase runs
@@ -1081,6 +1108,7 @@ class AgentState(TypedDict, total=False):
     # Agent's findings (written back to parent via reducer)
     findings: Annotated[list[Finding], _merge_findings]
 
-    # Stealth awareness (read from parent)
-    waf_detected: bool
-    stealth_level: int
+    # Stealth awareness (read from parent) — reduced for the same concurrent-
+    # write safety as the parent state (see reducer docstrings).
+    waf_detected: Annotated[bool, _waf_detected_reducer]
+    stealth_level: Annotated[int, _stealth_level_reducer]

@@ -69,42 +69,28 @@ def _norm_class(token: str) -> str:
     return _CLASS_ALIASES.get(t, t)
 
 
-# Skills whose lane is NOT "the class with my name": discovery/triage/generic
-# workers own nothing (may only redirect, never refute); multi-class skills own
-# the listed set. Any skill not here owns exactly its own class (config_name).
-_SKILL_OWNED_CLASSES: dict[str, set[str]] = {
-    # discovery / triage / generic — own nothing, may only redirect
-    "exploration": set(),
-    "bug-identification": set(),
-    "recon": set(),
-    "recon-ports": set(),
-    "fuzzing": set(),
-    "request-builder": set(),
-    "basic-exploitation": set(),
-    "chain-ssrf-to-rce": set(),
-    # multi-class specialist
-    "input-validation": {"lfi", "rce", "crlf", "xxe", "insecure-file-uploads"},
-}
-
-
-def _worker_owns_class(config_name: str, vuln_class: str) -> bool:
+def _worker_owns_class(
+    config_name: str, vuln_class: str, owned: frozenset[str] | None
+) -> bool:
     # Whether the dispatched skill is the specialist for vuln_class — i.e.
-    # allowed to issue a refuting verdict on it.
-    skill_raw = (config_name or "").strip().lower()
-    skill = _norm_class(skill_raw)
+    # allowed to issue a refuting verdict on it. ``owned`` is the skill's
+    # owned-class set, stamped onto the config by the dispatching node from its
+    # SKILLS map: None = owns only its own name-class; a (possibly empty) set =
+    # exactly those classes (discovery/triage workers pass frozenset() = none).
+    skill = _norm_class(config_name)
     cls = _norm_class(vuln_class)
     # No class named (→ own skill) or verdict on own class → its call.
     if not cls or cls == skill:
         return True
-    owned = _SKILL_OWNED_CLASSES.get(skill_raw)
-    if owned is not None:
-        return cls in {_norm_class(c) for c in owned}
-    # Unmapped plain specialist: owns only its own class (handled above).
-    return False
+    if owned is None:
+        # Plain specialist: owns only its own class (handled above).
+        return False
+    return cls in {_norm_class(c) for c in owned}
 
 
 def _extract_verdicts(
     messages: list, agent_id: str, config_name: str,
+    owned_classes: frozenset[str] | None = None,
 ) -> list[Signal]:
     # Parse the worker's closing VERDICT block into signed Signal atoms. Returns
     # at most one verdict signal (+ optional redirect routing signal); the LAST
@@ -142,7 +128,8 @@ def _extract_verdicts(
     # Specialist-refutation gate: a cross-lane refuted becomes a zero-weight
     # observation so it can't bury a class this worker doesn't own.
     cross_lane_refute = (
-        outcome == "refuted" and not _worker_owns_class(config_name, vuln_class)
+        outcome == "refuted"
+        and not _worker_owns_class(config_name, vuln_class, owned_classes)
     )
 
     base, kind = _VERDICT_OUTCOME[outcome]

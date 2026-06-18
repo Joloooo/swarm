@@ -166,59 +166,29 @@ def generic_executor_config(config_name: str = "generic") -> AgentConfig:
     )
 
 
-def _build_config(skill_name: str, meta: dict, body: str) -> tuple[AgentConfig, str, bool]:
+def _build_config(skill_name: str, meta: dict, body: str) -> tuple[AgentConfig, str]:
     """Construct an AgentConfig from parsed SKILL.md content.
 
-    Returns ``(config, description, dispatchable)``. A skill is
-    "dispatchable" when its frontmatter sets ``metadata.dispatchable: true``
-    — reference skills (e.g. the nmap notes, vuln-classes) omit it, so they
-    are loaded on disk but not offered to the planner as targets. Identity
-    (label, dispatch key, report group) all derive from the skill's folder
-    name; budgets come from the global config.
+    Returns ``(config, description)``. Identity (label, dispatch key, report
+    group) all derive from the skill's folder name; budgets come from the
+    global config. SKILL.md frontmatter carries only ``name`` + ``description``
+    — the dispatch surface (which skills are dispatchable, their tools, the
+    vuln-classes they own) lives in the nodes (``src/nodes/executor.py``,
+    ``src/nodes/recon.py``), which stamp it onto this config before running.
+    The loader therefore returns a bash-only default; the node overrides it.
     """
     from src.graph import config
 
-    md = meta.get("metadata") or {}
-    if not isinstance(md, dict):
-        md = {}
-
-    # Tools default to ``[bash]`` — most skills only need a shell so they omit
-    # the field; specialised skills (sqli, recon, …) list their extra tools.
-    tool_names = md.get("tools") or ["bash"]
-    if not isinstance(tool_names, list):
-        tool_names = ["bash"]
-    tools = resolve_tools([str(n) for n in tool_names])
-
     description = str(meta.get("description") or "").strip()
-    # Offered to the planner only when ``dispatchable: true`` is set. The
-    # legacy ``agent_id`` presence is still honoured during the migration.
-    dispatchable = bool(md.get("dispatchable")) or bool(md.get("agent_id"))
-
-    # Phase routing — "recon" picks the universal+recon-hint prompt;
-    # anything else (default "executor") gets the full executor rule
-    # bundle. The field is intentionally permissive so a future
-    # "neutral" phase (pure tooling helpers) can be added without a
-    # loader change.
-    phase = str(md.get("phase") or "executor").strip().lower()
-    if phase not in {"executor", "recon"}:
-        # Unknown phase strings fall back to executor rather than
-        # crash; the worker still gets a sensible prompt.
-        phase = "executor"
-
     cfg = AgentConfig(
-        # Identity is the skill's own folder name — the label, the dispatch
-        # key, and the report grouping all derive from it (no separate
-        # agent_id / config_name / methodology fields in the frontmatter).
         agent_id=skill_name,
         methodology="skill",
         config_name=skill_name,
         system_prompt=body,
-        tools=tools,
+        tools=resolve_tools(["bash"]),
         max_iterations=config.budgets.worker_max_iterations,
-        skip_base_prompt=bool(md.get("skip_base_prompt", False)),
-        phase=phase,
     )
-    return cfg, description, dispatchable
+    return cfg, description
 
 
 def _load_from_disk(name: str) -> AgentConfig | None:
@@ -233,17 +203,9 @@ def _load_from_disk(name: str) -> AgentConfig | None:
         return None
     text = path.read_text(encoding="utf-8")
     meta, body = _split_frontmatter(text)
-    cfg, description, dispatchable = _build_config(name, meta, body)
+    cfg, description = _build_config(name, meta, body)
     if description:
         _DESCRIPTIONS[cfg.config_name] = description
-    if dispatchable:
-        _DISPATCHABLE.add(cfg.config_name)
-    md = meta.get("metadata") or {}
-    if not isinstance(md, dict):
-        md = {}
-    specs = _normalize_routing_signals(name, md)
-    if specs:
-        _ROUTING_SIGNALS[cfg.config_name] = specs
     return cfg
 
 
@@ -290,16 +252,29 @@ def list_skills() -> list[str]:
     return sorted(_CACHE.keys())
 
 
+def _node_dispatchable_names() -> set[str]:
+    """The dispatchable skill names — owned by the dispatching nodes.
+
+    Each node declares its own dispatch surface as a ``SKILLS`` map
+    (``src/nodes/executor.py``, ``src/nodes/recon.py``); a skill is
+    dispatchable iff it appears in one of them. Imported lazily here to avoid
+    the ``skills.loader → nodes → planner → skills.loader`` import cycle.
+    """
+    from src.nodes.executor import EXECUTOR_SKILLS
+    from src.nodes.recon import RECON_SKILLS
+    return set(EXECUTOR_SKILLS) | set(RECON_SKILLS)
+
+
 def list_dispatchable_skills() -> list[tuple[str, str]]:
     """``[(config_name, description), ...]`` for the planner's menu.
 
-    Reference-only skills (e.g. the nmap cheatsheet) are filtered out —
-    only skills whose frontmatter declares them as a real attack vector
-    via ``metadata.agent_id`` show up here.
+    Names come from the nodes' dispatch surface (:func:`_node_dispatchable_names`);
+    descriptions from each skill's frontmatter. Reference-only skills (e.g. the
+    nmap cheatsheet) are in no node's SKILLS map, so they never appear here.
     """
     _build_file_index()
     return sorted(
-        (name, _DESCRIPTIONS.get(name, "")) for name in _DISPATCHABLE
+        (name, _DESCRIPTIONS.get(name, "")) for name in _node_dispatchable_names()
     )
 
 
@@ -332,8 +307,9 @@ def list_skill_descriptions() -> list[tuple[str, str, bool]]:
     skills. Worker-side cross-skill context uses this as its catalogue.
     """
     _build_file_index()
+    dispatchable = _node_dispatchable_names()
     return sorted(
-        (name, _DESCRIPTIONS.get(name, ""), name in _DISPATCHABLE)
+        (name, _DESCRIPTIONS.get(name, ""), name in dispatchable)
         for name in _CACHE
     )
 

@@ -102,7 +102,11 @@ def _score(text: str):
 
     rec_lines = _REC_RE.findall(text)
     rec_ssti = any(_SKILL_RE.search(line) for line in rec_lines)
-    sigs = _extract_verdicts([AIMessage(content=text)], "input-validation", "input-validation")
+    # input-validation owns a multi-class set (mirrors
+    # EXECUTOR_SKILLS["input-validation"].owns); pass it so the replay matches
+    # production, where the executor node stamps owned_classes onto the config.
+    _iv_owns = frozenset({"lfi", "rce", "crlf", "xxe", "insecure-file-uploads"})
+    sigs = _extract_verdicts([AIMessage(content=text)], "input-validation", "input-validation", _iv_owns)
     routing = [getattr(s, "vuln_class", "") for s in sigs if getattr(s, "kind", "") == "routing"]
     routing_ssti = any("ssti" in (c or "").lower() for c in routing)
     return (rec_ssti or routing_ssti), rec_lines, routing

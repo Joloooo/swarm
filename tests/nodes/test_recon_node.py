@@ -33,7 +33,7 @@ from langchain_core.messages import AIMessage
 from src.nodes.base.prompt_builder import _build_system_message
 from src.nodes.recon import recon_node
 from src.skills.loader import load_skill
-from src.tools.registry import resolve_tool
+from src.tools.registry import resolve_tool, resolve_tools
 from src.tools.web_recon import gobuster as gobuster_mod
 
 
@@ -41,10 +41,18 @@ from src.tools.web_recon import gobuster as gobuster_mod
 
 
 def test_recon_skill_loads_without_whatweb():
-    """recon SKILL.md parses, its tools list excludes whatweb."""
+    """recon SKILL.md parses; the recon node's tool set excludes whatweb.
+
+    Tools moved off the SKILL.md frontmatter onto the recon node's dispatch
+    surface (``RECON_SKILLS``); the node stamps ``DEFAULT_TOOLS`` + these onto
+    the config in ``execute``. Assert the effective, resolved tool set.
+    """
+    from src.nodes.recon import DEFAULT_TOOLS, RECON_SKILLS
+
     cfg = load_skill("recon")
     assert cfg is not None
-    tool_names = [t.name for t in cfg.tools]
+    names = [*DEFAULT_TOOLS, *RECON_SKILLS["recon"].tools]
+    tool_names = [t.name for t in resolve_tools(names)]
     assert "whatweb" not in tool_names, (
         f"recon tools must not include whatweb after deletion; got {tool_names}"
     )

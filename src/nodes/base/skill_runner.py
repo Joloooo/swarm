@@ -69,7 +69,6 @@ from src.nodes.base.worker.verdicts import (
     _norm_class,
     _redirect_class,
     _REDIRECT_CLASSES,
-    _SKILL_OWNED_CLASSES,
     _VERDICT_OUTCOME,
     _worker_owns_class,
 )

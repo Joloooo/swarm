@@ -72,6 +72,7 @@ class AgentConfig:
     max_iterations: int = 20  # worker budget in REAL tool rounds; → recursion_limit (~3 super-steps/round); fallback default only
     skip_base_prompt: bool = False  # True → skip preamble/rules/role/RAG, SKILL.md body is the whole prompt
     phase: str = "executor"  # rule bundle: "executor" (full methodology) | "recon" (universal + recon hint, no exploit blocks)
+    owned_classes: frozenset[str] | None = None  # vuln-classes this worker may refute; stamped by the dispatching node from its SKILLS map (None = its own name-class)
 
 
 def _persist_worker_trace(
@@ -444,7 +445,7 @@ async def _run_skill_agent_impl(
         messages = result.get("messages", [])
         findings = _extract_findings(messages, config.agent_id)
         verdict_signals = _extract_verdicts(
-            messages, config.agent_id, config.config_name,
+            messages, config.agent_id, config.config_name, config.owned_classes,
         )
 
         # If the FlagWatcher fired, synthesise a CRITICAL Finding so the worker

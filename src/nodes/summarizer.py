@@ -807,14 +807,24 @@ class SummarizerNode(BaseNode):
             detector_next_moves + tool_next_moves
         )
         handoffs = explicit_handoffs + inferred_handoffs
-        if handoffs:
+        # Ablation: disabling hypothesis passing ALSO disables the two legacy
+        # inter-agent hint channels it was built to unify --- ``skill_handoffs``
+        # and ``suggested_next_moves``. They are the same plumbing (one agent's
+        # leads gathered, kept, and pushed down to the next), so the ablation
+        # must remove all of it together. When the flag is set neither field is
+        # written to state, so the planner receives no passed-down hints and
+        # steers on raw findings only; with the flag off (default) both flow
+        # exactly as before --- the conditions below are unchanged.
+        from src.graph import config as _rt
+        _hyp_off = getattr(_rt.capability, "disable_hypothesis_passing", False)
+        if handoffs and not _hyp_off:
             update["skill_handoffs"] = handoffs
             self.log.info(
                 "summarizer: emitted %d cross-skill handoff(s) "
                 "(explicit=%d, inferred=%d)",
                 len(handoffs), len(explicit_handoffs), len(inferred_handoffs),
             )
-        if next_moves or state.get("suggested_next_moves"):
+        if (next_moves or state.get("suggested_next_moves")) and not _hyp_off:
             update["suggested_next_moves"] = next_moves
         if next_moves:
             self.log.info(

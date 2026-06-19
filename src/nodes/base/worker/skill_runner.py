@@ -163,8 +163,17 @@ async def _run_skill_agent_impl(
     from src import graph as _graph_module
     _cap = getattr(_graph_module.config, "capability", None)
     _prompting_off = bool(getattr(_cap, "disable_prompting_techniques", False))
+    # The skills ablation reaches the worker through this briefing too: the
+    # cross-skill context catalogue advertises every other skill's full
+    # description, so it must be suppressed here (the planner menu and the
+    # worker bodies are gated elsewhere). Without this gate a "no skills"
+    # worker still receives the entire per-class catalogue as seed context.
+    _skills_off = bool(getattr(_cap, "disable_skills", False))
 
-    skill_catalogue_block = _format_skill_context_catalogue(config.config_name)
+    skill_catalogue_block = (
+        None if _skills_off
+        else _format_skill_context_catalogue(config.config_name)
+    )
     if skill_catalogue_block:
         seed_parts.append(skill_catalogue_block)
 
@@ -324,10 +333,15 @@ async def _run_skill_agent_impl(
             make_read_skill_context_tool,
             make_read_skill_reference_tool,
         )
-        if list_references(config.config_name):
-            _run_tools.append(make_read_reference_tool(config.config_name))
-        _run_tools.append(make_read_skill_context_tool())
-        _run_tools.append(make_read_skill_reference_tool())
+        # Skills ablation: do NOT bind any skill-knowledge tool. Otherwise a
+        # generic worker could call read_skill_context("sqli") — or page in
+        # this dispatch-name's own references — and pull the per-class playbook
+        # straight back, defeating the ablation.
+        if not _skills_off:
+            if list_references(config.config_name):
+                _run_tools.append(make_read_reference_tool(config.config_name))
+            _run_tools.append(make_read_skill_context_tool())
+            _run_tools.append(make_read_skill_reference_tool())
     except Exception as _ref_exc:
         node.log.debug("reference/context tool wiring skipped: %s", _ref_exc)
 

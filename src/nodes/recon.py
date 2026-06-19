@@ -62,6 +62,17 @@ class ReconNode(BaseNode):
             owned_classes=spec.owns,
         )
 
+        # Skills ablation (disable_skills): drop the recon skill body too, so
+        # the recon worker runs generic — base methodology + this dimension's
+        # tools, but no per-skill workflow. The recon phase still runs (every
+        # config maps the surface from the same starting point); only the skill
+        # knowledge is removed, matching the empty executor body.
+        from src.graph import config as _rt
+        if getattr(getattr(_rt, "capability", None), "disable_skills", False):
+            recon_config = dataclasses.replace(
+                recon_config, system_prompt="", skip_base_prompt=False,
+            )
+
         self.log.info("[%s] Starting recon agent", config_name)
         result = await self.run_skill_agent(recon_config, state)
         # Flag recon_done so the supervisor can avoid asking for recon

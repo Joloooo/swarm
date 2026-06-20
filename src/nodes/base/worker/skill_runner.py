@@ -169,6 +169,12 @@ async def _run_skill_agent_impl(
     # worker bodies are gated elsewhere). Without this gate a "no skills"
     # worker still receives the entire per-class catalogue as seed context.
     _skills_off = bool(getattr(_cap, "disable_skills", False))
+    # The hypothesis-passing ablation reaches the worker seed here too. It is
+    # the whole distilled-state family, not just the belief-ranked hypotheses:
+    # when on, the seed drops both the planner's curated investigation state
+    # (relevant_summary) AND the ranked hypotheses block, so the worker falls
+    # back to the original baseline — raw findings + the recon application map.
+    _hyp_off = bool(getattr(_cap, "disable_hypothesis_passing", False))
 
     skill_catalogue_block = (
         None if _skills_off
@@ -185,11 +191,18 @@ async def _run_skill_agent_impl(
     if recon_block:
         seed_parts.append(recon_block)
 
-    relevant_block = _format_relevant_summary(state)
+    # Both blocks below are gated by the hypothesis-passing ablation: they are
+    # the distilled cross-agent state the planner pushes down to workers, which
+    # is exactly the channel under test. The planner still keeps relevant_summary
+    # as its OWN cross-turn memory (rendered back to the planner, not here).
+    relevant_block = None if _hyp_off else _format_relevant_summary(state)
     if relevant_block:
         seed_parts.append(relevant_block)
 
-    hypotheses_block = _format_hypotheses(state, steer_off=_prompting_off)
+    hypotheses_block = (
+        None if _hyp_off
+        else _format_hypotheses(state, steer_off=_prompting_off)
+    )
     if hypotheses_block:
         seed_parts.append(hypotheses_block)
 

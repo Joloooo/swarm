@@ -65,12 +65,9 @@ _SECTION_COMMENTS = {
     "capability": (
         "Ablation switches — turn OFF one agent capability to measure its\n"
         "contribution. ALL default false = full system, byte-identical. Flip\n"
-        "one to true for an ablation run (see `swarm` -> Capability)."
-    ),
-    "dev": (
-        "Developer mode (NOT an ablation switch). Off by default. Turning it on\n"
-        "re-enables development-only observability that is not part of the\n"
-        "measured system (currently the planner's skill_ranking)."
+        "one to true for an ablation run (see `swarm` -> Capability).\n"
+        "disable_skill_ranking is an observability toggle (on by default), not\n"
+        "a measurement ablation; it lives here so the menu manages it too."
     ),
 }
 

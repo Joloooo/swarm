@@ -102,15 +102,13 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # The planner can no longer reach the web-search node; the agent relies
         # only on the model's own knowledge and the skills.
         "disable_web_search": False,
-    },
-    # Developer-mode toggles — NOT ablation switches. Off by default, so a
-    # normal run (and every ablation run) is unaffected. Turning this on
-    # re-enables development-only observability that is not part of the
-    # measured system, currently the planner's ``skill_ranking`` (the
-    # best-first skills-with-pros/cons summary): the planner is asked to emit
-    # it and the live log renders it. ``SWARM_DEV_MODE`` overrides for one run.
-    "dev": {
-        "enabled": False,
+        # Observability toggle, default false = ON (NOT a measurement ablation):
+        # the planner's ``skill_ranking`` — its best-first skills-with-pros/cons
+        # summary, asked for in the prompt and rendered in the live log. Set true
+        # to drop it; that only removes the observability (and a few planner
+        # output tokens) and changes no dispatch. Kept in [capability] so it is
+        # managed from the same ``swarm`` -> Capability menu as the ablations.
+        "disable_skill_ranking": False,
     },
 }
 

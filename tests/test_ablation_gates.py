@@ -37,6 +37,7 @@ CAP_FLAGS = [
     "disable_refusal_handling",
     "disable_skills",
     "disable_web_search",
+    "disable_skill_ranking",
 ]
 
 

@@ -821,6 +821,7 @@ _CAPABILITY_KEYS: list[tuple[str, str]] = [
     ("disable_refusal_handling",     "Refusal handling (recovery ladder)"),
     ("disable_skills",               "Skills (per-class specialists)"),
     ("disable_web_search",           "Web search (external lookup)"),
+    ("disable_skill_ranking",        "Skill ranking (planner pros/cons summary — observability, on by default)"),
 ]
 
 

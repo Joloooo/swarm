@@ -268,6 +268,13 @@ config = SimpleNamespace(
             "SWARM_DISABLE_WEB_SEARCH",
             _cfg["capability"]["disable_web_search"]),
     ),
+    # ── Developer mode (see swarm-config.toml [dev]) ──
+    # Off by default and NOT an ablation switch; gates development-only
+    # observability (currently the planner's skill_ranking). SWARM_DEV_MODE
+    # overrides for a one-off run.
+    dev=SimpleNamespace(
+        enabled = _env_bool("SWARM_DEV_MODE", _cfg["dev"]["enabled"]),
+    ),
 )
 
 

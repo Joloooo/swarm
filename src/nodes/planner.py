@@ -3296,16 +3296,24 @@ class PlannerNode(BaseNode):
         # picks a different action this turn instead of dispatching the
         # same useless attack again.
         # Ablation gates (default off → full system, byte-identical).
-        # ``steer_off`` suppresses the run-state [SYSTEM NOTE] steering nudges
-        # below. The paper folds run-state steering into the prompting-techniques
-        # ablation, so they share ONE flag (``disable_prompting_techniques``); the
-        # evidence digest is KEPT regardless, so the planner is deprived of
-        # steering, not blinded. ``websearch_off`` additionally suppresses the
-        # web-search lead / crawl nudges (the web_search node itself is gated in
-        # src/nodes/web_search.py and the research_query in this file's attack
-        # branch).
+        # Two gates split the run-state [SYSTEM NOTE] directives by NATURE:
+        #   * ``steer_off`` (prompting-techniques) suppresses the static-rule
+        #     nudges — loop check, diversify-when-stuck, tool-coverage,
+        #     exhausted-ledger, crawl when-to-use — whose content is a fixed
+        #     discipline, not an agent's product.
+        #   * ``_hyp_off`` (hypothesis/agentic-plumbing) suppresses the
+        #     findings-carrying directives — unconverted-primitive,
+        #     co-located-service, unexploited-lead — whose content is
+        #     worker-produced findings relayed to the planner. That is agentic
+        #     plumbing, so it belongs to the plumbing ablation, not prompting.
+        # The evidence digest is KEPT regardless, so the planner is deprived of
+        # distilled steering, not blinded. ``websearch_off`` additionally
+        # suppresses the web-search lead / crawl nudges (the web_search node
+        # itself is gated in src/nodes/web_search.py and the research_query in
+        # this file's attack branch).
         _cap = getattr(config, "capability", None)
         steer_off = bool(getattr(_cap, "disable_prompting_techniques", False))
+        _hyp_off = bool(getattr(_cap, "disable_hypothesis_passing", False))
         websearch_off = bool(getattr(_cap, "disable_web_search", False))
 
         warning = self.detect_repetition(state)
@@ -3352,7 +3360,7 @@ class PlannerNode(BaseNode):
         # mode: proving a primitive then wandering off it. Injected FIRST so
         # it frames the decision. Self-suppresses only on flag capture.
         primitive_note = _unconverted_primitive_directive(state)
-        if primitive_note and not steer_off:
+        if primitive_note and not _hyp_off:
             self.log.info(
                 "unconverted-primitive directive: %s",
                 primitive_note.replace("\n", " | ")[:300],
@@ -3373,7 +3381,7 @@ class PlannerNode(BaseNode):
             prior_messages.append(HumanMessage(content=hypothesis_note))
 
         service_note = _colocated_service_directive(state)
-        if service_note and not steer_off:
+        if service_note and not _hyp_off:
             self.log.info(
                 "co-located service directive: %s",
                 service_note.replace("\n", " | ")[:300],
@@ -3395,19 +3403,22 @@ class PlannerNode(BaseNode):
         # mechanisms do not confound the A/B measurement. Baseline (mode 1)
         # keeps the prior nudge-only behaviour as the control.
         crawl_mode = crawl_policy.normalize_mode(state.get("crawl_mode"))
-        # The lead / crawl nudges are both steering AND web-search related, so
-        # they are suppressed by either ablation. ``crawl_mode`` itself is still
-        # computed (the attack branch's select_crawl_query reads it).
-        if not steer_off and not websearch_off:
+        # The BASELINE lead nudge carries a worker finding (agentic plumbing) and
+        # is web-search related, so it is suppressed by the plumbing OR web-search
+        # ablation. The crawl when-to-use description (modes 6/9) is static
+        # steering, so it stays under the prompting-techniques ablation. Both are
+        # gated by ``websearch_off``; ``crawl_mode`` is still computed (the attack
+        # branch's select_crawl_query reads it).
+        if not websearch_off:
             if crawl_mode == crawl_policy.BASELINE:
-                lead_note = _unexploited_lead_directive(state)
+                lead_note = None if _hyp_off else _unexploited_lead_directive(state)
                 if lead_note:
                     self.log.info(
                         "unexploited-lead research directive: %s",
                         lead_note.replace("\n", " | ")[:300],
                     )
                     prior_messages.append(HumanMessage(content=lead_note))
-            elif crawl_mode in (crawl_policy.TOOL_DESC, crawl_policy.ALL):
+            elif crawl_mode in (crawl_policy.TOOL_DESC, crawl_policy.ALL) and not steer_off:
                 # Mode 6 (description self-trigger) and Mode 9 (all-on) both inject
                 # the rich when-to-use description. In Mode 6 it is the ONLY
                 # mechanism (no deterministic firing). In Mode 9 the deterministic

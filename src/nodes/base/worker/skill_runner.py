@@ -183,7 +183,13 @@ async def _run_skill_agent_impl(
     if skill_catalogue_block:
         seed_parts.append(skill_catalogue_block)
 
-    findings_block = _format_findings(state)
+    # The consolidated findings object (deduped/ranked/severity-tagged by the
+    # consolidation pass) is itself distilled cross-agent plumbing, so the
+    # ablation drops it too: with the flag on the worker gets no findings block
+    # at all and works from the recon application map plus its dispatch task.
+    # The findings still live in state for flag capture and the final report —
+    # only this rendered block is suppressed.
+    findings_block = None if _hyp_off else _format_findings(state)
     if findings_block:
         seed_parts.append(findings_block)
 
@@ -191,10 +197,10 @@ async def _run_skill_agent_impl(
     if recon_block:
         seed_parts.append(recon_block)
 
-    # Both blocks below are gated by the hypothesis-passing ablation: they are
-    # the distilled cross-agent state the planner pushes down to workers, which
-    # is exactly the channel under test. The planner still keeps relevant_summary
-    # as its OWN cross-turn memory (rendered back to the planner, not here).
+    # Also gated by the ablation: relevant_summary (the planner's curated
+    # investigation state) and the ranked hypotheses block. The planner still
+    # keeps relevant_summary as its OWN cross-turn memory (rendered back to the
+    # planner, not here).
     relevant_block = None if _hyp_off else _format_relevant_summary(state)
     if relevant_block:
         seed_parts.append(relevant_block)

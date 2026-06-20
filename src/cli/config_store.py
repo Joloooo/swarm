@@ -110,7 +110,11 @@ def save(cfg: dict[str, dict[str, Any]]) -> None:
             tbl = tomlkit.table()
             comment = _SECTION_COMMENTS.get(table_name)
             if comment:
-                tbl.add(tomlkit.comment(comment))
+                # tomlkit.comment() only prefixes a single line with '#'; a
+                # multi-line section banner must be split or the 2nd+ lines land
+                # in the file without '#' and corrupt the TOML.
+                for line in comment.splitlines():
+                    tbl.add(tomlkit.comment(line))
             doc[table_name] = tbl
         for key, default in keys.items():
             doc[table_name][key] = cfg.get(table_name, {}).get(key, default)

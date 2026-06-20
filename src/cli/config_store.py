@@ -67,6 +67,11 @@ _SECTION_COMMENTS = {
         "contribution. ALL default false = full system, byte-identical. Flip\n"
         "one to true for an ablation run (see `swarm` -> Capability)."
     ),
+    "dev": (
+        "Developer mode (NOT an ablation switch). Off by default. Turning it on\n"
+        "re-enables development-only observability that is not part of the\n"
+        "measured system (currently the planner's skill_ranking)."
+    ),
 }
 
 

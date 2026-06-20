@@ -103,6 +103,15 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # only on the model's own knowledge and the skills.
         "disable_web_search": False,
     },
+    # Developer-mode toggles — NOT ablation switches. Off by default, so a
+    # normal run (and every ablation run) is unaffected. Turning this on
+    # re-enables development-only observability that is not part of the
+    # measured system, currently the planner's ``skill_ranking`` (the
+    # best-first skills-with-pros/cons summary): the planner is asked to emit
+    # it and the live log renders it. ``SWARM_DEV_MODE`` overrides for one run.
+    "dev": {
+        "enabled": False,
+    },
 }
 
 # Valid values for the enum knobs. ``resolve()`` rejects anything else (a

@@ -1407,6 +1407,13 @@ class _Live:
         """
         if not isinstance(ranking, list) or not ranking:
             return
+        # skill_ranking is developer-mode-only observability — render it only
+        # when dev mode is on. In normal/ablation runs the planner is not even
+        # asked for it; this guards against a stray field still being emitted.
+        from src import graph as _graph_module
+        if not bool(getattr(getattr(_graph_module.config, "dev", None),
+                            "enabled", False)):
+            return
         indent = " " * 12
         _emit(f"{indent}{_paint('· skill ranking', _DIM, _MAGENTA)}")
         for i, entry in enumerate(ranking[:10], 1):

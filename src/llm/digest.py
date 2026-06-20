@@ -345,6 +345,37 @@ concrete and concise. No text outside the summary.
 """
 
 
+# Ablation variant (disable_hypothesis_passing). The worker summary becomes
+# purely backward-looking — what was tested and observed — with every
+# forward-looking section removed: NOT tried, Recommended next dispatch,
+# Cross-skill handoffs, and Next skill suggestions. Those four are the "what to
+# try next" steering that the planner (and the recon application map) would
+# otherwise read; under this ablation the digest is just a summary of what the
+# agent did, with no shadow hypotheses leaking through the report text. Keeps
+# the same {dispatch_reason} / {status_hint} placeholders so .format() is
+# interchangeable with the full tail above.
+PATTERN_B_TAIL_NO_HINTS = """\
+STOP testing. Do not call tools. Summarize the conversation above for
+the supervisor; they will not see raw tool calls.
+
+Dispatch reason: {dispatch_reason}
+
+Return markdown with exactly these headings:
+## Status
+success | inconclusive | blocked | refused | crashed plus one sentence.{status_hint}
+## Target
+method/path/params tested.
+## Inputs tried
+families, representative values, and total/tool counts if known.
+## Server responses
+status/body groups; copy exact flags, tokens, credentials, or unique errors.
+## Inferred server-side behaviour
+evidence -> conclusion.
+
+Be concrete and concise. No text outside the summary.
+"""
+
+
 def _status_hint(status: str, error: str | None) -> str:
     """One short clause appended to the ## Status line in the tail.
 
@@ -425,7 +456,16 @@ async def summarize_worker_trace(
     else:
         status = "blocked"
 
-    tail = PATTERN_B_TAIL.format(
+    # Ablation: with hypothesis passing disabled the worker reports back a
+    # backward-only summary (no NOT-tried / recommended-dispatch / handoff /
+    # next-skill steering), so the planner and the recon application map see
+    # what each agent did, not what it thinks should happen next.
+    from src.graph import config as _rt
+    _hyp_off = getattr(
+        getattr(_rt, "capability", None), "disable_hypothesis_passing", False
+    )
+    _tail_template = PATTERN_B_TAIL_NO_HINTS if _hyp_off else PATTERN_B_TAIL
+    tail = _tail_template.format(
         dispatch_reason=dispatch_reason or "(no reason recorded)",
         status_hint=_status_hint(status, error),
     )
@@ -522,7 +562,7 @@ def _stub_report(
     knows the worker ran (and roughly what happened) rather than seeing
     nothing at all from the dispatch.
     """
-    return (
+    base = (
         f"## Status\n{status}"
         + (f" — {error}" if error else "")
         + f"\n\n## Target\n(summariser failed; trace not available to planner)"
@@ -532,7 +572,19 @@ def _stub_report(
         f"`.agent_id == \"{agent_id}\"`)"
         f"\n\n## Server responses\n(unavailable)"
         f"\n\n## Inferred server-side behaviour\n(unavailable)"
-        f"\n\n## NOT tried\n(unavailable)"
+    )
+    # Match the live tail's ablation: drop the forward-looking sections when
+    # hypothesis passing is disabled, so even this failure stub stays a
+    # backward-only summary.
+    from src.graph import config as _rt
+    _hyp_off = getattr(
+        getattr(_rt, "capability", None), "disable_hypothesis_passing", False
+    )
+    if _hyp_off:
+        return base
+    return (
+        base
+        + f"\n\n## NOT tried\n(unavailable)"
         f"\n\n## Recommended next dispatch\nRe-dispatch {config_name} or "
         f"pick a different skill; the previous run produced "
         f"{findings_count} structured finding(s)."

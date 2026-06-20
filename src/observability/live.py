@@ -1407,12 +1407,13 @@ class _Live:
         """
         if not isinstance(ranking, list) or not ranking:
             return
-        # skill_ranking is developer-mode-only observability — render it only
-        # when dev mode is on. In normal/ablation runs the planner is not even
-        # asked for it; this guards against a stray field still being emitted.
+        # skill_ranking is observability, on by default — render it unless the
+        # disable_skill_ranking capability toggle is set. When disabled the
+        # planner is not even asked for it; this also guards against a stray
+        # field still being emitted.
         from src import graph as _graph_module
-        if not bool(getattr(getattr(_graph_module.config, "dev", None),
-                            "enabled", False)):
+        if bool(getattr(getattr(_graph_module.config, "capability", None),
+                        "disable_skill_ranking", False)):
             return
         indent = " " * 12
         _emit(f"{indent}{_paint('· skill ranking', _DIM, _MAGENTA)}")

@@ -501,19 +501,20 @@ _SUPERVISOR_TEMPLATE = SUPERVISOR_SYSTEM_PROMPT  # raw body, __SKILLS_MENU__ int
 from src.refusals.vocabulary import filter_text as _filter_text  # noqa: E402
 
 
-def _dev_mode_on() -> bool:
-    """True when developer mode is enabled (swarm-config.toml [dev].enabled /
-    SWARM_DEV_MODE). Off by default, so normal and ablation runs never see the
-    dev-only observability below."""
-    return bool(getattr(getattr(config, "dev", None), "enabled", False))
+def _skill_ranking_on() -> bool:
+    """True when the planner should emit its ``skill_ranking`` (default on).
+    Gated by the ``disable_skill_ranking`` capability switch — an observability
+    toggle in the Capability menu, distinct from the measurement ablations."""
+    cap = getattr(config, "capability", None)
+    return not bool(getattr(cap, "disable_skill_ranking", False))
 
 
-# Developer-mode addendum: the planner's ``skill_ranking`` (best-first skills
-# with pros/cons) is observability only — it dispatches nothing and is read
-# solely by the live renderer. It is appended to the supervisor prompt ONLY in
-# dev mode; in normal and ablation runs the planner is not asked for it at all.
+# skill_ranking addendum: the planner's best-first skills-with-pros/cons summary
+# is observability only — it dispatches nothing and is read solely by the live
+# renderer. Appended to the supervisor prompt by default; it is omitted only
+# when disable_skill_ranking is set, so the planner is not asked for it at all.
 _SKILL_RANKING_ADDENDUM = """\
-# skill_ranking (developer-mode observability)
+# skill_ranking (observability)
 
 On every action=="attack" turn, ALSO include a "skill_ranking" array in your
 JSON decision: a ranked, best-first list (up to 10) of the skills you seriously
@@ -547,7 +548,7 @@ def _assemble_supervisor_prompt(menu: str) -> str:
     prompt = IDENTITY_PREAMBLE + "\n\n" + _SUPERVISOR_TEMPLATE.replace(
         "__SKILLS_MENU__", menu
     )
-    if _dev_mode_on():
+    if _skill_ranking_on():
         prompt += "\n" + _SKILL_RANKING_ADDENDUM
     filtered, subs = _filter_text(prompt)
     if subs:

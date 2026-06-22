@@ -23,9 +23,9 @@ from pathlib import Path
 
 # Mirror :data:`src.cli.bench_discovery.XBOW_BENCH_DIR` — the on-disk home of
 # the XBEN-*-24 benchmark directories, each holding a ``benchmark.yaml``.
-#   parents[0]=src/cli  parents[1]=src  parents[2]=SwarmAttacker  parents[3]=Thesis
+#   parents[0]=src/cli  parents[1]=src  parents[2]=SwarmAttacker (repo root)
 XBOW_BENCH_DIR = (
-    Path(__file__).resolve().parents[3]
+    Path(__file__).resolve().parents[2]
     / "Benchmarks"
     / "xbow-validation"
     / "benchmarks"

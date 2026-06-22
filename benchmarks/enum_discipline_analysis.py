@@ -26,7 +26,7 @@ import json, re, glob, os, statistics
 from collections import defaultdict, Counter
 
 LOGS = os.path.join(os.path.dirname(__file__), "..", "logs")
-BENCH = os.path.join(os.path.dirname(__file__), "..", "..", "Benchmarks", "xbow-validation", "benchmarks")
+BENCH = os.path.join(os.path.dirname(__file__), "..", "Benchmarks", "xbow-validation", "benchmarks")
 
 TIER_A = re.compile(r'(^|[\s;&|(])(gobuster|ffuf|dirb|dirsearch|feroxbuster|wfuzz)\b', re.I | re.M)
 

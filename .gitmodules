@@ -1,4 +1,4 @@
-[submodule "Benchmarks/xbow-validation"]
-	path = Benchmarks/xbow-validation
+[submodule "xbow-validation"]
+	path = xbow-validation
 	url = https://github.com/Joloooo/validation-benchmarks.git
 	branch = swarm-patched

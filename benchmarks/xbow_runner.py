@@ -77,7 +77,7 @@ _SUMMARY_KEY = {
     bench_results.API: "crash",
 }
 
-XBOW_ROOT = Path(__file__).resolve().parents[1] / "Benchmarks" / "xbow-validation"
+XBOW_ROOT = Path(__file__).resolve().parents[1] / "xbow-validation"
 RESULTS_DIR = Path(__file__).parent / "results"
 DAILY_LIST = Path(__file__).parent / "daily_15.txt"
 

@@ -26,10 +26,9 @@ from pathlib import Path
 #   parents[1] = src
 #   parents[2] = SwarmAttacker (repo root; benchmarks live inside it)
 # Mirrors ``benchmarks/xbow_runner.py``:
-#   XBOW_ROOT = Path(__file__).resolve().parents[1] / "Benchmarks" / "xbow-validation"
+#   XBOW_ROOT = Path(__file__).resolve().parents[1] / "xbow-validation"
 XBOW_BENCH_DIR = (
     Path(__file__).resolve().parents[2]
-    / "Benchmarks"
     / "xbow-validation"
     / "benchmarks"
 )
@@ -56,8 +55,8 @@ def ensure_all_list() -> Path:
     if not XBOW_BENCH_DIR.is_dir():
         raise FileNotFoundError(
             f"XBOW benchmarks not found at:\n  {XBOW_BENCH_DIR}\n\n"
-            "Fix: cd into the parent Thesis repo and run\n"
-            "  git submodule update --init Benchmarks/xbow-validation"
+            "Fix: from the repo root run\n"
+            "  git submodule update --init xbow-validation"
         )
 
     ids = sorted(

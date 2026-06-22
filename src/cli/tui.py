@@ -397,7 +397,7 @@ def _pick_bench() -> tuple[list[str], int] | None:
         _console.print(
             "[yellow]No XBEN benchmarks found.[/yellow] Initialise the "
             "submodule with [bold]git submodule update --init "
-            "Benchmarks/xbow-validation[/bold]."
+            "xbow-validation[/bold]."
         )
         return None
 

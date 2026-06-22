@@ -26,7 +26,6 @@ from pathlib import Path
 #   parents[0]=src/cli  parents[1]=src  parents[2]=SwarmAttacker (repo root)
 XBOW_BENCH_DIR = (
     Path(__file__).resolve().parents[2]
-    / "Benchmarks"
     / "xbow-validation"
     / "benchmarks"
 )

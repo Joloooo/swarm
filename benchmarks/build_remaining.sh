@@ -34,7 +34,7 @@
 set -uo pipefail
 
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-XBOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../Benchmarks/xbow-validation" && pwd)"
+XBOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../xbow-validation" && pwd)"
 BENCH_ROOT="$XBOW_ROOT/benchmarks"
 LOG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/build_logs"
 

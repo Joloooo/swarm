@@ -21,15 +21,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# ``parents[3]`` from src/cli/bench_discovery.py:
+# ``parents[2]`` from src/cli/bench_discovery.py:
 #   parents[0] = src/cli
 #   parents[1] = src
-#   parents[2] = SwarmAttacker
-#   parents[3] = Thesis
-# Mirrors ``benchmarks/xbow_runner.py:59``:
-#   XBOW_ROOT = Path(__file__).resolve().parents[2] / "Benchmarks" / "xbow-validation"
+#   parents[2] = SwarmAttacker (repo root; benchmarks live inside it)
+# Mirrors ``benchmarks/xbow_runner.py``:
+#   XBOW_ROOT = Path(__file__).resolve().parents[1] / "Benchmarks" / "xbow-validation"
 XBOW_BENCH_DIR = (
-    Path(__file__).resolve().parents[3]
+    Path(__file__).resolve().parents[2]
     / "Benchmarks"
     / "xbow-validation"
     / "benchmarks"

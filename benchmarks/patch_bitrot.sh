@@ -68,7 +68,7 @@
 
 set -euo pipefail
 
-XBOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../Benchmarks/xbow-validation" && pwd)"
+XBOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../Benchmarks/xbow-validation" && pwd)"
 
 REVERT=0
 ARGS=()

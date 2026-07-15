@@ -1,3 +1,11 @@
+> **Note.** The `xbow-validation/` folder is a git submodule containing the public
+> XBOW validation benchmark suite (104 vulnerable web apps) used in the evaluation.
+> Its contents are not included in the anonymized copy of this repository and appear
+> as an empty folder. To reproduce the evaluation, obtain the public XBOW validation
+> benchmarks, place them in `xbow-validation/`, then apply the environment fixes with
+> `benchmarks/patch_bitrot.sh` (repairs aged base images for current Docker / Apple
+> Silicon without changing any tested vulnerability or expected flag).
+
 # SwarmAttacker
 
 Multi-methodology swarm penetration testing agent built with LangGraph. Part of a master's thesis on autonomous LLM-based penetration testing.

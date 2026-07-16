@@ -197,13 +197,10 @@ def _RUN_ID_for_logging() -> str | None:
     shell ``_RUN_ID``.
     """
     try:
-        from src.observability.writers import get_terminal_log_file
-        sink = get_terminal_log_file()
-        if sink is not None:
-            # Path shape: logs/run-<run_id>/displayed_terminal_logs.log
-            parent = sink.parent.name  # "run-<run_id>"
-            if parent.startswith("run-"):
-                return parent[len("run-"):]
+        from src.observability.writers import get_active_run_id
+        active = get_active_run_id()
+        if active:
+            return active
     except Exception:
         pass
     return _RUN_ID

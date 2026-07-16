@@ -23,6 +23,7 @@ from typing import Any
 
 import nmap
 
+from src.traffic import is_remote_safe, observe_traffic, traffic_slot
 from src.tools.nmap._errors import classify
 from src.tools.nmap._schema import (
     ErrorInfo,
@@ -35,7 +36,9 @@ from src.tools.nmap._schema import (
 
 _SCRIPT_OUTPUT_CAP = 2000
 _BASE_ARGS = "-n -T4 --open"
+_REMOTE_SAFE_ARGS = "-n -T2 --open --max-rate 5 --scan-delay 200ms"
 _NEEDS_ROOT_TOOLS = {"nmap_udp_scan", "nmap_os_detection"}
+_REMOTE_BLOCKED_TOOLS = {"nmap_aggressive", "nmap_udp_scan", "nmap_vuln_scan"}
 
 
 def _is_root() -> bool:
@@ -52,7 +55,8 @@ def _is_ipv6(target: str) -> bool:
 
 def _compose_args(user_args: str, target: str, use_pn: bool) -> str:
     """Build the final nmap arguments string."""
-    parts = [_BASE_ARGS, user_args]
+    baseline = _REMOTE_SAFE_ARGS if is_remote_safe() else _BASE_ARGS
+    parts = [baseline, user_args]
     if use_pn:
         parts.append("-Pn")
     if _is_ipv6(target):
@@ -271,4 +275,38 @@ async def run(
     use_pn: bool = True,
 ) -> ScanResult:
     """Async entry point used by every nmap_* tool."""
-    return await asyncio.to_thread(_run_blocking, tool, target, user_args, use_pn)
+    if not is_remote_safe():
+        # Preserve the historical benchmark path exactly: no policy checks,
+        # pacing, or altered Nmap arguments.
+        return await asyncio.to_thread(_run_blocking, tool, target, user_args, use_pn)
+
+    normalized = f" {user_args.lower()} "
+    blocked_reason: str | None = None
+    if tool in _REMOTE_BLOCKED_TOOLS:
+        blocked_reason = f"{tool} is too broad/noisy for a real remote target"
+    elif " -p-" in normalized:
+        blocked_reason = "all-port scans are disabled for real remote targets"
+    elif "--script=vuln" in normalized or "--script vuln" in normalized:
+        blocked_reason = "broad vulnerability-script scans are disabled for real remote targets"
+
+    if blocked_reason:
+        return _error_result(
+            tool,
+            target,
+            f"nmap {user_args} {target}".strip(),
+            0.0,
+            {
+                "code": "invalid_args",
+                "hint": (
+                    f"Remote-safe policy: {blocked_reason}. Use a small explicit "
+                    "port list and evidence-backed service checks instead."
+                ),
+            },
+        )
+
+    async with traffic_slot(target):
+        result = await asyncio.to_thread(
+            _run_blocking, tool, target, user_args, use_pn,
+        )
+        observe_traffic(target, result)
+        return result

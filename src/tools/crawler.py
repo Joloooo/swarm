@@ -34,6 +34,8 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 
+from src.traffic import observe_traffic, traffic_slot
+
 logger = logging.getLogger(__name__)
 
 
@@ -449,7 +451,12 @@ async def try_http_request(
     client = await _get_http_client(options)
     start = time.monotonic()
     try:
-        response = await client.get(url)
+        async with traffic_slot(url):
+            response = await client.get(url)
+            observe_traffic(
+                url,
+                f"HTTP {response.status_code} {response.headers.get('retry-after', '')}",
+            )
         if response.status_code >= 400:
             logger.debug(
                 "HTTP %d for %s", response.status_code, url
@@ -482,12 +489,14 @@ async def try_http_request(
             final_url=final_url if final_url != url else url,
         )
     except httpx.HTTPError as e:
+        observe_traffic(url, e)
         duration_ms = (time.monotonic() - start) * 1000
         logger.debug(
             "HTTP error for %s (%.0fms): %s", url, duration_ms, e
         )
         return None
     except Exception as e:  # noqa: BLE001
+        observe_traffic(url, e)
         duration_ms = (time.monotonic() - start) * 1000
         logger.debug(
             "Unexpected HTTP error for %s (%.0fms): %s",
@@ -614,9 +623,12 @@ async def try_playwright_request(
 
         await page.route("**/*", _route_filter)
 
-        response = await page.goto(
-            url, wait_until="domcontentloaded", timeout=options.timeout_ms
-        )
+        async with traffic_slot(url):
+            response = await page.goto(
+                url, wait_until="domcontentloaded", timeout=options.timeout_ms
+            )
+            if response is not None:
+                observe_traffic(url, f"HTTP {response.status} {url}")
         if response is None or not response.ok:
             return None
 
@@ -639,6 +651,7 @@ async def try_playwright_request(
             final_url=final_url if final_url != url else url,
         )
     except Exception as e:  # noqa: BLE001
+        observe_traffic(url, e)
         duration_ms = (time.monotonic() - start) * 1000
         logger.debug(
             "Playwright error for %s (%.0fms): %s",

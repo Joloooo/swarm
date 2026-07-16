@@ -6,8 +6,8 @@ edge after the planner node. It maps the planner's chosen
 
 * ``"recon"`` / ``"web_search"`` — direct node transition.
 * a list of ``Send()`` calls for ``"attack"`` fan-out.
-* ``END`` for ``"report"`` (currently bypassed) and for verified
-  ``"submit_flag"``.
+* ``"report"`` for a real engagement, ``END`` for a benchmark report,
+  and ``END`` for a verified ``"submit_flag"``.
 * ``"planner"`` (loop back) for rejected ``"submit_flag"``.
 
 The ``submit_flag`` branch is the verification edge that replaced
@@ -26,9 +26,8 @@ These tests pin the explicit-submission behaviour:
    accepts arbitrary well-formed flags any more.
 3. Defensive: ``submit_flag`` with empty ``submission_attempts``
    defers to the planner rather than crashing.
-4. Real-pentest mode (empty ``expected_flag``) accepts a well-formed
-   non-placeholder flag.
-5. Real-pentest mode still rejects placeholders.
+4. Real-target mode (empty ``expected_flag``) bypasses flag validation and
+   builds the engagement report.
 
 Plus a quick smoke pass over the other actions to make sure the
 ``submit_flag`` branch did not accidentally swallow the existing
@@ -122,24 +121,24 @@ def test_submit_flag_empty_attempts_defers_to_planner():
     assert route_after_planner(state) == "planner"
 
 
-def test_submit_flag_real_pentest_mode_accepts_well_formed():
-    """No ``expected_flag`` = real pentest. Agent is the authority."""
+def test_submit_flag_real_pentest_mode_routes_to_report():
+    """No expected benchmark token means flag validation is disabled."""
     state = {
         "next_action": "submit_flag",
         "submission_attempts": ["FLAG{captured-via-prod-sqli-2026}"],
         "expected_flag": "",
     }
-    assert route_after_planner(state) is END
+    assert route_after_planner(state) == "report"
 
 
-def test_submit_flag_real_pentest_mode_rejects_placeholder():
-    """Placeholder defence applies in real-pentest mode too."""
+def test_submit_flag_real_pentest_placeholder_still_routes_to_report():
+    """Even a placeholder cannot activate benchmark logic on a real target."""
     state = {
         "next_action": "submit_flag",
         "submission_attempts": ["FLAG{...}"],
         "expected_flag": "",
     }
-    assert route_after_planner(state) == "planner"
+    assert route_after_planner(state) == "report"
 
 
 def test_submit_flag_uses_latest_attempt():
@@ -178,7 +177,7 @@ def test_attack_with_pending_dispatch_returns_send_list():
 
 def test_attack_with_empty_dispatch_terminates():
     state = {"next_action": "attack", "pending_dispatch": []}
-    assert route_after_planner(state) is END
+    assert route_after_planner(state) == "report"
 
 
 def test_recon_fans_out_to_parallel_dimensions():
@@ -201,12 +200,17 @@ def test_web_search_returns_web_search_node():
     assert route_after_planner({"next_action": "web_search"}) == "web_search"
 
 
-def test_report_routes_to_end():
-    """Report node is currently bypassed via ``_TERMINATE = END``."""
-    assert route_after_planner({"next_action": "report"}) is END
+def test_report_routes_to_report_node():
+    """Real engagements build a report; benchmark runs still bypass it."""
+    assert route_after_planner({"next_action": "report"}) == "report"
+    assert route_after_planner({
+        "next_action": "report",
+        "expected_flag": "FLAG{benchmark}",
+        "budget_exhausted": True,
+    }) is END
 
 
 def test_unknown_action_terminates_defensively():
-    """Defensive: anything outside VALID_ACTIONS routes to END not crash."""
-    assert route_after_planner({"next_action": "bogus_action"}) is END
-    assert route_after_planner({}) is END  # missing action falls through
+    """Defensive real-target failures still produce the final report."""
+    assert route_after_planner({"next_action": "bogus_action"}) == "report"
+    assert route_after_planner({}) == "report"  # missing action falls through

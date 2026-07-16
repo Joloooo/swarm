@@ -960,6 +960,21 @@ class SummarizerNode(BaseNode):
                     len(recon_text),
                 )
 
+        # A four-hour live campaign must not keep its only useful state in
+        # memory until the terminal report node. Persist the accumulated
+        # findings plus compressed worker memory after every barrier. This is
+        # deliberately separate from report generation: it is cheap,
+        # resumable evidence storage rather than a repeatedly polished report.
+        if state.get("traffic_profile") == "remote_safe":
+            try:
+                from src.reporting.live_checkpoint import write_live_checkpoint
+
+                update["checkpoint_seq"] = write_live_checkpoint(
+                    state, update, report_messages,
+                )
+            except Exception as e:  # noqa: BLE001 — persistence cannot stop testing
+                self.log.warning("summarizer: live checkpoint failed: %s", e)
+
         return update
 
     async def _summarize_one(

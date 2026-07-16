@@ -142,7 +142,10 @@ async def _run_skill_agent_impl(
         or (state or {}).get("expected_flag_candidates")
     )
     system_msg = _build_system_message(
-        config, target_url, is_benchmark=is_benchmark,
+        config,
+        target_url,
+        is_benchmark=is_benchmark,
+        traffic_profile=str((state or {}).get("traffic_profile") or ""),
     )
 
     # Agent construction is deferred to _agent_factory below so tier-2 refusal-retry

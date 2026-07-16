@@ -58,6 +58,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
+from src.traffic import live_shell_block, observe_traffic, traffic_slot
 from src.tools.shell._common import (
     format_bash_result,
     log_event as _log_event,
@@ -337,8 +338,19 @@ def _check_safety(command: str, *, agent_id: str) -> str | None:
                    scope=scope, reason=scope_err, backend="bash")
         return scope_err
 
+    info = classify_command(command)
+    live_err = live_shell_block(command, info["binary"])
+    if live_err:
+        _log_event(
+            "blocked_remote_safe",
+            agent=agent_id,
+            cmd=command,
+            reason=live_err,
+            backend="bash",
+        )
+        return live_err
+
     if scope:
-        info = classify_command(command)
         if info["binary"] is not None and info["host"] is None:
             _log_event(
                 "scope_unknown",
@@ -405,8 +417,15 @@ async def bash(
         timeout_s=timeout,
     )
 
-    async with sess.lock:
-        result = await _run_one(sess, command, timeout)
+    info = classify_command(command)
+    traffic_target = info["target"] or info["host"]
+    async with traffic_slot(traffic_target):
+        async with sess.lock:
+            result = await _run_one(sess, command, timeout)
+        observe_traffic(
+            traffic_target,
+            f"{result['stdout']}\n{result['stderr']} timed_out={result['timed_out']}",
+        )
 
     formatted = format_bash_result(
         stdout=result["stdout"],
@@ -476,8 +495,15 @@ async def bash_exec(
         entrypoint="bash_exec",
     )
 
-    async with sess.lock:
-        result = await _run_one(sess, command, timeout)
+    info = classify_command(command)
+    traffic_target = info["target"] or info["host"]
+    async with traffic_slot(traffic_target):
+        async with sess.lock:
+            result = await _run_one(sess, command, timeout)
+        observe_traffic(
+            traffic_target,
+            f"{result['stdout']}\n{result['stderr']} timed_out={result['timed_out']}",
+        )
 
     raw_total = len(result["stdout"]) + len(result["stderr"])
     _log_event(

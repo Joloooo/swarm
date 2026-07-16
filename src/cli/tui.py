@@ -28,6 +28,11 @@ their session.
 from __future__ import annotations
 
 import argparse
+import asyncio
+from pathlib import Path
+import shutil
+import subprocess
+import sys
 from typing import Any
 
 import questionary
@@ -36,6 +41,7 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.styles import Style
 from questionary import Choice
 from rich.console import Console
 
@@ -52,6 +58,35 @@ from src.cli import (
 
 
 _console = Console(stderr=True)
+
+
+def _clear_terminal() -> None:
+    """Clear both the visible terminal and its retained scrollback.
+
+    Rich's ``Console.clear()`` emits the normal screen erase (CSI 2J), which
+    redraws cleanly but leaves every prior TUI screen available when the user
+    scrolls upward. CSI 3J removes those saved lines as well. The sequence is
+    intentionally limited to a real terminal so redirected output is untouched.
+    """
+    if not _console.is_terminal:
+        return
+    stream = _console.file
+    stream.write("\x1b[3J\x1b[2J\x1b[H")
+    stream.flush()
+
+# Shared visual language for every questionary screen.  The logo's warm pink
+# is the focus colour; amber identifies the selected value/action.
+_PROMPT_STYLE = Style.from_dict({
+    "qmark": "fg:#ff5f87 bold",
+    "question": "bold",
+    "answer": "fg:#ffaf5f bold",
+    "pointer": "fg:#ff5f87 bold",
+    "highlighted": "fg:#ffaf5f bold",
+    "selected": "fg:#ff5f87",
+    "instruction": "fg:#767676",
+    "text": "",
+    "disabled": "fg:#5f5f5f italic",
+})
 
 
 # The single-container picker shows every XBEN-*-24 benchmark on disk
@@ -76,23 +111,32 @@ def main_loop(args: argparse.Namespace) -> None:
     Docker is **not** started here — it's bootstrapped lazily, only
     when the user picks a benchmark action (see ``_ensure_docker``).
     """
-    banner.show(config_store.path())
-
     # Materialize swarm-config.toml in full (fills a missing/partial file,
     # keeping any existing values) so it always shows every knob. The values
     # themselves are read straight from the file by src.graph at run time.
     config_store.ensure_complete()
 
     while True:
+        # Treat the interactive menu like one screen instead of appending each
+        # prompt and submenu to the terminal forever.  Redraw the banner after
+        # clearing so returning from usage/config/benchmark views is clean.
+        _clear_terminal()
+        banner.show(config_store.path())
         action = _top_level()
         if action is None or action == "quit":
-            _console.print("[dim]👋 bye[/dim]")
+            # Leave the user's terminal clean when the TUI closes; otherwise
+            # the large banner and final questionary prompt remain visible.
+            _clear_terminal()
             return
 
         # Fetch + show live 5h/weekly Codex usage for the ~/.codex login.
         # Read-only (no quota used). See codex_usage.
         if action == "__codex_usage__":
             _show_codex_usage()
+            continue
+
+        if action == "target":
+            _run_target()
             continue
 
         if action == "xbow":
@@ -160,6 +204,7 @@ def _ensure_docker(args: argparse.Namespace) -> bool:
 
 def _top_level() -> str | None:
     choices: list[Choice] = [
+        Choice("Target engagements  — new, continue, or regenerate report", value="target"),
         Choice("Codex usage (5-hour / weekly) — fetch live", value="__codex_usage__"),
         Choice("xbow benchmark  (run one, a selection, or all — sequential or concurrent)", value="xbow"),
         Choice("Edit config",                                                 value="config"),
@@ -167,12 +212,357 @@ def _top_level() -> str | None:
     ]
 
     question = questionary.select(
-        "What do you want to do?",
+        "Swarm control center",
         choices=choices,
         use_shortcuts=False,
         instruction="(use ↑/↓, enter to confirm, Ctrl-C to quit)",
+        style=_PROMPT_STYLE,
     )
     return question.ask()
+
+
+def _run_target() -> None:
+    """Open the runtime-owned real-target engagement lifecycle."""
+    action = questionary.select(
+        "Target engagements",
+        choices=[
+            Choice("New engagement", value="new"),
+            Choice("Continue engagement — add active testing time", value="continue"),
+            Choice("Regenerate report — no reconnaissance or testing", value="report"),
+            Choice("← Back", value="back"),
+        ],
+        instruction="(use ↑/↓, enter to confirm, Ctrl-C to go back)",
+        style=_PROMPT_STYLE,
+    ).ask()
+    if action in {None, "back"}:
+        return
+    if action == "new":
+        _run_new_target()
+    elif action == "continue":
+        _run_continued_target()
+    else:
+        _run_report_regeneration()
+
+
+def _run_new_target() -> None:
+    """Collect an instruction, duration, and optional periodic report interval."""
+    from rich.panel import Panel
+
+    from src.cli import oneshot
+
+    _console.print(
+        Panel(
+            "Describe the target, authorization scope, credentials (if any), "
+            "and what you want tested. This becomes the supervisor's first "
+            "message exactly as written.\n\n"
+            "[dim]Example: Test https://staging.example.com for web "
+            "vulnerabilities. Stay on this host and do not test denial of "
+            "service.[/dim]",
+            title="[bold #ff5f87] NEW TARGET ENGAGEMENT [/bold #ff5f87]",
+            title_align="left",
+            border_style="#ff5f87",
+            padding=(1, 2),
+            width=min(88, _console.width),
+        )
+    )
+    instruction = questionary.text(
+        "Your instruction:",
+        instruction="(Enter to start, Ctrl-C to cancel)",
+        style=_PROMPT_STYLE,
+        validate=lambda value: bool(value.strip()) or "Please enter a target or instruction.",
+    ).ask()
+    if instruction is None:
+        return
+
+    duration = _pick_duration("How long should active testing run?")
+    if duration is None:
+        return
+    report_interval = _pick_report_interval()
+    if report_interval is None:
+        return
+
+    _console.print()
+    _console.print(
+        Panel(
+            "[bold]Real-target mode[/bold]\n"
+            "Benchmark discovery, expected flags, and benchmark scoring are disabled.\n"
+            "Remote-safe traffic is active: target operations are serialized, scans "
+            "are rate-limited, and timeout/block signals trigger shared backoff.\n\n"
+            f"Active-time budget: [bold]{_duration_label(duration)}[/bold]\n"
+            f"Report updates: [bold]{_report_interval_label(report_interval)}[/bold]\n\n"
+            "First Ctrl-C pauses at the next safe graph barrier, saves state, and updates "
+            "the report. A second Ctrl-C forces exit from the last durable snapshot.",
+            border_style="#ffaf5f",
+            padding=(0, 2),
+            width=min(88, _console.width),
+        )
+    )
+
+    try:
+        result = asyncio.run(
+            oneshot.execute_engagement(
+                instruction.strip(),
+                session_budget_seconds=duration,
+                report_interval_seconds=report_interval,
+            )
+        )
+    except KeyboardInterrupt:
+        _console.print("\n[yellow]Force-exited. The last checkpoint is resumable.[/yellow]")
+        _pause_for_menu()
+        return
+    except Exception as exc:  # noqa: BLE001
+        _show_engagement_error(exc)
+        return
+
+    _show_engagement_result(result, title="PENETRATION TEST REPORT")
+
+
+def _run_continued_target() -> None:
+    """Select an existing folder and add an active-time budget."""
+    from src.cli import oneshot
+
+    directory = _pick_engagement_folder("Continue which engagement?", require_resume=True)
+    if directory is None:
+        return
+    duration = _pick_duration("How much active testing time should be added?")
+    if duration is None:
+        return
+    _console.print(
+        f"[dim]Continuing {directory.name} for {_duration_label(duration)}. "
+        "Logs and reports stay in the same folder.[/dim]"
+    )
+    try:
+        result = asyncio.run(
+            oneshot.continue_engagement(directory, duration)
+        )
+    except KeyboardInterrupt:
+        _console.print("\n[yellow]Force-exited. The last checkpoint is resumable.[/yellow]")
+        _pause_for_menu()
+        return
+    except Exception as exc:  # noqa: BLE001
+        _show_engagement_error(exc)
+        return
+    _show_engagement_result(result, title="CONTINUED ENGAGEMENT REPORT")
+
+
+def _run_report_regeneration() -> None:
+    """Select an existing folder and run only the mandatory reporting skill."""
+    from src.cli import oneshot
+
+    directory = _pick_engagement_folder("Regenerate which report?", require_resume=False)
+    if directory is None:
+        return
+    _console.print(
+        f"[dim]Regenerating from preserved findings in {directory}. "
+        "No reconnaissance or attack workers will run.[/dim]"
+    )
+    try:
+        result = asyncio.run(oneshot.regenerate_engagement_report(directory))
+    except KeyboardInterrupt:
+        _console.print("\n[yellow]Report regeneration cancelled.[/yellow]")
+        _pause_for_menu()
+        return
+    except Exception as exc:  # noqa: BLE001
+        _show_engagement_error(exc)
+        return
+    _show_engagement_result(result, title="REPORT REGENERATED")
+
+
+def _show_engagement_error(exc: BaseException) -> None:
+    from rich.panel import Panel
+
+    _console.print(
+        Panel(
+            f"{type(exc).__name__}: {exc}",
+            title="[bold red] ENGAGEMENT FAILED [/bold red]",
+            border_style="red",
+        )
+    )
+    _pause_for_menu()
+
+
+def _show_engagement_result(
+    result: tuple[str, str, str, str],
+    *,
+    title: str,
+) -> None:
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+
+    from src.engagement import load_manifest
+
+    report, markdown_path, pdf_path, pdf_error = result
+    directory = Path(markdown_path).parent if markdown_path else None
+    manifest = load_manifest(directory) if directory else None
+    status = str((manifest or {}).get("status") or "completed")
+
+    _console.print()
+    subtitle = "PDF + Markdown saved" if pdf_path else "Markdown saved"
+    _console.print(
+        Panel(
+            Markdown(report),
+            title=f"[bold #ff5f87] {title} [/bold #ff5f87]",
+            subtitle=f"{subtitle} • {status}",
+            border_style="#ff5f87",
+            padding=(1, 2),
+        )
+    )
+    if pdf_path:
+        _console.print(f"[dim]  PDF      {pdf_path}[/dim]")
+    if markdown_path:
+        _console.print(f"[dim]  Markdown {markdown_path}[/dim]")
+        _console.print(f"[dim]  Run folder {Path(markdown_path).parent}[/dim]")
+    if pdf_error:
+        _console.print(f"[yellow]PDF generation warning: {pdf_error}[/yellow]")
+    _pause_for_menu()
+
+
+def _pick_duration(prompt: str) -> int | None:
+    picked = questionary.select(
+        prompt,
+        choices=[
+            Choice("2 hours", value=2 * 60 * 60),
+            Choice("4 hours", value=4 * 60 * 60),
+            Choice("1 hour", value=60 * 60),
+            Choice("8 hours", value=8 * 60 * 60),
+            Choice("Custom minutes…", value="custom"),
+        ],
+        instruction="(only active runtime counts; paused time does not)",
+        style=_PROMPT_STYLE,
+    ).ask()
+    if picked is None:
+        return None
+    if picked != "custom":
+        return int(picked)
+    value = questionary.text(
+        "Active testing minutes:",
+        validate=_int_validator,
+        style=_PROMPT_STYLE,
+    ).ask()
+    return int(value) * 60 if value is not None else None
+
+
+def _pick_report_interval() -> int | None:
+    picked = questionary.select(
+        "While testing continues, how often should the report be refreshed?",
+        choices=[
+            Choice("Only when paused or finished", value=0),
+            Choice("Every 1 hour", value=60 * 60),
+            Choice("Every 2 hours", value=2 * 60 * 60),
+            Choice("Custom minutes…", value="custom"),
+        ],
+        instruction="(updates overwrite the same Markdown and PDF atomically)",
+        style=_PROMPT_STYLE,
+    ).ask()
+    if picked is None:
+        return None
+    if picked != "custom":
+        return int(picked)
+    value = questionary.text(
+        "Report interval minutes:",
+        validate=_int_validator,
+        style=_PROMPT_STYLE,
+    ).ask()
+    return int(value) * 60 if value is not None else None
+
+
+def _duration_label(seconds: int) -> str:
+    hours, remainder = divmod(int(seconds), 3600)
+    minutes = remainder // 60
+    if hours and minutes:
+        return f"{hours}h {minutes}m"
+    if hours:
+        return f"{hours}h"
+    return f"{minutes}m"
+
+
+def _report_interval_label(seconds: int) -> str:
+    return "at pause/end only" if not seconds else f"every {_duration_label(seconds)}"
+
+
+def _pick_engagement_folder(prompt: str, *, require_resume: bool) -> Path | None:
+    from src.engagement import discover_engagement_directories, load_manifest
+    from src.live_output import configured_live_output_root
+
+    root = configured_live_output_root()
+    directories = discover_engagement_directories(root)
+    choices: list[Choice] = []
+    for directory in directories:
+        manifest = load_manifest(directory) or {}
+        status = str(manifest.get("status") or "legacy")
+        active = _duration_label(int(float(manifest.get("active_seconds_total") or 0)))
+        choices.append(Choice(
+            f"{directory.name}  [{status}; {active} active]",
+            value=str(directory),
+        ))
+    choices.extend([
+        Choice("Browse for another engagement folder…", value="__browse__"),
+        Choice("← Back", value="__back__"),
+    ])
+    picked = questionary.select(
+        prompt,
+        choices=choices,
+        instruction=f"(engagement root: {root})",
+        style=_PROMPT_STYLE,
+    ).ask()
+    if picked in {None, "__back__"}:
+        return None
+    directory = (
+        _browse_existing_directory(root)
+        if picked == "__browse__"
+        else Path(str(picked)).expanduser().resolve()
+    )
+    if directory is None:
+        return None
+    try:
+        from src.engagement import load_report_state, load_resume_state
+
+        if require_resume:
+            load_resume_state(directory)
+        else:
+            load_report_state(directory)
+    except Exception as exc:  # noqa: BLE001
+        label = "not resumable" if require_resume else "missing report evidence"
+        _console.print(f"[yellow]That folder is {label}: {exc}[/yellow]")
+        _pause_for_menu()
+        return None
+    return directory
+
+
+def _browse_existing_directory(start: Path) -> Path | None:
+    """Choose an existing engagement folder without changing output config."""
+    if sys.platform == "darwin" and shutil.which("osascript"):
+        escaped = str(start).replace('"', '\\"')
+        script = (
+            'set selectedFolder to choose folder with prompt '
+            '"Choose an existing SwarmAttacker engagement folder" '
+            f'default location (POSIX file "{escaped}")\n'
+            'return POSIX path of selectedFolder'
+        )
+        completed = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode == 0 and completed.stdout.strip():
+            return Path(completed.stdout.strip()).expanduser().resolve()
+        if "User canceled" in completed.stderr or "(-128)" in completed.stderr:
+            return None
+    selected = _terminal_directory_browser(
+        start=start,
+        allow_create=False,
+        title="Existing engagement folder",
+    )
+    return Path(selected).resolve() if selected else None
+
+
+def _pause_for_menu() -> None:
+    _console.print("[dim]  Press Enter to return to the control center[/dim]", end=" ")
+    try:
+        input()
+    except (EOFError, KeyboardInterrupt):
+        pass
 
 
 def _show_codex_usage() -> None:
@@ -182,48 +572,93 @@ def _show_codex_usage() -> None:
     consumed). Lazy-imports :mod:`src.cli.codex_usage` so the TUI's normal
     startup stays light.
     """
+    from rich import box
+    from rich.console import Group
+    from rich.panel import Panel
     from rich.table import Table
+    from rich.text import Text
 
     from src.cli import codex_usage
 
-    _console.print("[dim]Fetching Codex usage… (read-only; no quota used)[/dim]")
+    _console.print("[#767676]  Contacting Codex usage service…[/#767676]")
 
-    table = Table(show_header=True, header_style="bold", title="Codex usage")
-    table.add_column("Account")
-    table.add_column("Plan")
-    table.add_column("5-hour", justify="right")
-    table.add_column("5h resets")
-    table.add_column("Weekly", justify="right")
-    table.add_column("Weekly resets")
-    table.add_column("Credits")
+    table = Table(
+        show_header=True,
+        header_style="bold #ffaf5f",
+        box=box.SIMPLE_HEAD,
+        expand=True,
+        padding=(0, 1),
+    )
+    table.add_column("Window", style="bold white")
+    table.add_column("Remaining", justify="right")
+    table.add_column("Used", justify="right")
+    table.add_column("Resets in", justify="right", style="dim")
 
-    def _pct(window) -> str:  # noqa: ANN001
+    def _used_pct(window) -> str:  # noqa: ANN001
         if window is None:
             return "—"
         p = window.used_percent
         colour = "red" if p >= 80 else "yellow" if p >= 50 else "green"
         return f"[{colour}]{p:g}%[/{colour}]"
 
+    def _remaining_pct(window) -> str:  # noqa: ANN001
+        if window is None:
+            return "—"
+        p = max(0.0, min(100.0, 100.0 - window.used_percent))
+        colour = "red" if p <= 20 else "yellow" if p <= 50 else "green"
+        return f"[{colour}]{p:g}%[/{colour}]"
+
     try:
         u = codex_usage.fetch()
+        account = Text.assemble(
+            (u.email or "~/.codex", "bold white"),
+            ("   •   ", "#767676"),
+            ((u.plan_type or "unknown").upper(), "bold #ffaf5f"),
+            (" plan", "dim"),
+        )
         table.add_row(
-            (u.email or "~/.codex"),
-            (u.plan_type or "?"),
-            _pct(u.primary),
+            "5-hour",
+            _remaining_pct(u.primary),
+            _used_pct(u.primary),
             u.primary.reset_human if u.primary else "—",
-            _pct(u.secondary),
+        )
+        table.add_row(
+            "Weekly",
+            _remaining_pct(u.secondary),
+            _used_pct(u.secondary),
             u.secondary.reset_human if u.secondary else "—",
-            (u.credits_balance if u.has_credits else "—"),
+        )
+        credits = (
+            f"Credits: {u.credits_balance}"
+            if u.has_credits else "No additional credits"
         )
     except codex_usage.CodexAccountAuthError:
-        table.add_row("~/.codex", "[red]revoked[/red]", "—", "—", "—", "—",
-                      "[red]re-login (codex login)[/red]")
+        account = Text("Codex login expired", style="bold red")
+        table.add_row("Status", "—", "—", "[red]Run: codex login[/red]")
+        credits = "Authentication required"
     except Exception as e:  # noqa: BLE001
-        table.add_row("~/.codex", "[red]error[/red]", "—", "—", "—", "—",
-                      f"[red]{type(e).__name__}[/red]")
+        account = Text("Could not load Codex usage", style="bold red")
+        table.add_row("Status", "—", "—", f"[red]{type(e).__name__}[/red]")
+        credits = "Try again in a moment"
 
-    _console.print(table)
-    _console.print("[dim][enter] to return to the menu…[/dim]", end=" ")
+    card = Group(
+        account,
+        Text("Read-only status check • no model quota used", style="dim"),
+        Text(),
+        table,
+        Text(credits, style="dim"),
+    )
+    _console.print(
+        Panel(
+            card,
+            title="[bold #ff5f87] CODEX USAGE [/bold #ff5f87]",
+            title_align="left",
+            border_style="#ff5f87",
+            padding=(1, 2),
+            width=min(72, _console.width),
+        )
+    )
+    _console.print("[dim]  Press Enter to return[/dim]", end=" ")
     try:
         input()
     except (EOFError, KeyboardInterrupt):
@@ -695,124 +1130,6 @@ def _pick_bench() -> tuple[list[str], int] | None:
 # Config submenu
 # ---------------------------------------------------------------------------
 
-def _config_menu() -> None:
-    """Loop the edit-config menu until the user saves or discards.
-
-    Working copy lives in ``cfg`` (a plain dict-of-dicts). Only on
-    "Save & back" is it flushed to disk via ``config_store.save`` and
-    re-injected into ``os.environ`` so subsequent subprocess runs in
-    the same session see the new values immediately.
-    """
-    cfg = config_store.get_current_view()
-
-    while True:
-        action = _config_top(cfg)
-        if action is None:
-            # Ctrl-C inside the config menu → treat like "Discard" so the
-            # user can't accidentally save partial edits.
-            _console.print("[dim]Config edits discarded.[/dim]")
-            return
-        if action == "save":
-            config_store.save(cfg)
-            # The next benchmark run reads swarm-config.toml directly via
-            # src.graph (each run is a fresh subprocess), so writing the file
-            # is all that's needed — no env re-injection.
-            _console.print(f"[green]Saved → {config_store.path()}[/green]")
-            return
-        if action == "discard":
-            _console.print("[dim]Config edits discarded.[/dim]")
-            return
-        if action == "budgets":
-            _budgets_submenu(cfg)
-        elif action == "capability":
-            _capability_submenu(cfg)
-        elif action == "model_slug":
-            _select_into(cfg, "model", "slug",
-                         "Model:", config_store.MODEL_CHOICES)
-        elif action == "reasoning_effort":
-            _select_into(cfg, "model", "reasoning_effort",
-                         "Reasoning effort:", config_store.REASONING_EFFORT_CHOICES)
-        elif action == "reasoning_summary":
-            _select_into(cfg, "model", "reasoning_summary",
-                         "Reasoning summary:", config_store.REASONING_SUMMARY_CHOICES)
-        elif action == "web_synth_model":
-            _select_into(cfg, "model", "web_search_synth_model",
-                         "Web-search synthesis model:",
-                         config_store.WEB_SYNTH_MODEL_CHOICES)
-        elif action == "web_synth_effort":
-            _select_into(cfg, "model", "web_search_synth_reasoning_effort",
-                         "Web-search synthesis effort:",
-                         config_store.WEB_SYNTH_EFFORT_CHOICES)
-        elif action == "verbosity":
-            _select_into(cfg, "verbosity", "mode",
-                         "Verbosity:", config_store.VERBOSITY_CHOICES)
-
-
-def _config_top(cfg: dict[str, dict[str, Any]]) -> str | None:
-    """Print the config menu with current values inlined into each label."""
-    b = cfg["budgets"]
-    budgets_summary = (
-        f"planner={b['planner_max_iters']} "
-        f"worker={b['worker_max_iterations']} "
-        f"llm-tokens={b['llm_max_tokens']} "
-        f"timeout={b.get('run_timeout_s', 1200) // 60}m"
-    )
-
-    choices = [
-        Choice(f"Budgets…     {budgets_summary}",                 value="budgets"),
-        Choice(f"Model        {cfg['model']['slug']}",            value="model_slug"),
-        Choice(f"Reasoning effort   {cfg['model']['reasoning_effort']}",   value="reasoning_effort"),
-        Choice(f"Reasoning summary  {cfg['model']['reasoning_summary']}",  value="reasoning_summary"),
-        Choice(f"Web-search synth model   {cfg['model']['web_search_synth_model']}", value="web_synth_model"),
-        Choice(f"Web-search synth effort  {cfg['model']['web_search_synth_reasoning_effort']}", value="web_synth_effort"),
-        Choice(f"Verbosity    {cfg['verbosity']['mode']}",        value="verbosity"),
-        Choice(f"Capability…  {_capability_summary(cfg)}",        value="capability"),
-        Choice("─" * 40,                                          value="__sep__", disabled="—"),
-        Choice("Save & back",                                     value="save"),
-        Choice("Discard & back",                                  value="discard"),
-    ]
-    return questionary.select(
-        "Edit config — current values shown inline",
-        choices=choices,
-        instruction="(enter to edit / save / discard, Ctrl-C discards)",
-    ).ask()
-
-
-def _budgets_submenu(cfg: dict[str, dict[str, Any]]) -> None:
-    """Int prompts for the budget knobs, in a loop."""
-    keys: list[tuple[str, str]] = [
-        ("planner_max_iters",            "Planner max iterations"),
-        ("worker_max_iterations",        "Worker max iterations"),
-        ("llm_max_tokens",               "LLM max output tokens (per call)"),
-        ("run_timeout_s",                "Agent timeout/benchmark — sec (1200=20m, 2400=40m)"),
-    ]
-    while True:
-        labels: list[Choice] = [
-            Choice(f"{label:<52s} {cfg['budgets'][key]}", value=key)
-            for key, label in keys
-        ]
-        labels.append(Choice("← Back", value="__back__"))
-
-        which = questionary.select(
-            "Budgets — which to edit?",
-            choices=labels,
-            instruction="(Ctrl-C goes back)",
-        ).ask()
-        if which is None or which == "__back__":
-            return
-
-        label = next(lbl for k, lbl in keys if k == which)
-        new = questionary.text(
-            f"{label}:",
-            default=str(cfg["budgets"][which]),
-            validate=_int_validator,
-        ).ask()
-        if new is None:
-            # Ctrl-C on the input → cancel just this edit, keep menu open.
-            continue
-        cfg["budgets"][which] = int(new)
-
-
 # Human labels for the ablation switches, in the thesis ablation-table order.
 # Each flag, when ON, DISABLES that capability for the run.
 _CAPABILITY_KEYS: list[tuple[str, str]] = [
@@ -825,65 +1142,433 @@ _CAPABILITY_KEYS: list[tuple[str, str]] = [
 ]
 
 
-def _capability_summary(cfg: dict[str, dict[str, Any]]) -> str:
-    """One-line state for the config menu: how many capabilities are disabled."""
-    cap = cfg.get("capability", {})
-    n_off = sum(1 for key, _ in _CAPABILITY_KEYS if cap.get(key))
-    if n_off == 0:
-        return "all on (full system)"
-    off = ", ".join(
-        key.removeprefix("disable_") for key, _ in _CAPABILITY_KEYS if cap.get(key)
-    )
-    return f"{n_off} OFF: {off}"
+def _config_items() -> list[dict[str, Any]]:
+    """Flat config rows for the one-screen, auto-saving editor."""
+    items: list[dict[str, Any]] = [
+        {"section": "MODEL", "label": "Model", "kind": "choice",
+         "table": "model", "key": "slug", "choices": config_store.MODEL_CHOICES},
+        {"section": "MODEL", "label": "Reasoning effort", "kind": "choice",
+         "table": "model", "key": "reasoning_effort",
+         "choices": config_store.REASONING_EFFORT_CHOICES},
+        {"section": "MODEL", "label": "Reasoning summary", "kind": "choice",
+         "table": "model", "key": "reasoning_summary",
+         "choices": config_store.REASONING_SUMMARY_CHOICES},
+        {"section": "MODEL", "label": "Search synthesis model", "kind": "choice",
+         "table": "model", "key": "web_search_synth_model",
+         "choices": config_store.WEB_SYNTH_MODEL_CHOICES},
+        {"section": "MODEL", "label": "Search synthesis effort", "kind": "choice",
+         "table": "model", "key": "web_search_synth_reasoning_effort",
+         "choices": config_store.WEB_SYNTH_EFFORT_CHOICES},
+        {"section": "RUNTIME", "label": "Console detail", "kind": "choice",
+         "table": "verbosity", "key": "mode",
+         "choices": config_store.VERBOSITY_CHOICES},
+        {"section": "RUNTIME", "label": "Live output folder", "kind": "directory",
+         "table": "output", "key": "directory"},
+        {"section": "BUDGETS", "label": "Planner iterations", "kind": "int",
+         "table": "budgets", "key": "planner_max_iters"},
+        {"section": "BUDGETS", "label": "Worker iterations", "kind": "int",
+         "table": "budgets", "key": "worker_max_iterations"},
+        {"section": "BUDGETS", "label": "LLM output tokens", "kind": "int",
+         "table": "budgets", "key": "llm_max_tokens"},
+        {"section": "BUDGETS", "label": "LLM call timeout (sec)", "kind": "int",
+         "table": "budgets", "key": "llm_call_timeout_s"},
+        {"section": "BUDGETS", "label": "Run timeout (sec)", "kind": "int",
+         "table": "budgets", "key": "run_timeout_s"},
+    ]
+    for key, label in _CAPABILITY_KEYS:
+        items.append({
+            "section": "CAPABILITIES",
+            "label": label.split(" (")[0],
+            "kind": "bool",
+            "table": "capability",
+            "key": key,
+        })
+    return items
 
 
-def _capability_submenu(cfg: dict[str, dict[str, Any]]) -> None:
-    """Toggle the ablation switches. Selecting a row flips disabled/enabled.
+def _config_menu() -> None:
+    """Show one clean, auto-saving settings screen.
 
-    One ablation run = exactly one capability disabled. Leaving all enabled is
-    the full system. The values land in ``swarm-config.toml [capability]`` on
-    "Save & back" and are read by ``src/graph.py`` on the next run.
+    There is no working copy and therefore no Save/Discard/Back decision.
+    Every confirmed edit is written atomically to ``swarm-config.toml``.
+    Escape or Ctrl-C simply closes the screen.
     """
-    cap = cfg.setdefault("capability", {})
+    cfg = config_store.get_current_view()
+    items = _config_items()
+
     while True:
-        labels: list[Choice] = []
-        for key, label in _CAPABILITY_KEYS:
-            mark = "[DISABLED]" if cap.get(key) else "[ enabled ]"
-            labels.append(Choice(f"{mark}  {label}", value=key))
-        labels.append(Choice("─" * 44, value="__sep__", disabled="—"))
-        labels.append(Choice("← Back", value="__back__"))
-
-        n_off = sum(1 for key, _ in _CAPABILITY_KEYS if cap.get(key))
-        which = questionary.select(
-            f"Capability — turn a feature OFF to ablate it ({n_off} disabled). "
-            "Enter flips the highlighted one.",
-            choices=labels,
-            instruction="(Ctrl-C goes back)",
-        ).ask()
-        if which is None or which == "__back__":
+        result = _config_editor(cfg, items)
+        if result != "directory":
             return
-        if which == "__sep__":
-            continue
-        cap[which] = not bool(cap.get(which))
+        selected = _choose_output_directory()
+        if selected is not None:
+            cfg["output"]["directory"] = selected
+            config_store.save(cfg)
 
 
-def _select_into(
+def _config_editor(
     cfg: dict[str, dict[str, Any]],
-    table: str,
-    key: str,
-    prompt: str,
-    choices: tuple[str, ...],
-) -> None:
-    """Show a `questionary.select` and assign the picked value into cfg."""
-    current = cfg[table][key]
-    picked = questionary.select(
-        prompt,
-        choices=list(choices),
-        default=current if current in choices else None,
-        instruction="(Ctrl-C cancels)",
-    ).ask()
-    if picked is not None:
-        cfg[table][key] = picked
+    items: list[dict[str, Any]],
+) -> str | None:
+    """Run the prompt-toolkit settings editor until close/directory request."""
+    state: dict[str, Any] = {
+        "cursor": 0,
+        "editing": False,
+        "buffer": "",
+        "status": "All changes save automatically",
+        "status_error": False,
+    }
+
+    def _current() -> dict[str, Any]:
+        return items[state["cursor"]]
+
+    def _save(message: str) -> None:
+        try:
+            config_store.save(cfg)
+            state["status"] = f"Saved  {message}"
+            state["status_error"] = False
+        except Exception as exc:  # noqa: BLE001
+            state["status"] = f"Could not save: {exc}"
+            state["status_error"] = True
+
+    def _cycle(delta: int) -> None:
+        item = _current()
+        if item["kind"] == "choice":
+            choices = item["choices"]
+            current = cfg[item["table"]][item["key"]]
+            index = choices.index(current) if current in choices else 0
+            value = choices[(index + delta) % len(choices)]
+            cfg[item["table"]][item["key"]] = value
+            _save(f"{item['label']} = {value}")
+        elif item["kind"] == "bool":
+            value = not bool(cfg[item["table"]][item["key"]])
+            cfg[item["table"]][item["key"]] = value
+            _save(f"{item['label']} = {'OFF' if value else 'ON'}")
+
+    def _render() -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = [
+            ("bold fg:#ff5f87", "\n  SETTINGS"),
+            ("fg:#767676", "  /  swarm-config.toml\n"),
+            ("fg:#767676", "  Changes are written as soon as you confirm them.\n\n"),
+        ]
+
+        try:
+            terminal_width = get_app().output.get_size().columns or 100
+        except Exception:  # noqa: BLE001
+            terminal_width = 100
+        column_width = max(38, (terminal_width - 7) // 2)
+
+        def _item_row(index: int, item: dict[str, Any]) -> list[tuple[str, str]]:
+            selected = index == state["cursor"]
+            segments: list[tuple[str, str]] = [
+                ("bold fg:#ff5f87" if selected else "", "› " if selected else "  ")
+            ]
+            label_width = min(25, max(17, column_width - 18))
+            label = item["label"]
+            if len(label) > label_width:
+                label = label[:label_width - 1] + "…"
+            segments.append((
+                "bold" if selected else "fg:#c8c8c8",
+                f"{label:<{label_width}} ",
+            ))
+
+            value = cfg[item["table"]][item["key"]]
+            if selected and state["editing"] and item["kind"] == "int":
+                shown = f"[ {state['buffer']}▌ ]"
+                style = "bold fg:#ffaf5f"
+            elif item["kind"] == "choice":
+                shown = f"‹ {value} ›"
+                style = "bold fg:#ffaf5f" if selected else "fg:#dedede"
+            elif item["kind"] == "bool":
+                disabled = bool(value)
+                shown = "● OFF" if disabled else "● ON"
+                style = "bold fg:#ff5f87" if disabled else "bold fg:#5fd787"
+            elif item["kind"] == "directory":
+                shown = str(value)
+                style = "fg:#ffaf5f" if selected else "fg:#dedede"
+            else:
+                shown = str(value)
+                style = "fg:#ffaf5f" if selected else "fg:#dedede"
+
+            used = 2 + label_width + 1
+            available = max(5, column_width - used)
+            if len(shown) > available:
+                shown = "…" + shown[-(available - 1):]
+            segments.append((style, shown))
+            visible = used + len(shown)
+            if visible < column_width:
+                segments.append(("", " " * (column_width - visible)))
+            return segments
+
+        def _column_rows(
+            indexed: list[tuple[int, dict[str, Any]]],
+        ) -> list[list[tuple[str, str]]]:
+            rows: list[list[tuple[str, str]]] = []
+            previous_section = ""
+            for index, item in indexed:
+                if item["section"] != previous_section:
+                    if previous_section:
+                        rows.append([("", " " * column_width)])
+                    heading = f"{item['section']}"
+                    rows.append([
+                        ("bold fg:#ff5f87", f"{heading:<{column_width}}")
+                    ])
+                    previous_section = item["section"]
+                rows.append(_item_row(index, item))
+            return rows
+
+        # Model/runtime on the left; budgets/capabilities on the right. This
+        # keeps the complete editor visible in a standard 24-line terminal.
+        left_rows = _column_rows(list(enumerate(items[:7])))
+        right_rows = _column_rows(list(enumerate(items[7:], start=7)))
+        row_count = max(len(left_rows), len(right_rows))
+        blank = [("", " " * column_width)]
+        for row_index in range(row_count):
+            out.extend(left_rows[row_index] if row_index < len(left_rows) else blank)
+            out.append(("fg:#3a3a3a", "  │  "))
+            out.extend(right_rows[row_index] if row_index < len(right_rows) else blank)
+            out.append(("", "\n"))
+
+        status_style = "bold fg:#ff5f87" if state["status_error"] else "fg:#5fd787"
+        out.extend([
+            ("", "\n"),
+            (status_style, f"  {state['status']}\n"),
+            ("fg:#767676", "  ↑↓ navigate   ←→ change   Enter edit/toggle   Esc close\n"),
+        ])
+        return out
+
+    kb = KeyBindings()
+    nav = Condition(lambda: not state["editing"])
+    edit = Condition(lambda: bool(state["editing"]))
+
+    @kb.add("up", eager=True, filter=nav)
+    @kb.add("k", eager=True, filter=nav)
+    def _(event) -> None:  # noqa: ANN001
+        state["cursor"] = (state["cursor"] - 1) % len(items)
+
+    @kb.add("down", eager=True, filter=nav)
+    @kb.add("j", eager=True, filter=nav)
+    def _(event) -> None:  # noqa: ANN001
+        state["cursor"] = (state["cursor"] + 1) % len(items)
+
+    @kb.add("left", eager=True, filter=nav)
+    @kb.add("h", eager=True, filter=nav)
+    def _(event) -> None:  # noqa: ANN001
+        _cycle(-1)
+
+    @kb.add("right", eager=True, filter=nav)
+    @kb.add("l", eager=True, filter=nav)
+    def _(event) -> None:  # noqa: ANN001
+        _cycle(1)
+
+    @kb.add("enter", filter=nav)
+    def _(event) -> None:  # noqa: ANN001
+        item = _current()
+        if item["kind"] in {"choice", "bool"}:
+            _cycle(1)
+        elif item["kind"] == "int":
+            state["editing"] = True
+            state["buffer"] = str(cfg[item["table"]][item["key"]])
+        elif item["kind"] == "directory":
+            event.app.exit(result="directory")
+
+    @kb.add("escape", filter=nav)
+    @kb.add("c-c", filter=nav)
+    @kb.add("q", filter=nav)
+    def _(event) -> None:  # noqa: ANN001
+        event.app.exit(result=None)
+
+    def _add_digit(digit: str) -> None:
+        @kb.add(digit, filter=edit)
+        def _(event) -> None:  # noqa: ANN001
+            if len(state["buffer"]) < 9:
+                state["buffer"] += digit
+
+    for _digit in "0123456789":
+        _add_digit(_digit)
+
+    @kb.add("backspace", filter=edit)
+    def _(event) -> None:  # noqa: ANN001
+        state["buffer"] = state["buffer"][:-1]
+
+    @kb.add("enter", filter=edit)
+    def _(event) -> None:  # noqa: ANN001
+        item = _current()
+        validation = _int_validator(state["buffer"])
+        if validation is not True:
+            state["status"] = str(validation)
+            state["status_error"] = True
+            return
+        value = int(state["buffer"])
+        cfg[item["table"]][item["key"]] = value
+        state["editing"] = False
+        state["buffer"] = ""
+        _save(f"{item['label']} = {value}")
+
+    @kb.add("escape", filter=edit)
+    @kb.add("c-c", filter=edit)
+    def _(event) -> None:  # noqa: ANN001
+        state["editing"] = False
+        state["buffer"] = ""
+        state["status"] = "Edit cancelled"
+        state["status_error"] = False
+
+    app = Application(
+        layout=Layout(HSplit([
+            Window(
+                FormattedTextControl(_render, focusable=True, show_cursor=False),
+                always_hide_cursor=True,
+            ),
+        ])),
+        key_bindings=kb,
+        full_screen=False,
+        mouse_support=False,
+        erase_when_done=True,
+    )
+    try:
+        return app.run()
+    except KeyboardInterrupt:
+        return None
+
+
+def _choose_output_directory() -> str | None:
+    """Choose a real-target output root, starting from the user's home.
+
+    macOS gets its native folder chooser, including the standard New Folder
+    button and Shift-Command-N shortcut. Other environments use the terminal
+    browser below, which supports navigation and folder creation without
+    requiring a full path to be typed.
+    """
+    if sys.platform == "darwin" and shutil.which("osascript"):
+        _console.print(
+            "[dim]Opening the folder chooser at your home directory. "
+            "Create a folder with Shift+Command+N.[/dim]"
+        )
+        script = (
+            'set selectedFolder to choose folder with prompt '
+            '"Choose where SwarmAttacker should save real-target runs" '
+            'default location (path to home folder)\n'
+            'return POSIX path of selectedFolder'
+        )
+        completed = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode == 0 and completed.stdout.strip():
+            return str(Path(completed.stdout.strip()).expanduser().resolve())
+        error = completed.stderr.strip()
+        if "User canceled" in error or "(-128)" in error:
+            return None
+        _console.print(
+            "[yellow]Native folder chooser was unavailable; "
+            "using the terminal browser.[/yellow]"
+        )
+
+    return _terminal_directory_browser()
+
+
+def _terminal_directory_browser(
+    *,
+    start: Path | None = None,
+    allow_create: bool = True,
+    title: str = "Live output folder",
+) -> str | None:
+    """Browse directories in-terminal, optionally permitting folder creation."""
+    home = Path.home().expanduser().resolve()
+    initial = Path(start).expanduser().resolve() if start else home
+    current = initial if initial.is_dir() else home
+
+    while True:
+        try:
+            directories = sorted(
+                (entry for entry in current.iterdir() if entry.is_dir()),
+                key=lambda entry: (entry.name.startswith("."), entry.name.casefold()),
+            )
+        except OSError as exc:
+            _console.print(f"[yellow]Cannot open {current}: {exc}[/yellow]")
+            current = home
+            directories = []
+
+        choices: list[Choice] = [
+            Choice("✓  Use this folder", value="__use__", shortcut_key="u"),
+        ]
+        if allow_create:
+            choices.append(
+                Choice("＋  Create a new folder", value="__create__", shortcut_key="n")
+            )
+        choices.extend([
+            Choice("⌂  Go to home", value="__home__", shortcut_key="h"),
+            Choice("↑  Go to parent", value="__parent__", shortcut_key="b"),
+            Choice("─" * 46, value="__sep__", disabled="—", shortcut_key=False),
+        ])
+        choices.extend(
+            Choice(
+                f"📁 {entry.name}",
+                value=str(entry),
+                shortcut_key=False,
+            )
+            for entry in directories
+        )
+
+        picked = questionary.select(
+            f"{title}\n{current}",
+            choices=choices,
+            instruction=(
+                "(Enter opens; U use; "
+                + ("N new folder; " if allow_create else "")
+                + "H home; B parent; "
+                "type to search; Ctrl-C cancels)"
+            ),
+            style=_PROMPT_STYLE,
+            use_shortcuts=True,
+            use_jk_keys=False,
+            use_search_filter=True,
+        ).ask()
+        if picked is None:
+            return None
+        if picked == "__use__":
+            return str(current)
+        if picked == "__home__":
+            current = home
+            continue
+        if picked == "__parent__":
+            current = current.parent
+            continue
+        if picked == "__sep__":
+            continue
+        if picked == "__create__":
+            def _valid_folder_name(value: str) -> bool | str:
+                name = value.strip()
+                if not name:
+                    return "Folder name must not be empty."
+                if name in {".", ".."} or "/" in name or "\x00" in name:
+                    return "Use a single folder name, not a path."
+                if (current / name).exists():
+                    return "A file or folder with that name already exists."
+                return True
+
+            name = questionary.text(
+                "New folder name:",
+                validate=_valid_folder_name,
+                instruction="(created inside the folder shown above; Ctrl-C cancels)",
+                style=_PROMPT_STYLE,
+            ).ask()
+            if name is None:
+                continue
+            new_directory = current / name.strip()
+            try:
+                new_directory.mkdir()
+            except OSError as exc:
+                _console.print(
+                    f"[yellow]Could not create {new_directory}: {exc}[/yellow]"
+                )
+                continue
+            current = new_directory.resolve()
+            continue
+
+        current = Path(str(picked)).expanduser().resolve()
 
 
 def _int_validator(text: str) -> bool | str:

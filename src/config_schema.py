@@ -72,6 +72,13 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "verbosity": {
         "mode": "compact",
     },
+    # Real-target artifacts only. Each engagement creates a ``run-...``
+    # directory beneath this root containing its logs, checkpoints, and final
+    # Markdown/PDF reports. Relative paths resolve from the project root.
+    # Benchmark output does not use this setting.
+    "output": {
+        "directory": "output",
+    },
     # Ablation switches — each turns OFF one capability of the agent so its
     # contribution can be measured (see the thesis ablation study). EVERY flag
     # defaults to ``false``: with the whole table at its defaults the full

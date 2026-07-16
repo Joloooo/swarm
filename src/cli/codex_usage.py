@@ -171,11 +171,13 @@ def fetch(codex_home: Path | None = None, *, timeout: float = 15.0) -> Usage:
 def _format_plain(u: Usage) -> str:
     plan = (u.plan_type or "?").lower()
     p = (
-        f"{u.primary.used_percent:g}% (resets {u.primary.reset_human})"
+        f"{max(0.0, min(100.0, 100.0 - u.primary.used_percent)):g}% remaining, "
+        f"{u.primary.used_percent:g}% used (resets {u.primary.reset_human})"
         if u.primary else "?"
     )
     s = (
-        f"{u.secondary.used_percent:g}% (resets {u.secondary.reset_human})"
+        f"{max(0.0, min(100.0, 100.0 - u.secondary.used_percent)):g}% remaining, "
+        f"{u.secondary.used_percent:g}% used (resets {u.secondary.reset_human})"
         if u.secondary else "?"
     )
     who = u.email or "~/.codex"

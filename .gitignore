@@ -1,4 +1,5 @@
 .env
+.DS_Store
 __pycache__/
 *.pyc
 .venv/
@@ -7,6 +8,14 @@ dist/
 .langgraph/
 .langgraph_api/
 logs/
+output/
+reports/
+
+# Generated benchmark state and local run artifacts.
+benchmarks/*.lock
+benchmarks/build_logs/
+benchmarks/results/
+benchmarks/bench_results.baseline_*.json
 
 # `swarm` CLI: per-user persistent config + generated benchmark lists.
 swarm-config.toml

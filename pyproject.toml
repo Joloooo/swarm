@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "langchain>=1.2",
     "langgraph>=0.4",
     "langchain-core>=0.3",
     "langchain-openai>=0.3",
@@ -28,6 +29,8 @@ dependencies = [
     "tomlkit>=0.13",
     "markdownify>=1.2.2",
     "beautifulsoup4>=4.15.0",
+    # Branded real-target penetration-test reports.
+    "reportlab>=4.2",
 ]
 
 [project.optional-dependencies]

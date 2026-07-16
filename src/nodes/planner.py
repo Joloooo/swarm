@@ -46,6 +46,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any
 
 from typing import TYPE_CHECKING
@@ -65,6 +66,7 @@ from src.skills.loader import (
 )
 from src.state import SwarmGraphState
 from src.tools.url import normalize_url, validate_website
+from src.traffic import REMOTE_SAFE_PROFILE
 
 # ``src.llm.provider`` is imported lazily inside ``PlannerNode.__init__``
 # to break the circular chain
@@ -632,6 +634,136 @@ def _fallback_decision(state: SwarmGraphState) -> dict:
             "Refusal-recovery fallback: supervisor refused twice after "
             "recon. Dispatching sqli/xss/idor as broad coverage of common "
             "input-handling issue categories to keep the test productive."
+        ),
+    }
+
+
+def _live_campaign_remaining_s(state: SwarmGraphState) -> float:
+    if state.get("traffic_profile") != REMOTE_SAFE_PROFILE:
+        return 0.0
+    try:
+        deadline = float(state.get("engagement_deadline_at") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if deadline <= 0:
+        return 0.0
+    return max(0.0, deadline - time.time())
+
+
+def _live_campaign_open(state: SwarmGraphState) -> bool:
+    return _live_campaign_remaining_s(state) > 0.0
+
+
+def _format_remaining(seconds: float) -> str:
+    seconds_i = max(0, int(seconds))
+    hours, rem = divmod(seconds_i, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _live_campaign_note(state: SwarmGraphState) -> str:
+    remaining = _format_remaining(_live_campaign_remaining_s(state))
+    return (
+        "[SYSTEM NOTE] Live campaign clock is still open "
+        f"({remaining} remaining). Do not choose report or submit_flag before "
+        "the deadline unless an infrastructure budget/rate-limit stop is set. "
+        "Continue with one evidence-led, remote-safe action. If the target is "
+        "timing out or blocked, respect tool backoff and use only lightweight "
+        "reachability checks instead of broad scans. Durable checkpoints are "
+        "written at summarizer barriers; the final report is generated at the "
+        "configured session deadline or when the operator pauses the run."
+    )
+
+
+def _result_config_name(result: object) -> str:
+    if isinstance(result, dict):
+        return str(result.get("config_name") or "").strip()
+    return str(getattr(result, "config_name", "") or "").strip()
+
+
+def _valid_skill_names() -> set[str]:
+    return {name for name, _ in list_dispatchable_skills()}
+
+
+def _pick_live_continuation_skill(state: SwarmGraphState) -> str:
+    valid = _valid_skill_names()
+    tried = {
+        name
+        for name in (_result_config_name(r) for r in state.get("agent_results") or [])
+        if name
+    }
+
+    candidates: list[str] = []
+    for item in state.get("skill_handoffs") or []:
+        if isinstance(item, dict):
+            candidates.append(str(item.get("suggested_skill") or "").strip())
+    for item in state.get("suggested_next_moves") or []:
+        if isinstance(item, dict):
+            candidates.append(str(item.get("skill") or item.get("suggested_skill") or "").strip())
+    summary = state.get("relevant_summary") or {}
+    if isinstance(summary, dict):
+        for item in summary.get("untried") or []:
+            if isinstance(item, dict):
+                candidates.append(str(item.get("suggested_skill") or "").strip())
+    for hyp in state.get("hypotheses") or []:
+        skill = getattr(hyp, "required_skill", "")
+        if not skill and isinstance(hyp, dict):
+            skill = str(hyp.get("required_skill") or "")
+        candidates.append(str(skill).strip())
+
+    for skill in candidates:
+        if skill in valid and skill not in tried:
+            return skill
+
+    rotation = [
+        "exploration",
+        "information-disclosure",
+        "auth-testing",
+        "idor",
+        "sqli",
+        "xss",
+        "ssrf",
+        "lfi",
+        "ssti",
+        "logic-flaws",
+    ]
+    for skill in rotation:
+        if skill in valid and skill not in tried:
+            return skill
+    for skill in rotation:
+        if skill in valid:
+            return skill
+    return next(iter(valid), "exploration")
+
+
+def _live_continuation_decision(state: SwarmGraphState, reason: str) -> dict:
+    target_url = (state.get("target_url") or "").strip()
+    target_scope = (state.get("target_scope") or target_url).strip()
+    if not state.get("recon_done"):
+        return {
+            "action": "recon",
+            "mode": "analyze",
+            "target_url": target_url,
+            "target_scope": target_scope,
+            "reasoning": (
+                f"{reason} Live campaign deadline is still open and recon has "
+                "not completed, so continue with remote-safe reconnaissance."
+            ),
+        }
+    skill = _pick_live_continuation_skill(state)
+    return {
+        "action": "attack",
+        "configs": [skill],
+        "mode": state.get("mode") or "analyze",
+        "target_url": target_url,
+        "target_scope": target_scope,
+        "reasoning": (
+            f"{reason} Live campaign deadline is still open, so continue with "
+            f"one serialized remote-safe worker: {skill}."
         ),
     }
 
@@ -3216,6 +3348,20 @@ class PlannerNode(BaseNode):
         from src.llm.rate_limit_signal import is_rate_limited
 
         iters = state.get("planner_iters", 0) + 1
+        live_open = _live_campaign_open(state)
+        live_profile = state.get("traffic_profile") == REMOTE_SAFE_PROFILE
+        if live_profile and not live_open and state.get("engagement_deadline_at"):
+            self.log.info(
+                "Live campaign deadline reached; routing to final report."
+            )
+            return {
+                "planner_iters": iters,
+                "next_action": "report",
+                "messages": [AIMessage(content=(
+                    "Live campaign deadline reached. Producing the final report "
+                    "from accumulated findings and checkpoints."
+                ))],
+            }
 
         # Pull the run_id once so every LLM call below logs into the
         # same llm_calls.jsonl. The state always carries run_id by the
@@ -3224,7 +3370,7 @@ class PlannerNode(BaseNode):
         run_id = state.get("run_id")
 
         # Hard cap — end the run rather than loop forever.
-        if iters > MAX_PLANNER_ITERS:
+        if iters > MAX_PLANNER_ITERS and not live_open:
             self.log.warning(
                 "Supervisor exceeded MAX_PLANNER_ITERS=%d; ending the run.",
                 MAX_PLANNER_ITERS,
@@ -3524,6 +3670,8 @@ class PlannerNode(BaseNode):
             prior_messages.append(
                 HumanMessage(content=BENCHMARK_PROGRESS_FOOTER)
             )
+        if live_open:
+            prior_messages.append(HumanMessage(content=_live_campaign_note(state)))
 
         try:
             result = await self._invoke_with_transient_retry(
@@ -3599,18 +3747,31 @@ class PlannerNode(BaseNode):
                 "forcing report. Final text starts: %r",
                 final_text[:200],
             )
-            return {
-                "planner_iters": iters,
-                "next_action": "report",
-                "messages": new_messages + [
-                    AIMessage(
-                        content=(
-                            "Supervisor output did not include a valid JSON "
-                            "decision block after retry. Forcing report."
+            if live_open and not state.get("budget_exhausted"):
+                decision = _live_continuation_decision(
+                    state,
+                    "Supervisor did not produce parseable JSON after retry.",
+                )
+                new_messages = list(new_messages) + [
+                    AIMessage(content=(
+                        "Supervisor output did not include a valid JSON decision "
+                        "block after retry. Continuing the live campaign with a "
+                        "deterministic remote-safe action."
+                    ))
+                ]
+            else:
+                return {
+                    "planner_iters": iters,
+                    "next_action": "report",
+                    "messages": new_messages + [
+                        AIMessage(
+                            content=(
+                                "Supervisor output did not include a valid JSON "
+                                "decision block after retry. Forcing report."
+                            )
                         )
-                    )
-                ],
-            }
+                    ],
+                }
 
         # Tier 2 — refusal-recovery retry.
         #
@@ -3730,6 +3891,23 @@ class PlannerNode(BaseNode):
             ))]
             forced_recoveries_after += 1
 
+        if (
+            live_open
+            and not state.get("budget_exhausted")
+            and decision.get("action") in {"report", "submit_flag"}
+        ):
+            original_action = str(decision.get("action") or "")
+            decision = _live_continuation_decision(
+                state,
+                f"Supervisor chose {original_action} before the live deadline.",
+            )
+            final_text = decision.get("reasoning", "")
+            new_messages = list(new_messages) + [AIMessage(content=(
+                "[live campaign] The supervisor chose an ending action before "
+                "the configured live deadline. Overriding with one serialized "
+                f"remote-safe continuation: action={decision['action']}."
+            ))]
+
         action = decision["action"]
         target_url = (decision.get("target_url") or state.get("target_url") or "").strip()
         target_scope = (
@@ -3815,6 +3993,12 @@ class PlannerNode(BaseNode):
             # Soft 50/50 prove/explore balance + time-phased hard cap
             # (4 in the first 10 min, 6 after — see _current_dispatch_cap).
             pending = _balance_and_cap_dispatch(pending)
+            if state.get("traffic_profile") == "remote_safe" and len(pending) > 1:
+                self.log.info(
+                    "remote-safe live profile serialized attack dispatch: %d -> 1",
+                    len(pending),
+                )
+                pending = pending[:1]
             _tag_explore_dispatches(pending)
             if not pending:
                 self.log.warning(

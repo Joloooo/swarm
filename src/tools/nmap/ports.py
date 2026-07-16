@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
+from src.traffic import is_remote_safe
 from src.tools.nmap._engine import run
 from src.tools.nmap._schema import ScanResult
 
@@ -41,6 +42,8 @@ async def nmap_fast_scan(
     """
     _ = agent_id, reasoning
     top = max(1, min(1000, int(top_ports)))
+    if is_remote_safe():
+        top = min(top, 20)
     args = f"{_scan_type(tcp_connect)} --top-ports {top} --max-retries 1 --host-timeout 90s".strip()
     return await run(tool="nmap_fast_scan", target=target, user_args=args)
 
@@ -69,6 +72,20 @@ async def nmap_full_scan(
         ScanResult — hosts[].ports[] list all open ports.
     """
     _ = agent_id, reasoning
+    if is_remote_safe():
+        # Keep the tool useful when a legacy prompt asks for a full sweep, but
+        # replace 65,535 probes with a conservative service-oriented set.
+        common = "21,22,25,53,80,110,143,443,445,3000,5000,8000,8080,8443,8888,9000"
+        args = (
+            f"{_scan_type(True)} -p {common} --max-retries 1 "
+            "--host-timeout 2m"
+        ).strip()
+        result = await run(tool="nmap_full_scan", target=target, user_args=args)
+        result.setdefault("warnings", []).append(
+            "Remote-safe live profile replaced the all-port sweep with 16 common ports."
+        )
+        return result
+
     args = f"{_scan_type(tcp_connect)} -p- --max-retries 2 --host-timeout 10m".strip()
     return await run(tool="nmap_full_scan", target=target, user_args=args)
 

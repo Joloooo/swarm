@@ -10,9 +10,12 @@ that took the prompt from accepted → refused.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
-LOG = Path("/Users/zviadjolokhava/My Drive/Thesis/SwarmAttacker/logs/run-XBEN-006-24__2026-05-09_18h07m14s/llm_calls.jsonl")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_LOG = PROJECT_ROOT / "logs/run-XBEN-006-24__2026-05-09_18h07m14s/llm_calls.jsonl"
+LOG = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else DEFAULT_LOG
 REJ = LOG.parent / "rejected_requests"
 
 # The 6 cases where plain × 3 failed in v2

@@ -7,6 +7,7 @@ import shlex
 
 from langchain_core.tools import tool
 
+from src.traffic import is_remote_safe
 from src.tools.shell import bash_exec
 from src.tools.wordlists import resolve_wordlist
 
@@ -70,15 +71,22 @@ async def gobuster_dir(
     # gobuster sets a default `-b 404` blacklist that conflicts with
     # an explicit `-s` whitelist (it refuses to run with both). Pass an
     # empty `-b` to override the default and let the whitelist govern.
+    live_safe = is_remote_safe()
+    effective_threads = 1 if live_safe else int(threads)
     parts = [
         "gobuster", "dir",
         "-u", shlex.quote(url),
         "-w", shlex.quote(list_path),
-        "-t", str(int(threads)),
+        "-t", str(effective_threads),
         "-s", shlex.quote(status_codes),
         "-b", "''",
         "--no-error",
     ]
+    if live_safe:
+        # Gobuster's defaults are designed for fast local discovery. A single
+        # worker plus an inter-request delay avoids the 20-request burst that
+        # made the legacy public target start timing out.
+        parts.extend(["--delay", "2s", "--timeout", "60s"])
     if extensions:
         parts.extend(["-x", shlex.quote(extensions)])
     cmd = " ".join(parts)

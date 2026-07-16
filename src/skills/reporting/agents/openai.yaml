@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pentest Reporting"
+  short_description: "Always structure final pentest reports professionally"
+  default_prompt: "Use $reporting to turn canonical findings into the final executive and technical penetration-testing report."

@@ -29,6 +29,7 @@ import time
 
 from langchain_core.tools import tool
 
+from src.traffic import live_shell_block, observe_traffic, traffic_slot
 from src.tools.shell._common import (
     log_event as _log_event,
     set_log_file,  # re-exported for the back-compat shim
@@ -186,10 +187,21 @@ def _check_safety(command: str, *, agent_id: str) -> str | None:
                    scope=scope, reason=scope_err)
         return scope_err
 
+    info = classify_command(command)
+    live_err = live_shell_block(command, info["binary"])
+    if live_err:
+        _log_event(
+            "blocked_remote_safe",
+            agent=agent_id,
+            cmd=command,
+            reason=live_err,
+            backend="tmux",
+        )
+        return live_err
+
     # Diagnostic: log when we couldn't classify the binary, so the
     # operator notices the scope check silently passed it through.
     if scope:
-        info = classify_command(command)
         if info["binary"] is not None and info["host"] is None:
             _log_event(
                 "scope_unknown",
@@ -250,7 +262,11 @@ async def run_command(
         reasoning=reasoning,
     )
 
-    output = await _async_run_in_pane(pane_id, command)
+    info = classify_command(command)
+    traffic_target = info["target"] or info["host"]
+    async with traffic_slot(traffic_target):
+        output = await _async_run_in_pane(pane_id, command)
+        observe_traffic(traffic_target, output)
 
     dt_ms = int((time.perf_counter() - t0) * 1000)
     raw_bytes = len(output)
@@ -306,7 +322,11 @@ async def shell(
         reasoning=reasoning,
     )
 
-    output = await _async_run_in_pane(pane_id, command, timeout)
+    info = classify_command(command)
+    traffic_target = info["target"] or info["host"]
+    async with traffic_slot(traffic_target):
+        output = await _async_run_in_pane(pane_id, command, timeout)
+        observe_traffic(traffic_target, output)
 
     dt_ms = int((time.perf_counter() - t0) * 1000)
     raw_bytes = len(output)

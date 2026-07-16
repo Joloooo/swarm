@@ -62,6 +62,11 @@ _SECTION_COMMENTS = {
     "budgets":   "Planner / worker / LLM budgets.",
     "model":     "Model slug + Codex reasoning controls.",
     "verbosity": "Console verbosity: silent | compact | verbose.",
+    "output": (
+        "Real-target artifacts only. Relative paths resolve from the\n"
+        "SwarmAttacker project root; absolute paths and ~ are supported.\n"
+        "Benchmarks keep their existing logs/campaign layout."
+    ),
     "capability": (
         "Ablation switches — turn OFF one agent capability to measure its\n"
         "contribution. ALL default false = full system, byte-identical. Flip\n"

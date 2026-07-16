@@ -90,11 +90,15 @@ def _build_system_message(
     config: "AgentConfig",  # noqa: F821 — forward reference; defined in skill_runner
     target_url: str,
     is_benchmark: bool = False,
+    traffic_profile: str = "",
 ) -> str:
     # Assemble the full system prompt. skip_base_prompt → SKILL.md body alone; else:
     # identity header + phase rules + skill body + refs + benchmark addendum + RAG hint.
     if config.skip_base_prompt:
         parts = []
+        if traffic_profile == "remote_safe":
+            from src.traffic import REMOTE_SAFE_PROMPT
+            parts.append(REMOTE_SAFE_PROMPT)
         if config.system_prompt:
             parts.append(config.system_prompt)
         return "\n\n".join(parts)
@@ -116,6 +120,9 @@ def _build_system_message(
         )
 
     parts.append(build_prompt("recon" if phase == "recon" else "executor", 0))
+    if traffic_profile == "remote_safe":
+        from src.traffic import REMOTE_SAFE_PROMPT
+        parts.append(REMOTE_SAFE_PROMPT)
 
     # SKILL.md body (phase-specific objectives / methodology).
     if config.system_prompt:

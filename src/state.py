@@ -659,6 +659,18 @@ class SwarmState:
     # -- Target info (set once at the start) --
     target_url: str
     target_scope: str  # e.g. "*.example.com" or single URL
+    # Set only by the real-target entry point. Benchmarks omit it and retain
+    # the historical high-throughput tool defaults.
+    traffic_profile: str
+    # Real-target campaign timing/checkpointing. Benchmarks leave these absent.
+    engagement_started_at: float
+    engagement_deadline_at: float
+    checkpoint_seq: int
+    # Exact per-run artifact directory for real-target engagements. The live
+    # entry point seeds it; benchmarks leave it absent.
+    output_dir: str
+    artifact_prefix: str
+    report_stem: str
 
     # -- Orchestrator messages (routing / planning decisions) --
     messages: Annotated[list[AnyMessage], add_messages]
@@ -748,6 +760,13 @@ class SwarmGraphState(TypedDict, total=False):
     # not by the CLI). Before the first planner turn these may be empty.
     target_url: str
     target_scope: str
+    traffic_profile: str
+    engagement_started_at: float
+    engagement_deadline_at: float
+    checkpoint_seq: int
+    output_dir: str
+    artifact_prefix: str
+    report_stem: str
 
     # Orchestrator conversation
     messages: Annotated[list[AnyMessage], add_messages]
@@ -1089,6 +1108,13 @@ class SwarmGraphState(TypedDict, total=False):
     #   }
     pending_summary_inputs: Annotated[list[dict], _summary_inputs_reducer]
 
+    # Real-target report artifacts. The report node writes these after all
+    # testing is complete. Benchmark runs bypass the node and leave them empty.
+    report_markdown: str
+    report_markdown_path: str
+    report_pdf_path: str
+    report_pdf_error: str
+
 
 class AgentState(TypedDict, total=False):
     """Per-agent subgraph state — each swarm agent gets its own context."""
@@ -1096,6 +1122,7 @@ class AgentState(TypedDict, total=False):
     # Inherited from parent
     target_url: str
     target_scope: str
+    traffic_profile: str
 
     # Agent's own conversation (isolated context window)
     messages: Annotated[list[AnyMessage], add_messages]

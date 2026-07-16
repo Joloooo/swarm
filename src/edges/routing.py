@@ -48,6 +48,7 @@ fields.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Union
 
 from langgraph.graph import END
@@ -55,19 +56,23 @@ from langgraph.types import Send
 
 from src.edges.flag_match import flags_match
 from src.state import SwarmGraphState
+from src.traffic import REMOTE_SAFE_PROFILE
 
 logger = logging.getLogger(__name__)
 
 
-# DEBUG-FOCUS MODE: the report node is currently bypassed.
-#
-# While the agent is being tuned we don't want a 3-5s LLM call producing
-# a polished final report; we want to land at END the moment the planner
-# decides we're done so the run-folder artifacts (full_logs.jsonl,
-# displayed_terminal_logs.log) are the source of truth for analysis.
-#
-# To re-enable the report node later, change `_TERMINATE` back to "report".
-_TERMINATE: Union[str, type] = END
+def _terminate(state: SwarmGraphState) -> Union[str, type]:
+    """Choose the correct terminal path for this kind of run.
+
+    Benchmarks stop immediately because their harness owns scoring and its
+    run-folder artifacts are the report.  Real-target engagements have no
+    expected flag, so they pass through the report node before reaching END.
+    """
+    benchmark_mode = bool(
+        (state.get("expected_flag") or "").strip()
+        or state.get("expected_flag_candidates")
+    )
+    return END if benchmark_mode else "report"
 
 
 def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
@@ -119,6 +124,11 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
         return END
 
     action = state.get("next_action", "report")
+    live_open = (
+        state.get("traffic_profile") == REMOTE_SAFE_PROFILE
+        and not state.get("budget_exhausted")
+        and float(state.get("engagement_deadline_at") or 0.0) > time.time()
+    )
 
     if action == "attack":
         pending = state.get("pending_dispatch") or []
@@ -127,7 +137,7 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
                 "route_after_planner: action=attack but pending_dispatch "
                 "is empty; terminating."
             )
-            return _TERMINATE
+            return _terminate(state)
         research_query = (state.get("research_query") or "").strip()
         logger.info(
             "route_after_planner: fanning out %d parallel executor(s)%s.",
@@ -166,6 +176,33 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
         return sends
 
     if action == "submit_flag":
+        if live_open:
+            logger.info(
+                "route_after_planner: live campaign submit_flag suppressed "
+                "(deadline still open) — re-planning instead of ending."
+            )
+            try:
+                from src.observability.writers import append_event
+                append_event(
+                    (state or {}).get("run_id"),
+                    "routing_decision",
+                    edge="route_after_planner",
+                    next="planner",
+                    action="submit_flag",
+                    reason="live_submit_suppressed_before_deadline",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return "planner"
+        # A real-target engagement has no benchmark oracle or expected token.
+        # Treat an accidental submit_flag decision as "finish and report"
+        # instead of running benchmark-shaped flag validation.
+        if _terminate(state) == "report":
+            logger.info(
+                "route_after_planner: submit_flag ignored in real-target mode; "
+                "routing to the report node."
+            )
+            return "report"
         attempts = list(state.get("submission_attempts") or [])
         if not attempts:
             logger.warning(
@@ -230,6 +267,24 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
         return next_node
 
     if action == "report":
+        if live_open:
+            logger.info(
+                "route_after_planner: live campaign report suppressed "
+                "(deadline still open) — re-planning instead of ending."
+            )
+            try:
+                from src.observability.writers import append_event
+                append_event(
+                    (state or {}).get("run_id"),
+                    "routing_decision",
+                    edge="route_after_planner",
+                    next="planner",
+                    action="report",
+                    reason="live_report_suppressed_before_deadline",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return "planner"
         # Benchmark-mode hard stop. A VOLUNTARY report does not end the
         # run: capture (handled at the top of this function → END) and the
         # iteration budget are the only terminals, so the planner's own
@@ -268,7 +323,7 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
             except Exception:  # noqa: BLE001
                 pass
             return "planner"
-        return _TERMINATE  # bypassed — see _TERMINATE comment above
+        return _terminate(state)
     if action == "recon":
         # Recon fans out into parallel dimension workers, exactly like
         # ``attack`` fans out executors above. Each Send lands on the
@@ -330,7 +385,7 @@ def route_after_planner(state: SwarmGraphState) -> Union[str, list[Send]]:
         "route_after_planner: unknown next_action=%r, terminating.",
         action,
     )
-    return _TERMINATE
+    return _terminate(state)
 
 
 def route_after_summarizer(state: SwarmGraphState) -> str:
@@ -377,4 +432,3 @@ def route_after_summarizer(state: SwarmGraphState) -> str:
     except Exception:  # noqa: BLE001
         pass
     return next_node
-

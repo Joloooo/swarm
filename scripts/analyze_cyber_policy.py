@@ -21,8 +21,9 @@ attempt-2 rescued it). A *fallback* success is logged explicitly.
 from __future__ import annotations
 import glob, json, os, re
 from collections import defaultdict, Counter
+from pathlib import Path
 
-LOGS = "/Users/zviadjolokhava/Dev/Thesis/SwarmAttacker/logs"
+LOGS = str(Path(__file__).resolve().parents[1] / "logs")
 
 RE_PRIMARY  = re.compile(r"\[([^\]]+)\] worker refused \(tier=primary, attempt=(\d+)/(\d+)\)")
 RE_FALLBACK = re.compile(r"\[([^\]]+)\] worker refused \(tier=fallback, attempt=(\d+)/(\d+)\)")

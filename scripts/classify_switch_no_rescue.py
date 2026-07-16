@@ -6,8 +6,9 @@ reason — find which, per worker."""
 from __future__ import annotations
 import glob, json, os, re
 from collections import Counter
+from pathlib import Path
 
-LOGS = "/Users/zviadjolokhava/Dev/Thesis/SwarmAttacker/logs"
+LOGS = str(Path(__file__).resolve().parents[1] / "logs")
 files = sorted(glob.glob(os.path.join(LOGS, "**", "full_logs.jsonl"), recursive=True))
 
 RE_SWITCH = re.compile(r"primary tier exhausted, switching to fallback model")

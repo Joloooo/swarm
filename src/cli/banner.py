@@ -34,10 +34,7 @@ _LOGO = """\
    ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝      ╚═╝   ╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
 """
 
-# Tagline: the project name is now in the ASCII art itself, so the
-# subtitle below just needs the one-line description. Indented to ~42
-# columns so it visually sits centered under the 117-column logo.
-_TAGLINE = "                                          Fully autonomous Pentesting agent"
+_TAGLINE = "FULLY AUTONOMOUS WEB PENETRATION TESTING"
 
 
 def show(config_path: Path) -> None:
@@ -48,26 +45,46 @@ def show(config_path: Path) -> None:
     """
     # Lazy import — rich is a hot dep (~150ms cold) and the dispatcher
     # imports this module unconditionally for ``--help``.
-    from rich.console import Console
+    from rich.align import Align
+    from rich.console import Console, Group
+    from rich.panel import Panel
     from rich.text import Text
 
     console = Console(stderr=True)
 
-    # Spacer line above for separation from any earlier prompt output.
     console.print()
-    # Logo: bold red — the project name itself is rendered in the ASCII
-    # art now, so colour does double duty as branding (matches the
-    # red-glow thinking pad below) and as the dominant visual element
-    # on the splash screen.
-    console.print(Text(_LOGO, style="bold red"), end="")
-    # Tagline: plain white so the one-line description reads cleanly
-    # under the red logo without competing.
-    console.print(Text(_TAGLINE, style="white"))
-    console.print()
-    # Config path: useful when debugging "why didn't my edit stick?".
-    cfg_line = Text.assemble(
-        ("   cfg: ", "dim"),
-        (str(config_path), "yellow"),
+    if console.width >= max(map(len, _LOGO.splitlines())):
+        console.print(Text(_LOGO, style="bold #ff5f87"), end="")
+    else:
+        # The full ANSI-shadow wordmark is 114 columns wide.  Use a crisp
+        # single-line mark on narrow terminals instead of wrapping the art.
+        console.print(
+            Align.center(
+                Text("S W A R M A T T A C K E R", style="bold #ff5f87")
+            )
+        )
+        console.print()
+
+    identity = Text.assemble(
+        ("◆  ", "bold #ffaf5f"),
+        (_TAGLINE, "bold white"),
+        ("  ◆", "bold #ffaf5f"),
     )
-    console.print(cfg_line)
+    cfg_line = Text.assemble(
+        ("CONFIG  ", "bold #ff5f87"),
+        (str(config_path), "#ffaf5f"),
+    )
+    info = Group(
+        Align.center(identity),
+        Text(),
+        Align.center(cfg_line),
+    )
+    console.print(
+        Panel(
+            info,
+            border_style="#ff5f87",
+            padding=(0, 2),
+            width=min(117, console.width),
+        )
+    )
     console.print()

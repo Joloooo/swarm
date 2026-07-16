@@ -68,6 +68,26 @@ LOGS_ROOT = (
 _FULL_LOGS_LOCK = threading.Lock()
 _TERMINAL_LOG_LOCK = threading.Lock()
 
+# Real-target runs can place every artifact in a user-selected output folder
+# without changing the benchmark log layout.  The live entry point registers
+# its exact run directory before graph execution; benchmark runners never do,
+# so they continue to use ``LOGS_ROOT / run-<id>`` byte-for-byte.
+_RUN_DIR_OVERRIDES: dict[str, Path] = {}
+_RUN_ARTIFACT_PREFIXES: dict[str, str] = {}
+_RUN_DIR_OVERRIDES_LOCK = threading.Lock()
+
+_HUMAN_ARTIFACT_NAMES = {
+    "full_logs.jsonl": "full logs.jsonl",
+    "displayed_terminal_logs.log": "terminal log.log",
+    "live-checkpoint.json": "live checkpoint.json",
+    "live-checkpoint.md": "live checkpoint.md",
+    "checkpoint-history.jsonl": "checkpoint history.jsonl",
+    "engagement.json": "engagement.json",
+    "resume-state.json": "resume state.json",
+    "pentest-report.md": "pentest report.md",
+    "pentest-report.pdf": "pentest report.pdf",
+}
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # Run-id resolution + directory paths
@@ -114,21 +134,63 @@ def make_run_id(
     return f"{ts}_{slug}"
 
 
+def register_run_dir(
+    run_id: str,
+    directory: Path,
+    *,
+    artifact_prefix: str = "",
+) -> Path:
+    """Pin ``run_id`` to an exact directory and return the created path.
+
+    Used by real-target engagements to co-locate logs, checkpoints, and final
+    reports under the configured output root.  It is deliberately opt-in so
+    benchmark storage remains unchanged.
+    """
+    rid = str(run_id or "").strip()
+    if not rid:
+        raise ValueError("run_id must not be empty")
+    d = Path(directory).expanduser().resolve()
+    d.mkdir(parents=True, exist_ok=True)
+    with _RUN_DIR_OVERRIDES_LOCK:
+        _RUN_DIR_OVERRIDES[rid] = d
+        prefix = str(artifact_prefix or "").strip()
+        if prefix:
+            _RUN_ARTIFACT_PREFIXES[rid] = prefix
+    return d
+
+
 def run_dir(run_id: str) -> Path:
-    """Return (and create) the log directory for a run."""
-    d = LOGS_ROOT / f"run-{run_id}"
+    """Return (and create) the artifact directory for a run."""
+    with _RUN_DIR_OVERRIDES_LOCK:
+        override = _RUN_DIR_OVERRIDES.get(run_id)
+    d = override if override is not None else LOGS_ROOT / f"run-{run_id}"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
+def artifact_path(run_id: str, default_name: str) -> Path:
+    """Return an artifact path, human-prefixed only for registered live runs.
+
+    ``default_name`` remains untouched for benchmarks and other unregistered
+    callers. This preserves their historical filenames while allowing every
+    real-target artifact to share the same target/date naming convention.
+    """
+    with _RUN_DIR_OVERRIDES_LOCK:
+        prefix = _RUN_ARTIFACT_PREFIXES.get(run_id, "")
+    if not prefix:
+        return run_dir(run_id) / default_name
+    readable_name = _HUMAN_ARTIFACT_NAMES.get(default_name, default_name)
+    return run_dir(run_id) / f"{prefix} {readable_name}"
+
+
 def full_logs_path(run_id: str) -> Path:
     """Return the path to ``full_logs.jsonl`` for a run."""
-    return run_dir(run_id) / "full_logs.jsonl"
+    return artifact_path(run_id, "full_logs.jsonl")
 
 
 def terminal_log_path(run_id: str) -> Path:
     """Return the path to ``displayed_terminal_logs.log`` for a run."""
-    return run_dir(run_id) / "displayed_terminal_logs.log"
+    return artifact_path(run_id, "displayed_terminal_logs.log")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -274,6 +336,8 @@ def _resolve_active_run_id() -> str | None:
     correctly causes the handler to no-op for any stray logs that fire
     after a run ends.
     """
+    if _TERMINAL_RUN_ID:
+        return _TERMINAL_RUN_ID
     sink = _TERMINAL_LOG_FILE
     if sink is None:
         return None
@@ -351,6 +415,7 @@ def uninstall_jsonl_log_handler() -> None:
 # file" — the LIVE renderer continues to print to stderr regardless.
 _TERMINAL_LOG_FILE: Path | None = None
 _TERMINAL_ANSI_LOG_FILE: Path | None = None
+_TERMINAL_RUN_ID: str | None = None
 
 
 # A SECOND, sweep-level sink. Unlike ``_TERMINAL_LOG_FILE`` (which the
@@ -370,20 +435,29 @@ _SWEEP_ANSI_LOG_FILE: Path | None = None
 _ANSI_RE = re.compile(r"\x1B\[[0-9;]*[A-Za-z]")
 
 
-def set_terminal_log_file(path: Path | None) -> None:
+def set_terminal_log_file(path: Path | None, *, run_id: str | None = None) -> None:
     """Set (or clear) the path the LIVE renderer tees output to.
 
     Called once from the benchmark runner / CLI entry after the run_id
     is known. Passing ``None`` disables per-run file output.
     """
-    global _TERMINAL_LOG_FILE, _TERMINAL_ANSI_LOG_FILE
+    global _TERMINAL_LOG_FILE, _TERMINAL_ANSI_LOG_FILE, _TERMINAL_RUN_ID
     if path is None:
         _TERMINAL_LOG_FILE = None
         _TERMINAL_ANSI_LOG_FILE = None
+        _TERMINAL_RUN_ID = None
         return
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     _TERMINAL_LOG_FILE = path
+    explicit_run_id = str(run_id or "").strip()
+    if explicit_run_id:
+        _TERMINAL_RUN_ID = explicit_run_id
+    elif path.parent.name.startswith("run-"):
+        # Backward-compatible benchmark path inference.
+        _TERMINAL_RUN_ID = path.parent.name[len("run-"):]
+    else:
+        _TERMINAL_RUN_ID = None
     # ANSI sink intentionally disabled: the raw-colour ``*.ansi.log`` was a
     # byte-for-byte duplicate of the plain ``*.log`` (minus the escape codes)
     # that nothing consumed and only cluttered every run dir. Keep the plain
@@ -393,6 +467,11 @@ def set_terminal_log_file(path: Path | None) -> None:
 
 def get_terminal_log_file() -> Path | None:
     return _TERMINAL_LOG_FILE
+
+
+def get_active_run_id() -> str | None:
+    """Return the run currently attached to the terminal/JSONL sinks."""
+    return _resolve_active_run_id()
 
 
 def get_terminal_ansi_log_file() -> Path | None:

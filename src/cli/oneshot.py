@@ -24,7 +24,6 @@ import argparse
 import asyncio
 import logging
 import signal
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -159,8 +158,9 @@ async def continue_engagement(
     additional_seconds: int,
     *,
     report_interval_seconds: int | None = None,
+    operator_instruction: str = "",
 ) -> tuple[str, str, str, str]:
-    """Continue an existing folder with an additional active-time budget."""
+    """Continue an engagement, optionally adding new operator guidance."""
     from langchain_core.messages import HumanMessage
 
     from src.engagement import load_existing_engagement, update_manifest
@@ -191,6 +191,11 @@ async def continue_engagement(
             "Continue from the preserved findings and investigation state."
         )
     )]
+    operator_instruction = operator_instruction.strip()
+    if operator_instruction:
+        state["messages"] = list(state["messages"]) + [
+            _operator_human_message(operator_instruction, source="resume")
+        ]
     manifest = update_manifest(
         existing.run_id,
         existing.manifest,
@@ -203,6 +208,15 @@ async def continue_engagement(
         last_error="",
     )
     try:
+        if operator_instruction:
+            from src.observability.writers import append_event
+
+            append_event(
+                existing.run_id,
+                "operator_message_applied",
+                text=operator_instruction,
+                source="resume",
+            )
         result = await _run_graph_session(
             state,
             manifest,
@@ -266,6 +280,51 @@ def _format_duration(seconds: int | float) -> str:
     return f"{secs}s"
 
 
+def _operator_human_message(text: str, *, source: str = "live"):
+    """Wrap operator guidance as a first-class planner conversation turn."""
+    from langchain_core.messages import HumanMessage
+
+    label = (
+        "while resuming the engagement"
+        if source == "resume"
+        else "during the active engagement"
+    )
+    return HumanMessage(
+        content=(
+            f"[OPERATOR UPDATE — received {label}]\n"
+            f"{text.strip()}\n\n"
+            "Treat this as the operator's current instruction. Reassess the "
+            "plan and scope before choosing the next action. If it conflicts "
+            "with an older user request, follow this newer update."
+        ),
+        additional_kwargs={"operator_update": True, "source": source},
+    )
+
+
+def _apply_operator_updates(state: dict, updates: list[str]) -> dict:
+    """Append live guidance and clear the decision that had not yet routed."""
+    if not updates:
+        return state
+    merged = dict(state)
+    merged["messages"] = list(merged.get("messages") or []) + [
+        _operator_human_message(text, source="live") for text in updates
+    ]
+    # The stream is stopped at a safe barrier before its next edge is
+    # traversed. Clear transient routing fields so START -> planner reassesses
+    # the new message instead of carrying an already-staged action forward.
+    merged.update({
+        "next_action": "",
+        "pending_dispatch": [],
+        "pending_summary_inputs": [],
+        "active_agents": [],
+        "search_query": "",
+        "research_query": "",
+    })
+    for key in _REPORT_STATE_FIELDS:
+        merged.pop(key, None)
+    return merged
+
+
 async def _generate_report(state: dict, *, event: str) -> dict:
     """Generate artifacts without routing through reconnaissance/planning."""
     # Import graph first to preserve the package's established import order.
@@ -299,7 +358,9 @@ async def _run_graph_session(
 ) -> dict:
     """Run one active session with barrier snapshots and graceful pausing."""
     from src.engagement import update_manifest, write_resume_state
+    from src.cli.operator_input import LiveOperatorInput
     from src.graph import GRAPH_RECURSION_LIMIT, graph
+    from src.observability.live import LIVE
     from src.observability.writers import append_event, set_terminal_log_file
     from src.tools.shell import cleanup_shell
     from src.traffic import REMOTE_SAFE_PROFILE, remote_safe_engagement
@@ -347,16 +408,18 @@ async def _run_graph_session(
     def request_pause() -> None:
         if not pause_requested.is_set():
             pause_requested.set()
-            sys.stderr.write(
-                "\nPause requested. Finishing the current safe graph barrier, saving "
-                "state, and updating the report. Press Ctrl-C again to force exit.\n"
+            LIVE.runner_message(
+                "Pause requested. Finishing the current safe graph barrier, saving "
+                "state, and updating the report. Press Ctrl-C again to force exit.",
+                level="warn",
             )
-            sys.stderr.flush()
             append_event(run_id, "pause_requested")
             return
         force["requested"] = True
-        sys.stderr.write("\nForce exit requested; preserving the last checkpoint.\n")
-        sys.stderr.flush()
+        LIVE.runner_message(
+            "Force exit requested; preserving the last checkpoint.",
+            level="warn",
+        )
         if task is not None:
             task.cancel()
 
@@ -384,6 +447,11 @@ async def _run_graph_session(
     graph_report_seen = False
     stream = None
     frozen_active: float | None = None
+    operator_input = LiveOperatorInput(
+        run_id=run_id,
+        hint="Enter send · Shift/Option-Enter or Ctrl-J newline · Ctrl-C pause",
+    )
+    operator_input.start()
 
     def active_total() -> float:
         if frozen_active is not None:
@@ -406,41 +474,115 @@ async def _run_graph_session(
 
     try:
         with remote_safe_engagement():
-            stream = graph.astream(
-                state,
-                config={"recursion_limit": live_recursion_limit},
-                stream_mode="values",
-            )
-            async for value in stream:
-                graph_report_seen = bool(value.get("report_markdown"))
-                last_state = dict(value)
-                last_state.update(report_fields)
-                await persist(last_state)
-                safe_barrier = not bool(last_state.get("pending_summary_inputs"))
-                if pause_requested.is_set() and safe_barrier:
+            while True:
+                restart_for_operator = False
+                stream = graph.astream(
+                    last_state,
+                    config={"recursion_limit": live_recursion_limit},
+                    stream_mode="values",
+                )
+                try:
+                    async for value in stream:
+                        graph_report_seen = graph_report_seen or bool(
+                            value.get("report_markdown")
+                        )
+                        last_state = dict(value)
+                        last_state.update(report_fields)
+                        await persist(last_state)
+                        safe_barrier = not bool(
+                            last_state.get("pending_summary_inputs")
+                        )
+                        if not safe_barrier:
+                            continue
+
+                        updates = operator_input.drain()
+                        if updates:
+                            # Invalidate a report produced before this new user
+                            # turn. The final report must include the work the
+                            # updated plan performs, not the pre-update view.
+                            report_fields.clear()
+                            graph_report_seen = False
+                            last_state = _apply_operator_updates(last_state, updates)
+                            await persist(last_state)
+                            for text in updates:
+                                append_event(
+                                    run_id,
+                                    "operator_message_applied",
+                                    text=text,
+                                    source="live",
+                                )
+                            operator_input.applied(len(updates))
+
+                        if pause_requested.is_set():
+                            break
+                        if updates:
+                            # Stop before traversing the action staged by the
+                            # old planner turn. A fresh invocation begins at
+                            # START -> planner with the new HumanMessage(s).
+                            restart_for_operator = True
+                            break
+                        if (
+                            report_interval_seconds > 0
+                            and active_total() - last_report_active
+                            >= report_interval_seconds
+                        ):
+                            last_state = await _generate_report(
+                                last_state, event="periodic_report_updated"
+                            )
+                            report_fields.update({
+                                key: last_state.get(key)
+                                for key in _REPORT_STATE_FIELDS
+                                if last_state.get(key)
+                            })
+                            last_report_active = active_total()
+                            manifest = update_manifest(
+                                run_id,
+                                manifest,
+                                last_report_active_seconds=last_report_active,
+                                last_report_at=datetime.now().astimezone().isoformat(),
+                            )
+                            await persist(last_state)
+                finally:
+                    if stream is not None and hasattr(stream, "aclose"):
+                        try:
+                            await stream.aclose()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    stream = None
+
+                if pause_requested.is_set():
                     break
-                if (
-                    safe_barrier
-                    and report_interval_seconds > 0
-                    and active_total() - last_report_active
-                    >= report_interval_seconds
-                ):
-                    last_state = await _generate_report(
-                        last_state, event="periodic_report_updated"
-                    )
-                    report_fields.update({
-                        key: last_state.get(key)
-                        for key in _REPORT_STATE_FIELDS
-                        if last_state.get(key)
-                    })
-                    last_report_active = active_total()
-                    manifest = update_manifest(
-                        run_id,
-                        manifest,
-                        last_report_active_seconds=last_report_active,
-                        last_report_at=datetime.now().astimezone().isoformat(),
+                if restart_for_operator:
+                    continue
+
+                # Cover a line submitted after the graph's last yielded value
+                # but before the async iterator reached END. Preserve it even
+                # when the session deadline leaves no time for another turn.
+                trailing_updates = operator_input.drain()
+                if trailing_updates:
+                    report_fields.clear()
+                    graph_report_seen = False
+                    last_state = _apply_operator_updates(
+                        last_state, trailing_updates
                     )
                     await persist(last_state)
+                    for text in trailing_updates:
+                        append_event(
+                            run_id,
+                            "operator_message_applied",
+                            text=text,
+                            source="live",
+                        )
+                    operator_input.applied(len(trailing_updates))
+                    if time.time() < deadline:
+                        continue
+                    append_event(
+                        run_id,
+                        "operator_message_deferred",
+                        count=len(trailing_updates),
+                        reason="session_deadline_reached",
+                    )
+                break
 
         frozen_active = active_total()
         paused = pause_requested.is_set()
@@ -516,6 +658,7 @@ async def _run_graph_session(
         )
         raise
     finally:
+        operator_input.stop()
         if stream is not None and hasattr(stream, "aclose"):
             try:
                 await stream.aclose()

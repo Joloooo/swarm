@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 import sys
+import textwrap
 import time
 from typing import Any
 from uuid import UUID
@@ -465,6 +466,19 @@ _PAD_TICK_S: float = 0.05
 # Value carries everything we need to render one row.
 _PAD: dict[Any, dict[str, Any]] = {}
 
+# Live operator guidance sits on the final row of the same redrawable pad.
+# The CLI owns terminal input; the renderer only owns its visual state so
+# normal output, reasoning streams, and the input row never write over one
+# another. ``queued`` is the number of submitted lines waiting for the next
+# safe planner barrier.
+_OPERATOR_INPUT: dict[str, Any] = {
+    "active": False,
+    "buffer": "",
+    "queued": 0,
+    "placeholder": "Type guidance for the planner, then press Enter",
+    "hint": "Enter to send · Ctrl-C to pause",
+}
+
 # How many pad rows are currently drawn below the cursor. Updated under
 # ``_STREAM_LOCK`` by ``_pad_clear`` / ``_pad_draw``.
 _PAD_LINES_DRAWN: int = 0
@@ -600,9 +614,15 @@ def _pad_enabled() -> bool:
     escapes corrupt the file), live mode is not silent, and the
     operator hasn't disabled it via ``SWARM_LIVE_THINKING_PAD=0``.
     """
-    if os.environ.get("SWARM_LIVE_THINKING_PAD") == "0":
+    if (
+        not _OPERATOR_INPUT.get("active")
+        and os.environ.get("SWARM_LIVE_THINKING_PAD") == "0"
+    ):
         return False
-    if _mode() == "silent":
+    # Silent mode suppresses autonomous progress output, but an interactive
+    # operator editor must remain visible; otherwise stdin is intentionally in
+    # no-echo mode with no indication of what the user is typing.
+    if not _OPERATOR_INPUT.get("active") and _mode() == "silent":
         return False
     try:
         return bool(sys.stderr.isatty())
@@ -713,7 +733,8 @@ def _pad_draw() -> None:
     erase.
     """
     global _PAD_LINES_DRAWN
-    if not _pad_enabled() or not _PAD:
+    operator_active = bool(_OPERATOR_INPUT.get("active"))
+    if not _pad_enabled() or (not _PAD and not operator_active):
         _PAD_LINES_DRAWN = 0
         return
     # Mid-line streaming reasoning: skip. The streaming text itself
@@ -741,9 +762,12 @@ def _pad_draw() -> None:
         verb_str = verb_padded
 
     try:
-        cols = shutil.get_terminal_size((100, 24)).columns
+        terminal_size = shutil.get_terminal_size((100, 24))
+        cols = terminal_size.columns
+        terminal_rows = terminal_size.lines
     except Exception:  # noqa: BLE001
         cols = 100
+        terminal_rows = 24
 
     now_perf = time.perf_counter()
     rows: list[str] = []
@@ -805,6 +829,66 @@ def _pad_draw() -> None:
     if clock is not None:
         rows.append(clock)
 
+    if operator_active:
+        buffer = str(_OPERATOR_INPUT.get("buffer") or "")
+        queued = max(0, int(_OPERATOR_INPUT.get("queued") or 0))
+        box_width = max(12, cols)
+        content_width = max(8, box_width - 4)
+        title = " operator message "
+        if len(title) > box_width - 3:
+            title = " input "
+        top_fill = max(0, box_width - len(title) - 3)
+        rows.append(_paint(f"╭─{title}{'─' * top_fill}╮", _CYAN))
+
+        if buffer:
+            display_text = buffer + "▌"
+            editor_lines: list[str] = []
+            for logical_line in display_text.split("\n"):
+                editor_lines.extend(
+                    textwrap.wrap(
+                        logical_line,
+                        width=content_width,
+                        replace_whitespace=False,
+                        drop_whitespace=False,
+                    )
+                    or [""]
+                )
+            max_editor_rows = max(2, min(8, terminal_rows // 3))
+            hidden = max(0, len(editor_lines) - max_editor_rows)
+            editor_lines = editor_lines[-max_editor_rows:]
+            if hidden:
+                indicator = f"… {hidden} earlier line{'s' if hidden != 1 else ''}"
+                editor_lines[0] = indicator[:content_width]
+            for editor_line in editor_lines:
+                rows.append(
+                    f"{_paint('│', _CYAN)} "
+                    f"{editor_line.ljust(content_width)} "
+                    f"{_paint('│', _CYAN)}"
+                )
+        else:
+            placeholder = str(
+                _OPERATOR_INPUT.get("placeholder") or "Type a message"
+            )
+            placeholder_lines = textwrap.wrap(placeholder, width=content_width) or [""]
+            for index, placeholder_line in enumerate(placeholder_lines):
+                cursor = " ▌" if index == len(placeholder_lines) - 1 else ""
+                body = (placeholder_line + cursor)[:content_width]
+                rows.append(
+                    f"{_paint('│', _CYAN)} "
+                    f"{_paint(body.ljust(content_width), _DIM)} "
+                    f"{_paint('│', _CYAN)}"
+                )
+
+        footer = (
+            f" {queued} queued · Enter to send "
+            if queued
+            else f" {_OPERATOR_INPUT.get('hint') or 'Enter to send'} "
+        )
+        if len(footer) > box_width - 2:
+            footer = footer[: max(1, box_width - 3)] + "…"
+        bottom_fill = max(0, box_width - len(footer) - 3)
+        rows.append(_paint(f"╰─{footer}{'─' * bottom_fill}╯", _CYAN, _DIM))
+
     if not rows:
         _PAD_LINES_DRAWN = 0
         return
@@ -832,6 +916,9 @@ def _pad_ticker_main() -> None:
     """
     while not _PAD_TICKER_STOP.is_set():
         time.sleep(_PAD_TICK_S)
+        # The operator row is static between keystrokes and redraws itself on
+        # every edit/output event. Only animated thinking/tool rows need the
+        # 20 Hz ticker.
         if not _PAD:
             continue
         try:
@@ -1152,6 +1239,75 @@ class _Live:
         )
 
     # -------- runner-side messages ----------
+
+    def operator_input_start(self, *, placeholder: str = "", hint: str = "") -> None:
+        """Show the persistent live-guidance row below active output."""
+        with _STREAM_LOCK:
+            _OPERATOR_INPUT.update(
+                active=True,
+                buffer="",
+                queued=0,
+                placeholder=(
+                    placeholder.strip()
+                    or "Type guidance for the planner, then press Enter"
+                ),
+                hint=hint.strip() or "Enter to send · Ctrl-C to pause",
+            )
+            if not _pad_enabled():
+                _OPERATOR_INPUT["active"] = False
+                return
+            _stream_close_line()
+            _pad_redraw_locked()
+        _ensure_pad_ticker()
+
+    def operator_input_update(self, text: str, *, queued: int | None = None) -> None:
+        """Redraw the operator's current edit buffer without logging it."""
+        if not _pad_enabled():
+            return
+        with _STREAM_LOCK:
+            _OPERATOR_INPUT["buffer"] = text
+            if queued is not None:
+                _OPERATOR_INPUT["queued"] = max(0, int(queued))
+            # A keystroke takes visual priority over an in-progress reasoning
+            # line. The next reasoning delta opens a fresh line above the pad.
+            _stream_close_line()
+            _pad_redraw_locked()
+
+    def operator_input_submitted(self, text: str, *, queued: int) -> None:
+        """Confirm one submitted line and retain the empty input row."""
+        if _pad_enabled():
+            with _STREAM_LOCK:
+                _OPERATOR_INPUT.update(buffer="", queued=max(0, int(queued)))
+        preview = _inline_newlines(text.strip())
+        _emit(
+            f"{_now()}  {_paint('↳ operator', _BOLD, _CYAN)}  "
+            f"{preview}  {_paint('(queued for planner)', _DIM)}"
+        )
+
+    def operator_input_applied(self, count: int, *, queued: int) -> None:
+        """Show that queued guidance entered durable planner state."""
+        if _pad_enabled():
+            with _STREAM_LOCK:
+                _OPERATOR_INPUT["queued"] = max(0, int(queued))
+        noun = "message" if count == 1 else "messages"
+        _emit(
+            f"{_now()}  {_paint('✓ operator', _BOLD, _GREEN)}  "
+            f"injected {count} {noun}; planner is reassessing"
+        )
+
+    def operator_input_stop(self) -> None:
+        """Remove the live-guidance row and leave ordinary pad rows intact."""
+        if not _pad_enabled():
+            _OPERATOR_INPUT.update(
+                active=False, buffer="", queued=0, placeholder="", hint=""
+            )
+            return
+        with _STREAM_LOCK:
+            _pad_clear()
+            _OPERATOR_INPUT.update(
+                active=False, buffer="", queued=0, placeholder="", hint=""
+            )
+            _pad_draw()
 
     def runner_message(self, text: str, *, level: str = "info") -> None:
         if _mode() == "silent" and level == "info":

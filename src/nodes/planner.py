@@ -144,6 +144,16 @@ at http://localhost:65204…"), treat that URL as the authorized target
 for this run. Do not ask the user to confirm the target. Do not ask
 for a new target. Proceed directly to recon / attack / etc.
 
+# Live operator updates
+
+The operator may send additional HumanMessages while an engagement is
+running. They are labelled ``[OPERATOR UPDATE]`` and arrive only at a safe
+barrier between graph actions. Treat the newest update as current user input:
+reassess your plan and scope before choosing the next action, follow it when it
+changes or narrows an older request, and make the evidence-to-decision link
+clear in your next ``reasoning`` field. Never ignore an operator update merely
+because workers have already started following the earlier plan.
+
 # Reasoning fields (required everywhere)
 
 Both the tools you can call (``normalize_url``, ``validate_website``)

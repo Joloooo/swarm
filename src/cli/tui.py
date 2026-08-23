@@ -265,12 +265,12 @@ def _run_new_target() -> None:
             width=min(88, _console.width),
         )
     )
-    instruction = questionary.text(
-        "Your instruction:",
-        instruction="(Enter to start, Ctrl-C to cancel)",
-        style=_PROMPT_STYLE,
-        validate=lambda value: bool(value.strip()) or "Please enter a target or instruction.",
-    ).ask()
+    instruction = _operator_text_prompt(
+        placeholder="Describe the target and scope · Command-V or mouse paste works",
+        hint="Enter start · Shift/Option-Enter or Ctrl-J newline · Ctrl-C cancel",
+        allow_empty=False,
+        fallback_question="Your instruction:",
+    )
     if instruction is None:
         return
 
@@ -291,7 +291,9 @@ def _run_new_target() -> None:
             f"Active-time budget: [bold]{_duration_label(duration)}[/bold]\n"
             f"Report updates: [bold]{_report_interval_label(report_interval)}[/bold]\n\n"
             "First Ctrl-C pauses at the next safe graph barrier, saves state, and updates "
-            "the report. A second Ctrl-C forces exit from the last durable snapshot.",
+            "the report. A second Ctrl-C forces exit from the last durable snapshot.\n"
+            "Type guidance and press Enter at any time; it is injected as a new user "
+            "message and the planner reassesses at the next safe barrier.",
             border_style="#ffaf5f",
             padding=(0, 2),
             width=min(88, _console.width),
@@ -327,13 +329,25 @@ def _run_continued_target() -> None:
     duration = _pick_duration("How much active testing time should be added?")
     if duration is None:
         return
+    operator_instruction = _operator_text_prompt(
+        placeholder="Optional new instruction · Enter keeps the existing plan",
+        hint="Enter continue · Shift/Option-Enter or Ctrl-J newline · Ctrl-C cancel",
+        allow_empty=True,
+        fallback_question="Additional instruction (optional):",
+    )
+    if operator_instruction is None:
+        return
     _console.print(
         f"[dim]Continuing {directory.name} for {_duration_label(duration)}. "
         "Logs and reports stay in the same folder.[/dim]"
     )
     try:
         result = asyncio.run(
-            oneshot.continue_engagement(directory, duration)
+            oneshot.continue_engagement(
+                directory,
+                duration,
+                operator_instruction=operator_instruction.strip(),
+            )
         )
     except KeyboardInterrupt:
         _console.print("\n[yellow]Force-exited. The last checkpoint is resumable.[/yellow]")
@@ -343,6 +357,40 @@ def _run_continued_target() -> None:
         _show_engagement_error(exc)
         return
     _show_engagement_result(result, title="CONTINUED ENGAGEMENT REPORT")
+
+
+def _operator_text_prompt(
+    *,
+    placeholder: str,
+    hint: str,
+    allow_empty: bool,
+    fallback_question: str,
+) -> str | None:
+    """Collect text with the same editor used during a live engagement."""
+    from src.cli.operator_input import read_operator_instruction
+
+    try:
+        value = asyncio.run(read_operator_instruction(
+            placeholder=placeholder,
+            hint=hint,
+            allow_empty=allow_empty,
+        ))
+    except KeyboardInterrupt:
+        return None
+    if value is not None:
+        return value
+
+    # Non-Unix/non-TTY fallback: retain the established questionary prompt.
+    return questionary.text(
+        fallback_question,
+        instruction="(Enter to confirm, Ctrl-C to cancel)",
+        style=_PROMPT_STYLE,
+        validate=(
+            None
+            if allow_empty
+            else lambda text: bool(text.strip()) or "Please enter an instruction."
+        ),
+    ).ask()
 
 
 def _run_report_regeneration() -> None:

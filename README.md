@@ -119,6 +119,26 @@ The canonical entry point while iterating is the benchmark runner —
 see "Debug a single benchmark" above. The graph is invoked in-process
 via `graph.ainvoke()`; no LangGraph Studio / dev server involved.
 
+### Live operator guidance
+
+Real-target runs accept new instructions while the swarm is working. Type into
+the persistent bordered editor at the bottom of the terminal and press Enter. The text
+is queued without interrupting an active tool or worker, persisted as a real
+user message at the next safe graph barrier, and reviewed by the planner before
+it chooses another action. Multiple messages are applied in arrival order.
+The initial instruction and Continue-engagement update use the same editor.
+Command-V, mouse paste, and multiline bracketed paste are supported; pasted
+newlines remain part of one message until Enter is pressed. Shift-Enter or
+Option-Enter inserts a line break in terminals that report modified Enter keys;
+Ctrl-J is the portable fallback. Long text wraps inside the box, which expands
+to multiple rows and keeps the latest rows visible on a short terminal.
+
+When **Continue engagement** is selected, the TUI also asks for an optional
+additional instruction before restarting. That instruction is appended to the
+preserved conversation and takes precedence over conflicting older guidance.
+Ctrl-C retains its existing behavior: once requests a graceful pause and twice
+forces exit from the latest durable checkpoint.
+
 The `langgraph dev` Studio UI is currently disabled for this workflow.
 If you need to re-enable it (interactive node-by-node debugging in a
 browser), run `langgraph dev --allow-blocking` from the project root.

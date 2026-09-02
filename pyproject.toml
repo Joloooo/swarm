@@ -1,12 +1,34 @@
 [project]
 name = "swarmattacker"
-version = "0.1.0"
-description = "Multi-methodology swarm penetration testing agent"
+version = "0.1.1"
+description = "Multi-methodology swarm penetration testing agent built with LangGraph"
 readme = "README.md"
-authors = [
-    { name = "Zviad Jolokhava", email = "z.jolokhava@chainmatics.net" }
-]
 requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Zviad Jolokhava", email = "zviadjolokhava@gmail.com" }
+]
+keywords = [
+    "penetration-testing",
+    "security",
+    "llm",
+    "agent",
+    "langgraph",
+    "web-application-security",
+    "autonomous-agent",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = [
     "langchain>=1.2",
     "langgraph>=0.4",
@@ -32,6 +54,11 @@ dependencies = [
     # Branded real-target penetration-test reports.
     "reportlab>=4.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Joloooo/swarm"
+Repository = "https://github.com/Joloooo/swarm"
+Issues = "https://github.com/Joloooo/swarm/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -65,5 +92,19 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
+
+# Keep the source distribution lean: ship only what a `pip install` needs.
+# The repo root also holds multi-GB artefacts (logs/, the xbow-validation/
+# submodule, benchmarks/) and the 135 MB wordlists/ tree — none of which
+# belong in a PyPI sdist (and wordlists are fetched by scripts/ on demand).
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+    "requirements.lock.txt",
+    "swarm-config.toml",
+]
 
 [tool.uv.sources]
